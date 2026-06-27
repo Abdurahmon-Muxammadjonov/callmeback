@@ -1,36 +1,38 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Procell Backend
 
-## Getting Started
+Express + Supabase backend (call audit, staff, analytics). Bu **faqat backend** loyihasi — frontend kodi yo'q.
 
-First, run the development server:
+## Ishga tushirish
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev      # tsx watch — development
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Server `http://localhost:5001` portida ishlaydi (`.env.local` dagi `PORT` orqali o'zgartiriladi).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Skriptlar
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Buyruq          | Vazifasi                                    |
+| --------------- | ------------------------------------------- |
+| `npm run dev`   | tsx watch bilan dev rejimda ishga tushirish |
+| `npm run build` | TypeScript → `dist/` ga kompilyatsiya       |
+| `npm start`     | `dist/server.js` ni ishga tushirish (prod)  |
+| `npm run lint`  | ESLint                                      |
 
-## Learn More
+## Tuzilma
 
-To learn more about Next.js, take a look at the following resources:
+```
+src/
+  server.ts        # Express ilova + barcha route'larni ulash
+  env.ts           # .env yuklash / tekshirish
+  lib/             # supabase klient, presence, realtime listener
+  routes/          # users, calls, analyze-call, analytics, managers, ...
+  types/           # umumiy TypeScript tiplari
+supabase/          # SQL migratsiyalar / schema
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Muhit o'zgaruvchilari
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`.env.local.template` dan nusxa olib `.env.local` yarating va to'ldiring
+(Supabase, OpenAI/Gemini kalitlari va h.k.).
