@@ -13,6 +13,7 @@ import analyticsRouter from './routes/analytics';
 import managementRouter from './routes/management';
 import notificationsRouter from './routes/notifications';
 import shiftsRouter from './routes/shifts';
+import crmRouter from './routes/crm';
 
 const app = express();
 
@@ -28,6 +29,7 @@ app.use('/analytics', analyticsRouter);
 app.use('/api/management', managementRouter);
 app.use('/manager-notifications', notificationsRouter);
 app.use('/shifts', shiftsRouter);
+app.use('/crm', crmRouter);
 
 // Server DOIM shu portda ishlaydi (boshqasiga "qochmaydi").
 const PORT = parseInt(process.env.PORT || '5001', 10);
