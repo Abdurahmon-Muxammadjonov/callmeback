@@ -64,10 +64,21 @@ router.post('/login', async (req: Request, res: Response) => {
 
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const { data: users, error } = await supabase
+    // Ixtiyoriy filtrlar:
+    //   ?role=user   → faqat xodimlar (direktor/admin ko'rinmaydi)
+    //   ?role=admin  → faqat direktorlar
+    //   ?exclude_role=admin → adminlardan boshqasi
+    const role = typeof req.query.role === 'string' ? req.query.role.trim() : '';
+    const excludeRole = typeof req.query.exclude_role === 'string' ? req.query.exclude_role.trim() : '';
+
+    let q = supabase
       .from('users')
       .select(PUBLIC_COLS)
       .order('created_at', { ascending: false });
+    if (role) q = q.eq('role', role);
+    if (excludeRole) q = q.neq('role', excludeRole);
+
+    const { data: users, error } = await q;
 
     if (error) {
       console.error('Error fetching users from Supabase:', error.message);
