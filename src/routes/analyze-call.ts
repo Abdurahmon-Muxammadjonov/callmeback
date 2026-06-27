@@ -759,9 +759,14 @@ interface PreparedCall {
   managerId: string;
 }
 
+// Shu jarayonda HOZIR tahlil qilinayotgan qo'ng'iroq id'lari.
+// Watchdog/recovery shu ro'yxatdagilarni "osilib qolgan" deb xato qayta ishlamasligi uchun.
+const inFlightCalls = new Set<string>();
+
 // Bitta batch qo'ng'irog'ini tahlil qilib, oldindan yaratilgan qatorni yangilaydi.
 // Bittasi yiqilsa — faqat o'sha 'failed' bo'ladi, qolganlariga ta'sir qilmaydi.
 async function processOneBatchCall(supabase: SupabaseClient, prep: PreparedCall, extraRules: string): Promise<void> {
+  inFlightCalls.add(prep.callId);
   try {
     const audit = await auditCallWithGemini({ audioUrl: prep.audioUrl }, extraRules);
     const { error: upErr } = await supabase
@@ -781,6 +786,8 @@ async function processOneBatchCall(supabase: SupabaseClient, prep: PreparedCall,
       .update({ status: 'failed', error: (e as Error).message.slice(0, 500) })
       .eq('id', prep.callId)
       .then(undefined, () => {});
+  } finally {
+    inFlightCalls.delete(prep.callId);
   }
 }
 
@@ -792,6 +799,67 @@ async function processBatchInBackground(supabase: SupabaseClient, prepared: Prep
     console.log(`Batch tugadi: ${prepared.length} ta qo'ng'iroq tahlil qilindi.`);
   } catch (e) {
     console.error('Batch background error:', (e as Error).message);
+  }
+}
+
+// ===================== RECOVERY (qayta tiklash) =====================
+// Server qayta ishga tushganda yoki davriy (watchdog) ravishda: 'processing' da
+// osilib qolgan (restart/deploy natijasida tashlab ketilgan) va ixtiyoriy ravishda
+// 'failed' qo'ng'iroqlarni qayta tahlilga qo'yadi. Shu tufayli CRM batch'i yarim
+// qolsa ham hech bir qo'ng'iroq YO'QOLMAYDI — 100% qayta ishlanadi.
+const STALE_PROCESSING_MS = 3 * 60 * 1000; // 3 daqiqadan ko'p 'processing' = osilib qolgan deb hisoblaymiz
+
+let recoveryRunning = false; // bir vaqtda faqat bitta recovery yurishi uchun
+
+export async function recoverStuckCalls(opts: { includeFailed?: boolean } = {}): Promise<{ recovered: number; ids: string[] }> {
+  if (recoveryRunning) return { recovered: 0, ids: [] };
+  recoveryRunning = true;
+  try {
+    let supabase: SupabaseClient;
+    try {
+      supabase = getSupabaseAdmin();
+    } catch {
+      return { recovered: 0, ids: [] }; // env yo'q — jim chiqamiz
+    }
+
+    const staleBefore = new Date(Date.now() - STALE_PROCESSING_MS).toISOString();
+    const staleProcessing = `and(status.eq.processing,created_at.lt.${staleBefore})`;
+    const orFilter = opts.includeFailed ? `status.eq.failed,${staleProcessing}` : staleProcessing;
+
+    const { data, error } = await supabase
+      .from('calls')
+      .select('id, audio_url, manager_id')
+      .or(orFilter)
+      .not('audio_url', 'is', null)
+      .limit(200);
+    if (error) {
+      console.error('recoverStuckCalls query failed:', error.message);
+      return { recovered: 0, ids: [] };
+    }
+
+    const prepared: PreparedCall[] = (data || [])
+      // audio_url o'qiladigan bo'lsin, manager bog'langan bo'lsin, va shu jarayonda
+      // hozir ishlanayotgan bo'lmasin (dublikat ishlovni oldini olamiz).
+      .filter((r: any) => typeof r.audio_url === 'string' && isValidHttpUrl(r.audio_url) && r.manager_id && !inFlightCalls.has(r.id))
+      .map((r: any) => ({ callId: r.id, audioUrl: r.audio_url, managerId: r.manager_id }));
+
+    if (prepared.length === 0) return { recovered: 0, ids: [] };
+
+    const ids = prepared.map((p) => p.callId);
+    // Idempotentlik: qayta tahlildan oldin eski bog'liq yozuvlarni tozalaymiz (dublikat bo'lmasin).
+    await Promise.allSettled([
+      supabase.from('conversions').delete().in('call_id', ids),
+      supabase.from('lost_reasons').delete().in('call_id', ids),
+      supabase.from('call_criteria_scores').delete().in('call_id', ids),
+    ]);
+    // Qayta ishlash uchun belgilaymiz (status processing, eski xatoni tozalaymiz).
+    await supabase.from('calls').update({ status: 'processing', error: null }).in('id', ids);
+
+    console.log(`recoverStuckCalls: ${prepared.length} ta qo'ng'iroq qayta tahlilga qo'yildi.`);
+    void processBatchInBackground(supabase, prepared);
+    return { recovered: prepared.length, ids };
+  } finally {
+    recoveryRunning = false;
   }
 }
 
@@ -871,6 +939,17 @@ async function handleBatch(items: BatchCallItem[], supabase: SupabaseClient): Pr
     },
   };
 }
+
+// Qo'lda qayta tiklash: osilib qolgan 'processing' + 'failed' qo'ng'iroqlarni qayta tahlilga qo'yadi.
+// Frontend "Qayta urinish" tugmasi yoki CRM webhook shuni chaqirishi mumkin.
+router.post('/recover', async (_req: Request, res: Response) => {
+  try {
+    const out = await recoverStuckCalls({ includeFailed: true });
+    return res.status(200).json({ success: true, ...out });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e?.message || 'recover failed' });
+  }
+});
 
 router.post('/', upload.single('audio'), async (req: Request, res: Response) => {
   try {

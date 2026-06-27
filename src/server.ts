@@ -5,7 +5,7 @@ import cors from 'cors';
 import { execSync } from 'node:child_process';
 
 import usersRouter from './routes/users';
-import analyzeCallRouter from './routes/analyze-call';
+import analyzeCallRouter, { recoverStuckCalls } from './routes/analyze-call';
 import managersRouter from './routes/managers';
 import criteriaRouter from './routes/criteria';
 import callsRouter from './routes/calls';
@@ -54,6 +54,20 @@ function freePort(port: number): void {
 function startServer(port: number, isRetry = false): void {
   const server = app.listen(port, () => {
     console.log(`⚡ server is running in ${port} port`);
+
+    // Restart/deploy natijasida 'processing' da osilib qolgan qo'ng'iroqlarni qayta tiklash.
+    // CRM batch'i yarim qolib server qayta ishga tushsa ham — qo'ng'iroqlar yo'qolmaydi.
+    recoverStuckCalls()
+      .then((r) => { if (r.recovered) console.log(`♻️  ${r.recovered} ta osilib qolgan qo'ng'iroq qayta tahlilga qo'yildi.`); })
+      .catch((e) => console.error('Boot recovery failed:', e?.message));
+
+    // Watchdog — har 5 daqiqada osilib qolgan 'processing' larni tekshiradi
+    // (fon loop jim o'lib qolsa ham qo'ng'iroqlar tiklanadi).
+    const watchdog = setInterval(() => {
+      recoverStuckCalls().catch((e) => console.error('Watchdog recovery failed:', e?.message));
+    }, 5 * 60 * 1000);
+    watchdog.unref(); // process'ni tirik ushlab turmasin
+
     // Realtime listener — ixtiyoriy (REALTIME_LISTENER=true bo'lsa yoqiladi).
     if (process.env.REALTIME_LISTENER === 'true') {
       import('./lib/realtime-listener')
