@@ -22,10 +22,16 @@ create table if not exists public.crm_accounts (
   access_token  text,
   refresh_token text,
   expires_at    timestamptz,    -- access_token amal qilish muddati
+  webhook_url   text,           -- PBX webhook manzili (simple ulanish uchun)
+  api_key       text,           -- PBX webhook API key (simple ulanish uchun)
   last_sync     timestamptz,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
 );
+
+-- Eski bazalarda ham simple ulanish ustunlari bo'lishi uchun (idempotent).
+alter table public.crm_accounts add column if not exists webhook_url text;
+alter table public.crm_accounts add column if not exists api_key text;
 
 -- Service-role kalit RLS'ni aylanib o'tadi; aniqlik uchun o'chiramiz.
 alter table public.crm_accounts disable row level security;

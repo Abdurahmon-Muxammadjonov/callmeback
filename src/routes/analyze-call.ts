@@ -747,11 +747,12 @@ async function runWithConcurrency<T>(
 }
 
 // ===================== BATCH (fon rejim) =====================
-interface BatchCallItem {
+export interface BatchCallItem {
   audio_url?: string;
   manager_id?: string;
   manager_name?: string;
   platform_id?: string;
+  crm_id?: string;
 }
 interface PreparedCall {
   callId: string;
@@ -865,7 +866,7 @@ export async function recoverStuckCalls(opts: { includeFailed?: boolean } = {}):
 
 // Batch payload'ni validatsiya qilib, qatorlarni 'processing' bilan yaratadi va
 // 202 javob uchun ma'lumot qaytaradi. Tahlil fon rejimida davom etadi.
-async function handleBatch(items: BatchCallItem[], supabase: SupabaseClient): Promise<{ status: number; body: any }> {
+export async function enqueueBatchCalls(items: BatchCallItem[], supabase: SupabaseClient): Promise<{ status: number; body: any }> {
   if (!Array.isArray(items) || items.length === 0) {
     return { status: 400, body: { success: false, error: 'calls bo\'sh massiv bo\'lmasligi kerak.' } };
   }
@@ -873,20 +874,22 @@ async function handleBatch(items: BatchCallItem[], supabase: SupabaseClient): Pr
     return { status: 400, body: { success: false, error: 'Bir batch\'da maksimal 200 ta qo\'ng\'iroq.' } };
   }
 
-  // CRM xodim ismlarini oldindan menejerga aylantirib qo'yamiz (avtomatik yaratiladi).
   const nameMap = new Map<string, string>();
   for (const nm of new Set(items.map((it) => (it?.manager_name || '').trim()).filter(Boolean))) {
     const m = await getOrCreateManagerByName(supabase, nm);
     nameMap.set(nm, m.id);
   }
-  // Default menejer faqat na manager_id, na manager_name bor item bo'lsa kerak.
+
   let defaultManager: { id: string } | null = null;
   if (items.some((it) => !it?.manager_id && !(it?.manager_name || '').trim())) {
     defaultManager = await getOrCreateDefaultManager(supabase);
   }
 
-  const rows: Array<{ manager_id: string; audio_url: string; status: string; platform_id?: string }> = [];
-  const meta: Array<{ audioUrl: string; managerId: string }> = [];
+  const candidates: Array<{
+    index: number;
+    row: { manager_id: string; audio_url: string; status: string; platform_id?: string; crm_id?: string };
+    meta: { audioUrl: string; managerId: string };
+  }> = [];
   const skipped: Array<{ index: number; error: string }> = [];
 
   items.forEach((it, i) => {
@@ -894,20 +897,57 @@ async function handleBatch(items: BatchCallItem[], supabase: SupabaseClient): Pr
       skipped.push({ index: i, error: 'audio_url yaroqsiz' });
       return;
     }
+
     let mid = it.manager_id;
     if (mid && !isValidUUID(mid)) {
       skipped.push({ index: i, error: 'manager_id yaroqsiz UUID' });
       return;
     }
+
     if (!mid && (it.manager_name || '').trim()) mid = nameMap.get((it.manager_name as string).trim());
     if (!mid) mid = defaultManager!.id;
-    const row: { manager_id: string; audio_url: string; status: string; platform_id?: string } = {
-      manager_id: mid, audio_url: it.audio_url, status: 'processing',
+
+    const crmId = typeof it.crm_id === 'string' ? it.crm_id.trim() : '';
+    if (it.crm_id !== undefined && !crmId) {
+      skipped.push({ index: i, error: 'crm_id bo\'sh bo\'lmasligi kerak' });
+      return;
+    }
+
+    const row: { manager_id: string; audio_url: string; status: string; platform_id?: string; crm_id?: string } = {
+      manager_id: mid,
+      audio_url: it.audio_url,
+      status: 'processing',
     };
     if (it.platform_id) row.platform_id = it.platform_id;
-    rows.push(row);
-    meta.push({ audioUrl: it.audio_url, managerId: mid });
+    if (crmId) row.crm_id = crmId;
+
+    candidates.push({ index: i, row, meta: { audioUrl: it.audio_url, managerId: mid } });
   });
+
+  const crmIds = candidates
+    .map((c) => c.row.crm_id)
+    .filter((v): v is string => typeof v === 'string' && v.length > 0);
+
+  if (crmIds.length > 0) {
+    const { data: existed, error: existedErr } = await supabase
+      .from('calls')
+      .select('crm_id')
+      .in('crm_id', crmIds);
+    if (existedErr) {
+      return { status: 500, body: { success: false, error: `Database Error: ${existedErr.message}` } };
+    }
+
+    const existedSet = new Set((existed || []).map((r: any) => String(r.crm_id)));
+    for (const c of candidates) {
+      if (c.row.crm_id && existedSet.has(c.row.crm_id)) {
+        skipped.push({ index: c.index, error: `crm_id allaqachon mavjud (${c.row.crm_id})` });
+      }
+    }
+  }
+
+  const skippedIndexes = new Set(skipped.map((s) => s.index));
+  const rows = candidates.filter((c) => !skippedIndexes.has(c.index)).map((c) => c.row);
+  const meta = candidates.filter((c) => !skippedIndexes.has(c.index)).map((c) => c.meta);
 
   if (rows.length === 0) {
     return { status: 400, body: { success: false, error: 'Hech qanday yaroqli qo\'ng\'iroq topilmadi.', skipped } };
@@ -924,7 +964,6 @@ async function handleBatch(items: BatchCallItem[], supabase: SupabaseClient): Pr
     managerId: meta[k].managerId,
   }));
 
-  // Fon rejimida tahlil — HTTP javobini bloklamaydi.
   void processBatchInBackground(supabase, prepared);
 
   return {
@@ -966,7 +1005,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
 
     // ===== BATCH REJIM: body.calls = [{audio_url, manager_id}, ...] → 202 + fon =====
     if (Array.isArray(req.body?.calls)) {
-      const out = await handleBatch(req.body.calls, supabase);
+      const out = await enqueueBatchCalls(req.body.calls, supabase);
       return res.status(out.status).json(out.body);
     }
 

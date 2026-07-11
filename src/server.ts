@@ -13,7 +13,7 @@ import analyticsRouter from './routes/analytics';
 import managementRouter from './routes/management';
 import notificationsRouter from './routes/notifications';
 import shiftsRouter from './routes/shifts';
-import crmRouter from './routes/crm';
+import crmRouter, { runScheduledCrmSync } from './routes/crm';
 
 const app = express();
 
@@ -69,6 +69,17 @@ function startServer(port: number, isRetry = false): void {
       recoverStuckCalls().catch((e) => console.error('Watchdog recovery failed:', e?.message));
     }, 5 * 60 * 1000);
     watchdog.unref(); // process'ni tirik ushlab turmasin
+
+    // amoCRM davriy sync — ulangan bo'lsa menejerlarni avtomatik yangilab turadi.
+    // CRM_SYNC_MINUTES=0 bo'lsa o'chiriladi (default 10 daqiqa).
+    const crmSyncMin = parseInt(process.env.CRM_SYNC_MINUTES || '10', 10);
+    if (crmSyncMin > 0) {
+      runScheduledCrmSync().catch(() => {}); // boot'da bir marta
+      const crmCron = setInterval(() => {
+        runScheduledCrmSync().catch((e) => console.error('CRM cron failed:', e?.message));
+      }, crmSyncMin * 60 * 1000);
+      crmCron.unref();
+    }
 
     // Realtime listener — ixtiyoriy (REALTIME_LISTENER=true bo'lsa yoqiladi).
     if (process.env.REALTIME_LISTENER === 'true') {
