@@ -114,6 +114,56 @@ router.post('/connect-simple', async (req: Request, res: Response) => {
   }
 });
 
+// POST /crm/test-connection
+// Body: { webhook_url, api_key }
+// Test PBX ulanishni: webhook'ga test request yubor va javobni tekshir.
+router.post('/test-connection', async (req: Request, res: Response) => {
+  try {
+    const webhookUrl = typeof req.body?.webhook_url === 'string' ? req.body.webhook_url.trim() : '';
+    const apiKey = typeof req.body?.api_key === 'string' ? req.body.api_key.trim() : '';
+
+    if (!webhookUrl || !apiKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'webhook_url va api_key talab qilinadi',
+      });
+    }
+
+    if (!isValidHttpUrl(webhookUrl)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Webhook URL noto\'g\'ri formatda',
+      });
+    }
+
+    const testResponse = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': apiKey,
+      },
+      body: JSON.stringify({ test: true }),
+    });
+
+    if (!testResponse.ok) {
+      return res.status(400).json({
+        success: false,
+        error: `PBX javob berdi: ${testResponse.status} ${testResponse.statusText}`,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'PBX ulanish muvaffaqiyatli ✓',
+    });
+  } catch (e: any) {
+    return res.status(400).json({
+      success: false,
+      error: 'PBX\'ga ulanib bo\'lmadi: ' + (e instanceof Error ? e.message : 'Noto\'g\'ri URL yoki server mavjud emas'),
+    });
+  }
+});
+
 // POST /crm/webhook/pbx
 // PBX eventlarini qabul qiladi, qo'ng'iroqlarni background Gemini tahliliga yuboradi.
 router.post('/webhook/pbx', async (req: Request, res: Response) => {
