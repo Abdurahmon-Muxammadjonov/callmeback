@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { connect, getUsers, getStatus, markSynced } from '../lib/amocrm';
 import { enqueueBatchCalls, type BatchCallItem } from './analyze-call';
 import { randomUUID } from 'node:crypto';
+import { runPbxHistorySync } from '../scripts/sync-pbx-history';
 
 const router = Router();
 const CRM_ACCOUNT_ID = 'amocrm';
@@ -22,6 +23,14 @@ function getApiKeyFromRequest(req: Request): string {
   const auth = typeof req.headers.authorization === 'string' ? req.headers.authorization.trim() : '';
   if (auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim();
   return typeof req.body?.api_key === 'string' ? req.body.api_key.trim() : '';
+}
+
+function getAdminSyncTokenFromRequest(req: Request): string {
+  const fromHeader = typeof req.headers['x-admin-sync-token'] === 'string' ? req.headers['x-admin-sync-token'].trim() : '';
+  if (fromHeader) return fromHeader;
+  const auth = typeof req.headers.authorization === 'string' ? req.headers.authorization.trim() : '';
+  if (auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim();
+  return typeof req.body?.admin_token === 'string' ? req.body.admin_token.trim() : '';
 }
 
 function pickString(obj: any, keys: string[]): string {
@@ -382,6 +391,41 @@ router.post('/webhook/pbx', async (req: Request, res: Response) => {
     });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e?.message || 'PBX webhook xatosi.' });
+  }
+});
+
+// POST /crm/admin/sync-calls
+// Bir martalik tarixiy sync (PBX history -> storage -> calls).
+// Himoya: ADMIN_SYNC_TOKEN env va x-admin-sync-token header.
+router.post('/admin/sync-calls', async (req: Request, res: Response) => {
+  try {
+    const expectedToken = (process.env.ADMIN_SYNC_TOKEN || '').trim();
+    if (!expectedToken) {
+      return res.status(500).json({ success: false, error: 'ADMIN_SYNC_TOKEN sozlanmagan.' });
+    }
+
+    const providedToken = getAdminSyncTokenFromRequest(req);
+    if (!providedToken || providedToken !== expectedToken) {
+      return res.status(401).json({ success: false, error: 'Admin token noto\'g\'ri.' });
+    }
+
+    const weeks = Number(req.body?.weeks ?? req.query?.weeks ?? 0) || undefined;
+    const months = Number(req.body?.months ?? req.query?.months ?? 0) || undefined;
+    const from = typeof (req.body?.from ?? req.query?.from) === 'string' ? String(req.body?.from ?? req.query?.from) : undefined;
+    const to = typeof (req.body?.to ?? req.query?.to) === 'string' ? String(req.body?.to ?? req.query?.to) : undefined;
+    const limit = Number(req.body?.limit ?? req.query?.limit ?? 0) || undefined;
+    const maxPages = Number(req.body?.max_pages ?? req.query?.max_pages ?? 0) || undefined;
+
+    const result = await runPbxHistorySync({ weeks, months, from, to, limit, maxPages });
+    await markSynced();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Tarixiy call sync yakunlandi.',
+      result,
+    });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e?.message || 'Tarixiy sync xatosi.' });
   }
 });
 
