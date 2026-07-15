@@ -753,6 +753,15 @@ export interface BatchCallItem {
   manager_name?: string;
   platform_id?: string;
   crm_id?: string;
+  pbx_call_id?: string;
+  direction?: 'incoming' | 'outgoing' | 'unknown';
+  client_id?: string;
+  client_name?: string;
+  client_phone?: string;
+  audio_source_url?: string;
+  audio_storage_url?: string;
+  audio_storage_path?: string;
+  call_status?: string;
 }
 interface PreparedCall {
   callId: string;
@@ -887,7 +896,21 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
 
   const candidates: Array<{
     index: number;
-    row: { manager_id: string; audio_url: string; status: string; platform_id?: string; crm_id?: string };
+    row: {
+      manager_id: string;
+      audio_url: string;
+      status: string;
+      platform_id?: string;
+      crm_id?: string;
+      pbx_call_id?: string;
+      direction?: 'incoming' | 'outgoing' | 'unknown';
+      client_id?: string;
+      client_name?: string;
+      client_phone?: string;
+      audio_source_url?: string;
+      audio_storage_url?: string;
+      audio_storage_path?: string;
+    };
     meta: { audioUrl: string; managerId: string };
   }> = [];
   const skipped: Array<{ index: number; error: string }> = [];
@@ -913,13 +936,35 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
       return;
     }
 
-    const row: { manager_id: string; audio_url: string; status: string; platform_id?: string; crm_id?: string } = {
+    const row: {
+      manager_id: string;
+      audio_url: string;
+      status: string;
+      platform_id?: string;
+      crm_id?: string;
+      pbx_call_id?: string;
+      direction?: 'incoming' | 'outgoing' | 'unknown';
+      client_id?: string;
+      client_name?: string;
+      client_phone?: string;
+      audio_source_url?: string;
+      audio_storage_url?: string;
+      audio_storage_path?: string;
+    } = {
       manager_id: mid,
       audio_url: it.audio_url,
       status: 'processing',
     };
     if (it.platform_id) row.platform_id = it.platform_id;
     if (crmId) row.crm_id = crmId;
+    if (it.pbx_call_id) row.pbx_call_id = it.pbx_call_id;
+    row.direction = it.direction || 'unknown';
+    if (it.client_id) row.client_id = it.client_id;
+    if (it.client_name) row.client_name = it.client_name;
+    if (it.client_phone) row.client_phone = it.client_phone;
+    if (it.audio_source_url) row.audio_source_url = it.audio_source_url;
+    if (it.audio_storage_url) row.audio_storage_url = it.audio_storage_url;
+    if (it.audio_storage_path) row.audio_storage_path = it.audio_storage_path;
 
     candidates.push({ index: i, row, meta: { audioUrl: it.audio_url, managerId: mid } });
   });

@@ -11,6 +11,15 @@ create unique index if not exists uq_managers_crm_id on public.managers(crm_id);
 
 alter table public.calls add column if not exists crm_id text;
 create unique index if not exists uq_calls_crm_id on public.calls(crm_id);
+alter table public.calls add column if not exists pbx_call_id text;
+alter table public.calls add column if not exists direction text not null default 'unknown'
+  check (direction in ('incoming','outgoing','unknown'));
+alter table public.calls add column if not exists client_id uuid references public.users(id) on delete set null;
+alter table public.calls add column if not exists client_name text;
+alter table public.calls add column if not exists client_phone text;
+alter table public.calls add column if not exists audio_source_url text;
+alter table public.calls add column if not exists audio_storage_url text;
+alter table public.calls add column if not exists audio_storage_path text;
 
 -- 2) amoCRM OAuth hisobi (bitta qator, id='amocrm'). Service-role bilan ishlanadi.
 create table if not exists public.crm_accounts (

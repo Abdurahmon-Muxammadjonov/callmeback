@@ -45,6 +45,14 @@ alter table public.calls add column if not exists kpi_score      integer       n
 alter table public.calls add column if not exists penalty_amount numeric(12,2) not null default 0;
 alter table public.calls add column if not exists bonus_amount   numeric(12,2) not null default 0;
 alter table public.calls add column if not exists rop_comment    text          not null default 'Izoh yoq';
+alter table public.calls add column if not exists pbx_call_id    text;
+alter table public.calls add column if not exists direction      text not null default 'unknown'
+  check (direction in ('incoming','outgoing','unknown'));
+alter table public.calls add column if not exists client_name    text;
+alter table public.calls add column if not exists client_phone   text;
+alter table public.calls add column if not exists audio_source_url  text;
+alter table public.calls add column if not exists audio_storage_url text;
+alter table public.calls add column if not exists audio_storage_path text;
 
 create index if not exists idx_calls_manager_id on public.calls(manager_id);
 create index if not exists idx_calls_created_at on public.calls(created_at desc);
@@ -104,6 +112,9 @@ create table if not exists public.users (
 
 -- Eski users jadvaliga password_hash ustunini qo'shish (idempotent)
 alter table public.users add column if not exists password_hash text;
+
+-- calls -> users bog'lanishi (mijoz o'chirilsa ham qo'ng'iroq tarixi saqlanadi)
+alter table public.calls add column if not exists client_id uuid references public.users(id) on delete set null;
 
 -- =====================================================
 -- updated_at trigger for managers

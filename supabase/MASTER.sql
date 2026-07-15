@@ -67,6 +67,14 @@ alter table public.calls add column if not exists final_agreement     text;
 alter table public.calls add column if not exists next_steps          jsonb not null default '[]'::jsonb;
 alter table public.calls add column if not exists status              text not null default 'done';
 alter table public.calls add column if not exists error               text;
+alter table public.calls add column if not exists pbx_call_id         text;
+alter table public.calls add column if not exists direction           text not null default 'unknown'
+  check (direction in ('incoming','outgoing','unknown'));
+alter table public.calls add column if not exists client_name         text;
+alter table public.calls add column if not exists client_phone        text;
+alter table public.calls add column if not exists audio_source_url    text;
+alter table public.calls add column if not exists audio_storage_url   text;
+alter table public.calls add column if not exists audio_storage_path  text;
 alter table public.calls add column if not exists platform_id         text references public.platforms(id) on delete set null;
 alter table public.calls add column if not exists bad_lead            boolean not null default false;
 alter table public.calls add column if not exists dropped_reason      text;
@@ -134,6 +142,9 @@ alter table public.users add column if not exists shift_end              text;
 alter table public.users add column if not exists credentials_changed_at timestamptz;
 -- XAVFSIZLIK: ochiq parol saqlanmaydi — agar bo'lsa, butunlay o'chiramiz.
 alter table public.users drop column if exists password_plain;
+
+-- calls -> users bog'lanishi (mijoz o'chirilsa ham qo'ng'iroq tarixi saqlanadi)
+alter table public.calls add column if not exists client_id uuid references public.users(id) on delete set null;
 
 create table if not exists public.user_scripts (
   id uuid primary key default gen_random_uuid(),
