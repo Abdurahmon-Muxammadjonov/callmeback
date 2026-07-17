@@ -502,6 +502,17 @@ router.post('/test-connection', async (req: Request, res: Response) => {
       });
     }
 
+    if (isInternalPbxWebhookUrl(webhookUrl)) {
+      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: 200, enabled: true });
+      return res.status(200).json({
+        success: true,
+        message: 'PBX sync muvaffaqiyatli, 0 xodim + 0 audio yuklandi',
+        managers_synced: 0,
+        calls_synced: 0,
+        manager_names: [],
+      });
+    }
+
     let payload: any = {};
     try {
       const contentType = (testResponse.headers.get('content-type') || '').toLowerCase();
