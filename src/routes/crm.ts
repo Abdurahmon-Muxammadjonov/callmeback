@@ -359,10 +359,10 @@ router.get('/status', async (_req: Request, res: Response) => {
   try {
     const cfg = await loadLatestPbxIntegration({ onlyEnabled: true });
     const connected = !!cfg?.webhook_url && !!cfg?.api_key;
-    console.log('[crm/status] connected=', connected, 'enabled=', cfg?.enabled ?? null, 'hasWebhook=', !!cfg?.webhook_url);
+    console.log('[pbx/status] connected=', connected, 'enabled=', cfg?.enabled ?? null, 'hasWebhook=', !!cfg?.webhook_url);
     return res.status(200).json({ connected });
   } catch (e: any) {
-    console.log('[crm/status] connected=false reason=', e?.message || e);
+    console.log('[pbx/status] connected=false reason=', e?.message || e);
     return res.status(200).json({ connected: false });
   }
 });
@@ -435,14 +435,21 @@ router.post('/test-connection', async (req: Request, res: Response) => {
           'x-api-key': apiKey,
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ test: true, source: 'salespulse', api_key: apiKey }),
+        body: JSON.stringify({ test: true, source: 'salespulse', api_key: apiKey, timestamp: new Date().toISOString() }),
         signal: abortController.signal,
       });
     } finally {
       clearTimeout(timeoutId);
     }
 
-    console.log('[crm/test-connection] upstream status=', testResponse.status, testResponse.statusText, 'url=', webhookUrl);
+    console.log('[pbx/test-connection] upstream status=', testResponse.status, testResponse.statusText, 'url=', webhookUrl);
+
+    if (testResponse.status === 404) {
+      return res.status(200).json({
+        success: false,
+        error: `Route topilmadi (404): ${webhookUrl}. URL yoki endpoint yo\'li noto\'g\'ri.`,
+      });
+    }
 
     if (testResponse.status === 401 || testResponse.status === 403) {
       return res.status(200).json({
