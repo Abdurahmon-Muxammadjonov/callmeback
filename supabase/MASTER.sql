@@ -38,6 +38,8 @@ update public.managers set platform_id='core' where platform_id is null;
 create index if not exists idx_managers_status   on public.managers(status);
 create index if not exists idx_managers_platform on public.managers(platform_id);
 create index if not exists idx_managers_tenant   on public.managers(tenant_id);
+alter table public.managers add column if not exists pbx_id text;
+create unique index if not exists uq_managers_pbx_id on public.managers(pbx_id);
 
 -- ===== calls =====
 create table if not exists public.calls (
@@ -68,6 +70,7 @@ alter table public.calls add column if not exists next_steps          jsonb not 
 alter table public.calls add column if not exists status              text not null default 'done';
 alter table public.calls add column if not exists error               text;
 alter table public.calls add column if not exists pbx_call_id         text;
+alter table public.calls add column if not exists pbx_id              text;
 alter table public.calls add column if not exists direction           text not null default 'unknown'
   check (direction in ('incoming','outgoing','unknown'));
 alter table public.calls add column if not exists client_name         text;
@@ -83,6 +86,7 @@ create index if not exists idx_calls_manager_id on public.calls(manager_id);
 create index if not exists idx_calls_created_at on public.calls(created_at desc);
 create index if not exists idx_calls_status     on public.calls(status);
 create index if not exists idx_calls_platform   on public.calls(platform_id);
+create unique index if not exists uq_calls_pbx_id on public.calls(pbx_id);
 
 -- ===== conversions / lost_reasons / call_criteria_scores =====
 create table if not exists public.conversions (
@@ -161,6 +165,20 @@ create table if not exists public.user_notifications (
   created_at timestamptz not null default now()
 );
 create index if not exists idx_user_notif_user on public.user_notifications(user_id, read);
+
+-- ===== crm_integrations (PBX simple settings) =====
+create table if not exists public.crm_integrations (
+  id               uuid primary key default gen_random_uuid(),
+  webhook_url      text not null,
+  api_key          text not null,
+  enabled          boolean not null default true,
+  last_test_status integer,
+  last_test_at     timestamptz,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now()
+);
+create index if not exists idx_crm_integrations_updated_at
+  on public.crm_integrations(updated_at desc);
 
 create table if not exists public.shift_events (
   id uuid primary key default gen_random_uuid(),

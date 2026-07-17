@@ -19,6 +19,8 @@ create table if not exists public.managers (
 );
 
 create index if not exists idx_managers_status on public.managers(status);
+alter table public.managers add column if not exists pbx_id text;
+create unique index if not exists uq_managers_pbx_id on public.managers(pbx_id);
 
 -- =====================================================
 -- calls  (backend analyze-call kodi yozadigan barcha ustunlar bilan)
@@ -46,6 +48,7 @@ alter table public.calls add column if not exists penalty_amount numeric(12,2) n
 alter table public.calls add column if not exists bonus_amount   numeric(12,2) not null default 0;
 alter table public.calls add column if not exists rop_comment    text          not null default 'Izoh yoq';
 alter table public.calls add column if not exists pbx_call_id    text;
+alter table public.calls add column if not exists pbx_id         text;
 alter table public.calls add column if not exists direction      text not null default 'unknown'
   check (direction in ('incoming','outgoing','unknown'));
 alter table public.calls add column if not exists client_name    text;
@@ -56,6 +59,7 @@ alter table public.calls add column if not exists audio_storage_path text;
 
 create index if not exists idx_calls_manager_id on public.calls(manager_id);
 create index if not exists idx_calls_created_at on public.calls(created_at desc);
+create unique index if not exists uq_calls_pbx_id on public.calls(pbx_id);
 
 -- Partial index that powers the daily KPI query
 create index if not exists idx_calls_kpi_lookup
@@ -115,6 +119,23 @@ alter table public.users add column if not exists password_hash text;
 
 -- calls -> users bog'lanishi (mijoz o'chirilsa ham qo'ng'iroq tarixi saqlanadi)
 alter table public.calls add column if not exists client_id uuid references public.users(id) on delete set null;
+
+-- =====================================================
+-- crm_integrations (PBX simple settings)
+-- =====================================================
+create table if not exists public.crm_integrations (
+  id               uuid primary key default gen_random_uuid(),
+  webhook_url      text not null,
+  api_key          text not null,
+  enabled          boolean not null default true,
+  last_test_status integer,
+  last_test_at     timestamptz,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now()
+);
+
+create index if not exists idx_crm_integrations_updated_at
+  on public.crm_integrations(updated_at desc);
 
 -- =====================================================
 -- updated_at trigger for managers

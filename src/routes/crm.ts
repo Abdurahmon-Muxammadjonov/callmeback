@@ -65,20 +65,9 @@ async function loadLatestPbxIntegration(options: { onlyEnabled?: boolean } = {})
     .order('updated_at', { ascending: false })
     .limit(1);
 
-  const filteredQuery = onlyEnabled ? query.eq('enabled', true) : query;
+  const targetQuery = onlyEnabled ? query.eq('enabled', true) : query;
 
-  const { data, error } = await withSchemaReloadRetry<PbxConfigRow | null>(() => supabase
-    .from('crm_integrations')
-    .select('id, enabled, webhook_url, api_key, updated_at')
-    .order('updated_at', { ascending: false })
-    .limit(1)
-    .maybeSingle());
-
-  if (onlyEnabled) {
-    const { data: enabledData, error: enabledError } = await withSchemaReloadRetry<PbxConfigRow | null>(() => filteredQuery.maybeSingle());
-    if (enabledError) throw new Error(`Database Error: ${enabledError.message}`);
-    return enabledData || null;
-  }
+  const { data, error } = await withSchemaReloadRetry<PbxConfigRow | null>(() => targetQuery.maybeSingle());
 
   if (error) throw new Error(`Database Error: ${error.message}`);
   return data || null;
@@ -255,6 +244,116 @@ function extractWebhookCalls(payload: any): BatchCallItem[] {
   return [];
 }
 
+function extractManagersFromPayload(payload: any): any[] {
+  if (Array.isArray(payload?.managers)) return payload.managers;
+  if (Array.isArray(payload?.users)) return payload.users;
+  if (Array.isArray(payload?.employees)) return payload.employees;
+  if (Array.isArray(payload?.operators)) return payload.operators;
+  return [];
+}
+
+function extractCallsFromPayload(payload: any): BatchCallItem[] {
+  if (!payload || typeof payload !== 'object') return [];
+  if (Array.isArray(payload?.calls)) return payload.calls.map(normalizeWebhookCall);
+  if (Array.isArray(payload?.records)) return payload.records.map(normalizeWebhookCall);
+  return [];
+}
+
+async function syncManagersFromPayload(managers: any[]): Promise<number> {
+  if (!Array.isArray(managers) || managers.length === 0) return 0;
+
+  let inserted = 0;
+  for (const item of managers) {
+    const name = pickString(item, ['name', 'manager_name', 'managerName', 'operator_name', 'employee_name', 'full_name', 'fullname']);
+    if (!name) continue;
+
+    const crmId = pickString(item, ['crm_id', 'crmId', 'manager_id', 'managerId', 'id', 'user_id', 'userId']);
+    try {
+      if (crmId) {
+        const { error } = await supabase
+          .from('managers')
+          .upsert({ crm_id: crmId, name }, { onConflict: 'crm_id' });
+        if (!error) inserted++;
+        continue;
+      }
+
+      const { data: existing, error: findError } = await supabase
+        .from('managers')
+        .select('id')
+        .eq('name', name)
+        .limit(1)
+        .maybeSingle();
+      if (findError) continue;
+      if (existing?.id) continue;
+
+      const { error: insertError } = await supabase
+        .from('managers')
+        .insert({ name });
+      if (!insertError) inserted++;
+    } catch {
+      continue;
+    }
+  }
+  return inserted;
+}
+
+async function syncCallsFromPayload(calls: BatchCallItem[], apiKey: string, webhookUrl: string): Promise<number> {
+  if (!Array.isArray(calls) || calls.length === 0) return 0;
+
+  const enrichedCalls: BatchCallItem[] = [];
+  for (let index = 0; index < calls.length; index++) {
+    const call = calls[index];
+    try {
+      const status = (call.call_status || '').toLowerCase();
+      if (status && ['started', 'ringing', 'in_progress', 'progress'].includes(status) && !call.audio_url) continue;
+
+      const callId = call.pbx_call_id || call.crm_id || '';
+      const sourceAudioUrl = call.audio_url
+        || (callId && webhookUrl && !isInternalPbxWebhookUrl(webhookUrl)
+          ? await resolveAudioUrlByCallId(callId, webhookUrl, apiKey)
+          : '');
+      if (!sourceAudioUrl) continue;
+
+      const persisted = await persistAudioToStorage(sourceAudioUrl, apiKey);
+
+      let mappedClientId = call.client_id;
+      let mappedClientName = call.client_name;
+      const phone = call.client_phone || '';
+      if (!mappedClientId && phone) {
+        const mapped = await findClientByPhone(phone);
+        if (mapped) {
+          mappedClientId = mapped.id;
+          mappedClientName = mappedClientName || mapped.name;
+        }
+      }
+
+      enrichedCalls.push({
+        ...call,
+        audio_url: persisted.publicUrl,
+        audio_source_url: sourceAudioUrl,
+        audio_storage_url: persisted.publicUrl,
+        audio_storage_path: persisted.path,
+        client_id: mappedClientId,
+        client_name: mappedClientName,
+        client_phone: phone || undefined,
+        pbx_call_id: callId || undefined,
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  if (enrichedCalls.length === 0) return 0;
+
+  const out = await enqueueBatchCalls(enrichedCalls, supabase);
+  if (out.status >= 500) throw new Error(out?.body?.error || 'Call sync xatosi.');
+  if (out.status === 202) {
+    await markSynced();
+    return Number(out?.body?.accepted_count || 0);
+  }
+  return 0;
+}
+
 // GET /crm/status — ulanish holati (OAuth + simple PBX webhook).
 router.get('/status', async (_req: Request, res: Response) => {
   try {
@@ -346,7 +445,10 @@ router.post('/test-connection', async (req: Request, res: Response) => {
     console.log('[crm/test-connection] upstream status=', testResponse.status, testResponse.statusText, 'url=', webhookUrl);
 
     if (testResponse.status === 401 || testResponse.status === 403) {
-      return res.status(200).json({ success: false, error: "Noto'g'ri API key" });
+      return res.status(200).json({
+        success: false,
+        error: "API key noto'g'ri yoki webhook autentifikatsiyasi muvaffaqiyatsiz",
+      });
     }
 
     if (!testResponse.ok) {
@@ -356,21 +458,37 @@ router.post('/test-connection', async (req: Request, res: Response) => {
       });
     }
 
+    let payload: any = {};
+    try {
+      const contentType = (testResponse.headers.get('content-type') || '').toLowerCase();
+      if (contentType.includes('application/json')) {
+        payload = await testResponse.json();
+      } else {
+        const text = await testResponse.text();
+        payload = text ? JSON.parse(text) : {};
+      }
+    } catch {
+      payload = {};
+    }
+
+    const managersInserted = await syncManagersFromPayload(extractManagersFromPayload(payload));
+    const callsInserted = await syncCallsFromPayload(extractCallsFromPayload(payload), apiKey, webhookUrl);
+
     return res.status(200).json({
       success: true,
-      message: 'PBX ulanish muvaffaqiyatli',
+      message: `PBX sync muvaffaqiyatli, ${managersInserted} xodim + ${callsInserted} audio yuklandi`,
     });
   } catch (e: any) {
     const isAbort = e?.name === 'AbortError';
     if (isAbort) {
-      return res.status(504).json({
+      return res.status(502).json({
         success: false,
-        error: `PBX ga ulanish timeout (${TEST_CONNECTION_TIMEOUT_MS}ms).`,
+        error: `PBX webhook'ga ulana olmadi: timeout (${TEST_CONNECTION_TIMEOUT_MS}ms)`,
       });
     }
     return res.status(502).json({
       success: false,
-      error: 'PBX\'ga ulanib bo\'lmadi: ' + (e instanceof Error ? e.message : 'Network xato'),
+      error: `PBX webhook'ga ulana olmadi: ${e instanceof Error ? e.message : 'network error'}`,
     });
   }
 });

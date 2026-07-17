@@ -8,10 +8,14 @@
 --    CRM'siz (qo'lda) menejer/qo'ng'iroqlar ham bemalol yashaydi.
 alter table public.managers add column if not exists crm_id text;
 create unique index if not exists uq_managers_crm_id on public.managers(crm_id);
+alter table public.managers add column if not exists pbx_id text;
+create unique index if not exists uq_managers_pbx_id on public.managers(pbx_id);
 
 alter table public.calls add column if not exists crm_id text;
 create unique index if not exists uq_calls_crm_id on public.calls(crm_id);
 alter table public.calls add column if not exists pbx_call_id text;
+alter table public.calls add column if not exists pbx_id text;
+create unique index if not exists uq_calls_pbx_id on public.calls(pbx_id);
 alter table public.calls add column if not exists direction text not null default 'unknown'
   check (direction in ('incoming','outgoing','unknown'));
 alter table public.calls add column if not exists client_id uuid references public.users(id) on delete set null;
@@ -42,8 +46,24 @@ create table if not exists public.crm_accounts (
 alter table public.crm_accounts add column if not exists webhook_url text;
 alter table public.crm_accounts add column if not exists api_key text;
 
+-- 3) Simple PBX integratsiya sozlamalari (frontend CRM settings uchun)
+create table if not exists public.crm_integrations (
+  id               uuid primary key default gen_random_uuid(),
+  webhook_url      text not null,
+  api_key          text not null,
+  enabled          boolean not null default true,
+  last_test_status integer,
+  last_test_at     timestamptz,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now()
+);
+
+create index if not exists idx_crm_integrations_updated_at
+  on public.crm_integrations(updated_at desc);
+
 -- Service-role kalit RLS'ni aylanib o'tadi; aniqlik uchun o'chiramiz.
 alter table public.crm_accounts disable row level security;
+alter table public.crm_integrations disable row level security;
 
 -- PostgREST schema cache'ni yangilash.
 notify pgrst, 'reload schema';
