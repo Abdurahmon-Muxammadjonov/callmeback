@@ -14,6 +14,8 @@ type PbxConfigRow = {
   enabled?: boolean | null;
   webhook_url?: string | null;
   api_key?: string | null;
+  last_test_status?: number | null;
+  last_test_at?: string | null;
   updated_at?: string | null;
 };
 
@@ -61,7 +63,7 @@ async function loadLatestPbxIntegration(options: { onlyEnabled?: boolean } = {})
   const onlyEnabled = options.onlyEnabled === true;
   const query = supabase
     .from('crm_integrations')
-    .select('id, enabled, webhook_url, api_key, updated_at')
+    .select('id, enabled, webhook_url, api_key, last_test_status, last_test_at, updated_at')
     .order('updated_at', { ascending: false })
     .limit(1);
 
@@ -71,6 +73,27 @@ async function loadLatestPbxIntegration(options: { onlyEnabled?: boolean } = {})
 
   if (error) throw new Error(`Database Error: ${error.message}`);
   return data || null;
+}
+
+async function saveIntegrationTestResult(params: {
+  webhookUrl: string;
+  apiKey: string;
+  statusCode: number;
+  enabled?: boolean;
+}): Promise<void> {
+  if (!params.webhookUrl || !params.apiKey) return;
+  const existing = await loadLatestPbxIntegration();
+  await withSchemaReloadRetry<null>(() => supabase
+    .from('crm_integrations')
+    .upsert({
+      id: existing?.id || randomUUID(),
+      webhook_url: params.webhookUrl,
+      api_key: params.apiKey,
+      enabled: params.enabled ?? true,
+      last_test_status: params.statusCode,
+      last_test_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'id' }));
 }
 
 function getApiKeyFromRequest(req: Request): string {
@@ -259,20 +282,29 @@ function extractCallsFromPayload(payload: any): BatchCallItem[] {
   return [];
 }
 
-async function syncManagersFromPayload(managers: any[]): Promise<number> {
-  if (!Array.isArray(managers) || managers.length === 0) return 0;
+async function syncManagersFromPayload(managers: any[]): Promise<{ count: number; names: string[] }> {
+  if (!Array.isArray(managers) || managers.length === 0) return { count: 0, names: [] };
+
+  const normalizeStatus = (raw: string): string => {
+    const value = raw.trim().toLowerCase();
+    if (value === 'active' || value === 'inactive' || value === 'on_leave' || value === 'flagged') return value;
+    return 'active';
+  };
 
   let inserted = 0;
+  const names = new Set<string>();
   for (const item of managers) {
     const name = pickString(item, ['name', 'manager_name', 'managerName', 'operator_name', 'employee_name', 'full_name', 'fullname']);
     if (!name) continue;
+    names.add(name);
 
-    const crmId = pickString(item, ['crm_id', 'crmId', 'manager_id', 'managerId', 'id', 'user_id', 'userId']);
+    const pbxId = pickString(item, ['pbx_id', 'pbxId', 'id', 'user_id', 'userId', 'manager_id', 'managerId']);
+    const status = normalizeStatus(pickString(item, ['status', 'state']));
     try {
-      if (crmId) {
+      if (pbxId) {
         const { error } = await supabase
           .from('managers')
-          .upsert({ crm_id: crmId, name }, { onConflict: 'crm_id' });
+          .upsert({ pbx_id: pbxId, name, status }, { onConflict: 'pbx_id' });
         if (!error) inserted++;
         continue;
       }
@@ -288,13 +320,13 @@ async function syncManagersFromPayload(managers: any[]): Promise<number> {
 
       const { error: insertError } = await supabase
         .from('managers')
-        .insert({ name });
+        .insert({ name, status });
       if (!insertError) inserted++;
     } catch {
       continue;
     }
   }
-  return inserted;
+  return { count: inserted, names: Array.from(names) };
 }
 
 async function syncCallsFromPayload(calls: BatchCallItem[], apiKey: string, webhookUrl: string): Promise<number> {
@@ -358,8 +390,8 @@ async function syncCallsFromPayload(calls: BatchCallItem[], apiKey: string, webh
 router.get('/status', async (_req: Request, res: Response) => {
   try {
     const cfg = await loadLatestPbxIntegration({ onlyEnabled: true });
-    const connected = !!cfg?.webhook_url && !!cfg?.api_key;
-    console.log('[pbx/status] connected=', connected, 'enabled=', cfg?.enabled ?? null, 'hasWebhook=', !!cfg?.webhook_url);
+    const connected = !!(cfg?.enabled && cfg?.last_test_status === 200 && cfg?.webhook_url && cfg?.api_key);
+    console.log('[pbx/status] connected=', connected, 'last_test_status=', cfg?.last_test_status ?? null, 'hasWebhook=', !!cfg?.webhook_url);
     return res.status(200).json({ connected });
   } catch (e: any) {
     console.log('[pbx/status] connected=false reason=', e?.message || e);
@@ -390,6 +422,8 @@ router.post('/connect-simple', async (req: Request, res: Response) => {
         webhook_url: webhookUrl,
         api_key: apiKey,
         enabled,
+        last_test_status: null,
+        last_test_at: null,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'id' }));
 
@@ -445,21 +479,24 @@ router.post('/test-connection', async (req: Request, res: Response) => {
     console.log('[pbx/test-connection] upstream status=', testResponse.status, testResponse.statusText, 'url=', webhookUrl);
 
     if (testResponse.status === 404) {
-      return res.status(200).json({
+      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: 404, enabled: true });
+      return res.status(404).json({
         success: false,
-        error: `Route topilmadi (404): ${webhookUrl}. URL yoki endpoint yo\'li noto\'g\'ri.`,
+        error: 'Webhook route topilmadi (404). URL noto\'g\'ri yoki backendda route yo\'q.',
       });
     }
 
     if (testResponse.status === 401 || testResponse.status === 403) {
-      return res.status(200).json({
+      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: testResponse.status, enabled: true });
+      return res.status(401).json({
         success: false,
         error: "API key noto'g'ri yoki webhook autentifikatsiyasi muvaffaqiyatsiz",
       });
     }
 
     if (!testResponse.ok) {
-      return res.status(200).json({
+      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: testResponse.status, enabled: true });
+      return res.status(400).json({
         success: false,
         error: `PBX javob berdi: ${testResponse.status} ${testResponse.statusText}`,
       });
@@ -478,22 +515,48 @@ router.post('/test-connection', async (req: Request, res: Response) => {
       payload = {};
     }
 
-    const managersInserted = await syncManagersFromPayload(extractManagersFromPayload(payload));
-    const callsInserted = await syncCallsFromPayload(extractCallsFromPayload(payload), apiKey, webhookUrl);
+    const managersPayload = extractManagersFromPayload(payload);
+    const callsPayload = extractCallsFromPayload(payload);
+    if (managersPayload.length === 0 && callsPayload.length === 0) {
+      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: 404, enabled: true });
+      return res.status(404).json({
+        success: false,
+        error: 'Webhook ishladi, lekin hech qanday managers yoki calls ma\'lumoti kelmadi. PBX response formatini tekshiring.',
+      });
+    }
+
+    const managersSync = await syncManagersFromPayload(managersPayload);
+    const callsInserted = await syncCallsFromPayload(callsPayload, apiKey, webhookUrl);
+    await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: 200, enabled: true });
 
     return res.status(200).json({
       success: true,
-      message: `PBX sync muvaffaqiyatli, ${managersInserted} xodim + ${callsInserted} audio yuklandi`,
+      message: `PBX sync muvaffaqiyatli, ${managersSync.count} xodim + ${callsInserted} audio yuklandi`,
+      managers_synced: managersSync.count,
+      calls_synced: callsInserted,
+      manager_names: managersSync.names,
     });
   } catch (e: any) {
     const isAbort = e?.name === 'AbortError';
     if (isAbort) {
-      return res.status(502).json({
+      await saveIntegrationTestResult({
+        webhookUrl: typeof req.body?.webhook_url === 'string' ? req.body.webhook_url.trim() : '',
+        apiKey: typeof req.body?.api_key === 'string' ? req.body.api_key.trim() : '',
+        statusCode: 408,
+        enabled: true,
+      }).catch(() => {});
+      return res.status(400).json({
         success: false,
         error: `PBX webhook'ga ulana olmadi: timeout (${TEST_CONNECTION_TIMEOUT_MS}ms)`,
       });
     }
-    return res.status(502).json({
+    await saveIntegrationTestResult({
+      webhookUrl: typeof req.body?.webhook_url === 'string' ? req.body.webhook_url.trim() : '',
+      apiKey: typeof req.body?.api_key === 'string' ? req.body.api_key.trim() : '',
+      statusCode: 0,
+      enabled: true,
+    }).catch(() => {});
+    return res.status(400).json({
       success: false,
       error: `PBX webhook'ga ulana olmadi: ${e instanceof Error ? e.message : 'network error'}`,
     });
