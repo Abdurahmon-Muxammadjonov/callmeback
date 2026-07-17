@@ -6,14 +6,15 @@ import { randomUUID } from 'node:crypto';
 import { runPbxHistorySync } from '../scripts/sync-pbx-history';
 
 const router = Router();
-const PBX_PROVIDER = 'pbx';
 const INTERNAL_PBX_WEBHOOK_PATH = '/crm/webhook/pbx';
+const TEST_CONNECTION_TIMEOUT_MS = 10000;
 
 type PbxConfigRow = {
   id?: string;
   enabled?: boolean | null;
   webhook_url?: string | null;
   api_key?: string | null;
+  updated_at?: string | null;
 };
 
 const isValidHttpUrl = (v: string) => {
@@ -56,12 +57,28 @@ function isInternalPbxWebhookUrl(value: string): boolean {
   }
 }
 
-async function loadPbxConfig(): Promise<PbxConfigRow | null> {
+async function loadLatestPbxIntegration(options: { onlyEnabled?: boolean } = {}): Promise<PbxConfigRow | null> {
+  const onlyEnabled = options.onlyEnabled === true;
+  const query = supabase
+    .from('crm_integrations')
+    .select('id, enabled, webhook_url, api_key, updated_at')
+    .order('updated_at', { ascending: false })
+    .limit(1);
+
+  const filteredQuery = onlyEnabled ? query.eq('enabled', true) : query;
+
   const { data, error } = await withSchemaReloadRetry<PbxConfigRow | null>(() => supabase
-    .from('crm_accounts')
-    .select('id, enabled, webhook_url, api_key')
-    .eq('provider', PBX_PROVIDER)
+    .from('crm_integrations')
+    .select('id, enabled, webhook_url, api_key, updated_at')
+    .order('updated_at', { ascending: false })
+    .limit(1)
     .maybeSingle());
+
+  if (onlyEnabled) {
+    const { data: enabledData, error: enabledError } = await withSchemaReloadRetry<PbxConfigRow | null>(() => filteredQuery.maybeSingle());
+    if (enabledError) throw new Error(`Database Error: ${enabledError.message}`);
+    return enabledData || null;
+  }
 
   if (error) throw new Error(`Database Error: ${error.message}`);
   return data || null;
@@ -241,10 +258,12 @@ function extractWebhookCalls(payload: any): BatchCallItem[] {
 // GET /crm/status — ulanish holati (OAuth + simple PBX webhook).
 router.get('/status', async (_req: Request, res: Response) => {
   try {
-    const cfg = await loadPbxConfig();
-    const connected = !!cfg?.webhook_url && cfg?.enabled !== false;
+    const cfg = await loadLatestPbxIntegration({ onlyEnabled: true });
+    const connected = !!cfg?.webhook_url && !!cfg?.api_key;
+    console.log('[crm/status] connected=', connected, 'enabled=', cfg?.enabled ?? null, 'hasWebhook=', !!cfg?.webhook_url);
     return res.status(200).json({ connected });
   } catch (e: any) {
+    console.log('[crm/status] connected=false reason=', e?.message || e);
     return res.status(200).json({ connected: false });
   }
 });
@@ -255,7 +274,7 @@ router.post('/connect-simple', async (req: Request, res: Response) => {
   try {
     const webhookUrl = typeof req.body?.webhook_url === 'string' ? req.body.webhook_url.trim() : '';
     const apiKey = typeof req.body?.api_key === 'string' ? req.body.api_key.trim() : '';
-    const enabled = typeof req.body?.enabled === 'boolean' ? req.body.enabled : true;
+    const enabled = true;
 
     if (!webhookUrl || !isValidHttpUrl(webhookUrl)) {
       return res.status(400).json({ success: false, error: '"webhook_url" yaroqli URL bo\'lishi kerak.' });
@@ -264,24 +283,20 @@ router.post('/connect-simple', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: '"api_key" majburiy.' });
     }
 
-    const existing = await loadPbxConfig();
+    const existing = await loadLatestPbxIntegration();
     const { error } = await withSchemaReloadRetry<null>(() => supabase
-      .from('crm_accounts')
+      .from('crm_integrations')
       .upsert({
         id: existing?.id || randomUUID(),
-        provider: PBX_PROVIDER,
         webhook_url: webhookUrl,
         api_key: apiKey,
         enabled,
         updated_at: new Date().toISOString(),
-      }, { onConflict: 'provider' }));
+      }, { onConflict: 'id' }));
 
     if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
 
-    return res.status(200).json({
-      success: true,
-      message: 'PBX integratsiya saqlandi',
-    });
+    return res.status(200).json({ success: true });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e?.message || 'connect-simple xatosi.' });
   }
@@ -309,24 +324,33 @@ router.post('/test-connection', async (req: Request, res: Response) => {
       });
     }
 
-    if (isInternalPbxWebhookUrl(webhookUrl)) {
-      return res.status(200).json({
-        success: true,
-        message: 'Ichki webhook manzili tasdiqlandi',
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), TEST_CONNECTION_TIMEOUT_MS);
+
+    let testResponse: globalThis.Response;
+    try {
+      testResponse = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ test: true, source: 'salespulse', api_key: apiKey }),
+        signal: abortController.signal,
       });
+    } finally {
+      clearTimeout(timeoutId);
     }
 
-    const testResponse = await fetch(webhookUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({ test: true, source: 'salespulse' }),
-    });
+    console.log('[crm/test-connection] upstream status=', testResponse.status, testResponse.statusText, 'url=', webhookUrl);
+
+    if (testResponse.status === 401 || testResponse.status === 403) {
+      return res.status(200).json({ success: false, error: "Noto'g'ri API key" });
+    }
 
     if (!testResponse.ok) {
-      return res.status(400).json({
+      return res.status(200).json({
         success: false,
         error: `PBX javob berdi: ${testResponse.status} ${testResponse.statusText}`,
       });
@@ -337,9 +361,16 @@ router.post('/test-connection', async (req: Request, res: Response) => {
       message: 'PBX ulanish muvaffaqiyatli',
     });
   } catch (e: any) {
-    return res.status(400).json({
+    const isAbort = e?.name === 'AbortError';
+    if (isAbort) {
+      return res.status(504).json({
+        success: false,
+        error: `PBX ga ulanish timeout (${TEST_CONNECTION_TIMEOUT_MS}ms).`,
+      });
+    }
+    return res.status(502).json({
       success: false,
-      error: 'PBX\'ga ulanib bo\'lmadi: ' + (e instanceof Error ? e.message : 'Noto\'g\'ri URL yoki server mavjud emas'),
+      error: 'PBX\'ga ulanib bo\'lmadi: ' + (e instanceof Error ? e.message : 'Network xato'),
     });
   }
 });
@@ -348,16 +379,20 @@ router.post('/test-connection', async (req: Request, res: Response) => {
 // PBX eventlarini qabul qiladi, qo'ng'iroqlarni background Gemini tahliliga yuboradi.
 router.post('/webhook/pbx', async (req: Request, res: Response) => {
   try {
-    const cfg = await loadPbxConfig();
+    const cfg = await loadLatestPbxIntegration({ onlyEnabled: true });
 
     const expectedKey = typeof cfg?.api_key === 'string' ? cfg.api_key.trim() : '';
     if (!expectedKey || cfg?.enabled === false) {
-      return res.status(400).json({ success: false, error: 'CRM simple ulanish yoqilmagan: avval /crm/connect-simple ni chaqiring.' });
+      return res.status(401).json({ success: false, error: 'Noto\'g\'ri API key.' });
     }
 
     const providedKey = getApiKeyFromRequest(req);
     if (!providedKey || providedKey !== expectedKey) {
       return res.status(401).json({ success: false, error: 'Noto\'g\'ri API key.' });
+    }
+
+    if (req.body?.test === true) {
+      return res.status(200).json({ success: true });
     }
 
     const calls = extractWebhookCalls(req.body);
