@@ -576,6 +576,14 @@ router.post('/test-connection', async (req: Request, res: Response) => {
 
 // POST /crm/webhook/pbx
 // PBX eventlarini qabul qiladi, qo'ng'iroqlarni background Gemini tahliliga yuboradi.
+router.get('/webhook/pbx', async (_req: Request, res: Response) => {
+  try {
+    return res.status(200).json({ status: 1 });
+  } catch {
+    return res.status(500).json({ status: 0 });
+  }
+});
+
 router.post('/webhook/pbx', async (req: Request, res: Response) => {
   try {
     const cfg = await loadLatestPbxIntegration({ onlyEnabled: true });
