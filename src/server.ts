@@ -13,7 +13,7 @@ import analyticsRouter from './routes/analytics';
 import managementRouter from './routes/management';
 import notificationsRouter from './routes/notifications';
 import shiftsRouter from './routes/shifts';
-import crmRouter, { getPbxWebhookHealthStatus, runScheduledCrmSync } from './routes/crm';
+import crmRouter, { runScheduledCrmSync } from './routes/crm';
 
 const app = express();
 
@@ -29,9 +29,8 @@ app.use('/analytics', analyticsRouter);
 app.use('/api/management', managementRouter);
 app.use('/manager-notifications', notificationsRouter);
 app.use('/shifts', shiftsRouter);
-app.get('/crm/webhook/pbx', async (_req, res) => {
-  const status = await getPbxWebhookHealthStatus();
-  res.status(200).json({ status });
+app.get('/crm/webhook/pbx', (_req, res) => {
+  return res.status(200).json({ status: 1 });
 });
 app.use('/crm', crmRouter);
 

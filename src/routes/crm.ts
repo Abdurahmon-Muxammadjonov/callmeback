@@ -75,16 +75,6 @@ async function loadLatestPbxIntegration(options: { onlyEnabled?: boolean } = {})
   return data || null;
 }
 
-export async function getPbxWebhookHealthStatus(): Promise<number> {
-  try {
-    const cfg = await loadLatestPbxIntegration({ onlyEnabled: true });
-    const healthy = !!(cfg?.enabled && cfg?.last_test_status === 200 && cfg?.webhook_url && cfg?.api_key);
-    return healthy ? 1 : 0;
-  } catch {
-    return 0;
-  }
-}
-
 async function saveIntegrationTestResult(params: {
   webhookUrl: string;
   apiKey: string;
@@ -581,17 +571,6 @@ router.post('/test-connection', async (req: Request, res: Response) => {
       success: false,
       error: `PBX webhook'ga ulana olmadi: ${e instanceof Error ? e.message : 'network error'}`,
     });
-  }
-});
-
-// POST /crm/webhook/pbx
-// PBX eventlarini qabul qiladi, qo'ng'iroqlarni background Gemini tahliliga yuboradi.
-router.get('/webhook/pbx', async (_req: Request, res: Response) => {
-  try {
-    const status = await getPbxWebhookHealthStatus();
-    return res.status(200).json({ status });
-  } catch {
-    return res.status(500).json({ status: 0 });
   }
 });
 
