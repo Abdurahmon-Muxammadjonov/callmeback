@@ -29,6 +29,9 @@ app.use('/analytics', analyticsRouter);
 app.use('/api/management', managementRouter);
 app.use('/manager-notifications', notificationsRouter);
 app.use('/shifts', shiftsRouter);
+app.get('/crm/webhook/pbx', (_req, res) => {
+  res.status(200).json({ status: 1 });
+});
 app.use('/crm', crmRouter);
 
 // Server DOIM shu portda ishlaydi (boshqasiga "qochmaydi").
