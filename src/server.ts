@@ -37,6 +37,23 @@ app.use('/analytics', analyticsRouter);
 app.use('/api/management', managementRouter);
 app.use('/manager-notifications', notificationsRouter);
 app.use('/shifts', shiftsRouter);
+app.get('/', (_req, res) => {
+  return res.status(200).json({
+    success: true,
+    service: 'callmeback-backend',
+    status: 'ok',
+    message: 'Backend is running',
+    endpoints: {
+      analytics: '/analytics',
+      calls: '/api/calls',
+      analyzeCall: '/api/analyze-call',
+      crm: '/crm',
+    },
+  });
+});
+app.get('/health', (_req, res) => {
+  return res.status(200).json({ success: true, status: 'healthy' });
+});
 app.get('/crm/webhook/pbx', (_req, res) => {
   return res.status(200).json({ status: 1 });
 });
