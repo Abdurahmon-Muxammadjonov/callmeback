@@ -11,6 +11,8 @@ npm run dev      # tsx watch — development
 
 Server `http://localhost:5001` portida ishlaydi (`.env.local` dagi `PORT` orqali o'zgartiriladi).
 
+Frontend yoki dashboard `NEXT_PUBLIC_API_URL` orqali backend'ga ulangan bo'lsa, uni `http://localhost:5001` qilib qo'ying. `http://localhost:5000` bu loyiha uchun ishlatilmaydi.
+
 ## Skriptlar
 
 | Buyruq          | Vazifasi                                    |
