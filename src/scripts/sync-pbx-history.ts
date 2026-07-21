@@ -34,6 +34,13 @@ interface SyncRuntimeConfig {
   audioBucket: string;
   defaultLimit: number;
   maxPages: number;
+  requestTimeoutMs: number;
+  audioTimeoutMs: number;
+  retryCount: number;
+  retryDelayMs: number;
+  chunkUnit: 'day' | 'month';
+  chunkSize: number;
+  writeBatchSize: number;
 }
 
 interface RunSyncOptions {
@@ -43,7 +50,22 @@ interface RunSyncOptions {
   months?: number;
   limit?: number;
   maxPages?: number;
+  requestTimeoutMs?: number;
+  audioTimeoutMs?: number;
+  retryCount?: number;
+  retryDelayMs?: number;
+  chunkUnit?: 'day' | 'month';
+  chunkSize?: number;
+  writeBatchSize?: number;
 }
+
+type RetryableContext = {
+  attempt: number;
+  retries: number;
+  error: unknown;
+};
+
+type CallInsertRow = Record<string, any>;
 
 function getRuntimeConfig(overrides: RunSyncOptions = {}): SyncRuntimeConfig {
   const historyApiUrl = (process.env.PBX_HISTORY_API_URL || '').trim();
@@ -52,6 +74,14 @@ function getRuntimeConfig(overrides: RunSyncOptions = {}): SyncRuntimeConfig {
   const audioBucket = (process.env.PBX_AUDIO_BUCKET || 'recordings').trim() || 'recordings';
   const defaultLimit = Number(overrides.limit ?? process.env.PBX_HISTORY_PAGE_LIMIT ?? '100');
   const maxPages = Number(overrides.maxPages ?? process.env.PBX_HISTORY_MAX_PAGES ?? '500');
+  const requestTimeoutMs = Number(overrides.requestTimeoutMs ?? process.env.PBX_REQUEST_TIMEOUT_MS ?? '20000');
+  const audioTimeoutMs = Number(overrides.audioTimeoutMs ?? process.env.PBX_AUDIO_TIMEOUT_MS ?? '90000');
+  const retryCount = Number(overrides.retryCount ?? process.env.PBX_RETRY_COUNT ?? '3');
+  const retryDelayMs = Number(overrides.retryDelayMs ?? process.env.PBX_RETRY_DELAY_MS ?? '1500');
+  const chunkUnitRaw = String(overrides.chunkUnit ?? process.env.PBX_SYNC_CHUNK_UNIT ?? 'day').trim().toLowerCase();
+  const chunkUnit: 'day' | 'month' = chunkUnitRaw === 'month' ? 'month' : 'day';
+  const chunkSize = Number(overrides.chunkSize ?? process.env.PBX_SYNC_CHUNK_SIZE ?? (chunkUnit === 'month' ? '1' : '7'));
+  const writeBatchSize = Number(overrides.writeBatchSize ?? process.env.PBX_WRITE_BATCH_SIZE ?? '20');
 
   if (!historyApiUrl) {
     throw new Error('PBX_HISTORY_API_URL majburiy (history endpoint URL).');
@@ -67,7 +97,72 @@ function getRuntimeConfig(overrides: RunSyncOptions = {}): SyncRuntimeConfig {
     audioBucket,
     defaultLimit,
     maxPages,
+    requestTimeoutMs: Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? requestTimeoutMs : 20000,
+    audioTimeoutMs: Number.isFinite(audioTimeoutMs) && audioTimeoutMs > 0 ? audioTimeoutMs : 90000,
+    retryCount: Number.isFinite(retryCount) && retryCount >= 0 ? Math.min(10, Math.floor(retryCount)) : 3,
+    retryDelayMs: Number.isFinite(retryDelayMs) && retryDelayMs > 0 ? retryDelayMs : 1500,
+    chunkUnit,
+    chunkSize: Number.isFinite(chunkSize) && chunkSize > 0 ? Math.floor(chunkSize) : (chunkUnit === 'month' ? 1 : 7),
+    writeBatchSize: Number.isFinite(writeBatchSize) && writeBatchSize > 0 ? Math.floor(writeBatchSize) : 20,
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableHttpStatus(status: number): boolean {
+  return [408, 425, 429, 500, 502, 503, 504].includes(status);
+}
+
+function isRetryableNetworkError(error: unknown): boolean {
+  const e = error as any;
+  const code = String(e?.code || e?.cause?.code || '').toUpperCase();
+  if (['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND', 'UND_ERR_CONNECT_TIMEOUT'].includes(code)) {
+    return true;
+  }
+
+  const name = String(e?.name || '').toLowerCase();
+  if (name.includes('abort')) return true;
+
+  const message = String(e?.message || '').toLowerCase();
+  return (
+    message.includes('econnreset')
+    || message.includes('socket hang up')
+    || message.includes('network error')
+    || message.includes('timed out')
+    || message.includes('fetch failed')
+    || message.includes('aborted')
+  );
+}
+
+async function runWithRetry<T>(
+  task: (attempt: number) => Promise<T>,
+  options: {
+    retries: number;
+    delayMs: number;
+    shouldRetry?: (ctx: RetryableContext) => boolean;
+    onRetry?: (ctx: RetryableContext) => void;
+  },
+): Promise<T> {
+  const maxAttempts = Math.max(1, options.retries + 1);
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await task(attempt);
+    } catch (error) {
+      lastError = error;
+      const shouldRetry = options.shouldRetry ? options.shouldRetry({ attempt, retries: options.retries, error }) : true;
+      const canRetry = shouldRetry && attempt < maxAttempts;
+      if (!canRetry) throw error;
+
+      options.onRetry?.({ attempt, retries: options.retries, error });
+      await sleep(Math.max(0, options.delayMs));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Retry jarayoni noma’lum xato bilan tugadi.');
 }
 
 function normalizePhone(raw: string): string {
@@ -205,27 +300,56 @@ function parseHistoryCall(raw: any): PbxHistoryCall | null {
 }
 
 async function fetchJson(url: string, apiKey: string): Promise<any> {
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json,*/*',
-      'X-API-Key': apiKey,
-      Authorization: `Bearer ${apiKey}`,
+  return fetchJsonWithRetry(url, apiKey, {
+    timeoutMs: 20000,
+    retryCount: 3,
+    retryDelayMs: 1500,
+  });
+}
+
+async function fetchJsonWithRetry(
+  url: string,
+  apiKey: string,
+  options: { timeoutMs: number; retryCount: number; retryDelayMs: number },
+): Promise<any> {
+  return runWithRetry(async () => {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json,*/*',
+        'X-API-Key': apiKey,
+        Authorization: `Bearer ${apiKey}`,
+      },
+      signal: AbortSignal.timeout(options.timeoutMs),
+    });
+
+    if (!res.ok) {
+      const error = new Error(`PBX so‘rov xatosi: ${res.status} ${res.statusText}`) as Error & { status?: number };
+      error.status = res.status;
+      throw error;
+    }
+
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (contentType.includes('application/json')) return res.json();
+
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error('PBX JSON qaytarmadi.');
+    }
+  }, {
+    retries: options.retryCount,
+    delayMs: options.retryDelayMs,
+    shouldRetry: ({ error }) => {
+      const e = error as any;
+      const status = Number(e?.status || 0);
+      return isRetryableNetworkError(error) || isRetryableHttpStatus(status);
+    },
+    onRetry: ({ attempt, retries, error }) => {
+      console.warn(`PBX JSON retry ${attempt}/${retries + 1}:`, (error as any)?.message || error);
     },
   });
-  if (!res.ok) {
-    throw new Error(`PBX so‘rov xatosi: ${res.status} ${res.statusText}`);
-  }
-
-  const contentType = (res.headers.get('content-type') || '').toLowerCase();
-  if (contentType.includes('application/json')) return res.json();
-
-  const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error('PBX JSON qaytarmadi.');
-  }
 }
 
 function buildHistoryUrl(historyApiUrl: string, from: string, to: string, page: number, limit: number): string {
@@ -250,7 +374,11 @@ async function fetchHistoryAudioUrl(call: PbxHistoryCall, config: SyncRuntimeCon
     requestUrl = u.toString();
   }
 
-  const payload = await fetchJson(requestUrl, config.apiKey);
+  const payload = await fetchJsonWithRetry(requestUrl, config.apiKey, {
+    timeoutMs: config.requestTimeoutMs,
+    retryCount: config.retryCount,
+    retryDelayMs: config.retryDelayMs,
+  });
   const audioUrl = pickString(payload, ['audio_url', 'audioUrl', 'record_url', 'recordUrl', 'recording_url'])
     || pickString(payload?.call, ['audio_url', 'audioUrl', 'record_url', 'recordUrl', 'recording_url']);
 
@@ -266,7 +394,7 @@ function mimeToExt(mimeType: string): string {
 }
 
 async function persistAudio(audioUrl: string, config: SyncRuntimeConfig): Promise<{ publicUrl: string; path: string }> {
-  const response = await fetch(audioUrl, {
+  const response = await runWithRetry(async () => fetch(audioUrl, {
     method: 'GET',
     redirect: 'follow',
     headers: {
@@ -274,6 +402,14 @@ async function persistAudio(audioUrl: string, config: SyncRuntimeConfig): Promis
       'X-API-Key': config.apiKey,
       Authorization: `Bearer ${config.apiKey}`,
       'User-Agent': 'Mozilla/5.0 (compatible; ProcellPBXHistorySync/1.0)',
+    },
+    signal: AbortSignal.timeout(config.audioTimeoutMs),
+  }), {
+    retries: config.retryCount,
+    delayMs: config.retryDelayMs,
+    shouldRetry: ({ error }) => isRetryableNetworkError(error),
+    onRetry: ({ attempt, retries, error }) => {
+      console.warn(`Audio fetch retry ${attempt}/${retries + 1}:`, (error as any)?.message || error);
     },
   });
   if (!response.ok) throw new Error(`Audio yuklab bo‘lmadi: HTTP ${response.status}`);
@@ -369,14 +505,14 @@ async function callExistsByCrmId(crmId: string): Promise<boolean> {
   return !!data?.id;
 }
 
-async function saveCallRecord(params: {
+function buildCallInsertRow(params: {
   call: PbxHistoryCall;
   managerId: string;
   client?: { id: string; name: string; phone: string | null };
   audioPublicUrl: string;
   audioSourceUrl: string;
   audioStoragePath: string;
-}): Promise<void> {
+}): CallInsertRow {
   const createdAt = params.call.startedAt || new Date().toISOString();
 
   const row: Record<string, any> = {
@@ -400,16 +536,90 @@ async function saveCallRecord(params: {
     if (!row.client_name) row.client_name = params.client.name;
   }
 
-  const { error } = await supabase.from('calls').insert(row);
-  if (error) throw new Error(`calls insert xatosi: ${error.message}`);
+  return row;
+}
+
+function isDuplicateInsertError(error: any): boolean {
+  const code = String(error?.code || '').toUpperCase();
+  const message = String(error?.message || '').toLowerCase();
+  return code === '23505' || message.includes('duplicate key');
+}
+
+async function insertCallRowsBatch(
+  rows: CallInsertRow[],
+  batchSize: number,
+): Promise<{ inserted: number; failed: number; duplicates: number }> {
+  if (rows.length === 0) return { inserted: 0, failed: 0, duplicates: 0 };
+
+  let inserted = 0;
+  let failed = 0;
+  let duplicates = 0;
+  const step = Math.max(1, batchSize);
+
+  for (let start = 0; start < rows.length; start += step) {
+    const slice = rows.slice(start, start + step);
+    const { error } = await supabase.from('calls').insert(slice);
+    if (!error) {
+      inserted += slice.length;
+      continue;
+    }
+
+    console.warn(`Batch insert xatosi, fallback one-by-one: ${error.message}`);
+    for (const row of slice) {
+      const single = await supabase.from('calls').insert(row);
+      if (!single.error) {
+        inserted += 1;
+        continue;
+      }
+      if (isDuplicateInsertError(single.error)) {
+        duplicates += 1;
+      } else {
+        failed += 1;
+        console.error(`calls insert xatosi (crm_id=${row.crm_id}):`, single.error.message);
+      }
+    }
+  }
+
+  return { inserted, failed, duplicates };
+}
+
+function generateDateChunks(
+  fromIso: string,
+  toIso: string,
+  chunkUnit: 'day' | 'month',
+  chunkSize: number,
+): Array<{ from: string; to: string }> {
+  const from = new Date(fromIso);
+  const to = new Date(toIso);
+  const out: Array<{ from: string; to: string }> = [];
+  const step = Math.max(1, chunkSize);
+
+  let cursor = new Date(from);
+  while (cursor.getTime() <= to.getTime()) {
+    const next = new Date(cursor);
+    if (chunkUnit === 'month') {
+      next.setMonth(next.getMonth() + step);
+    } else {
+      next.setDate(next.getDate() + step);
+    }
+
+    const chunkEnd = new Date(next.getTime() - 1);
+    const boundedEnd = chunkEnd.getTime() > to.getTime() ? to : chunkEnd;
+    out.push({ from: new Date(cursor).toISOString(), to: boundedEnd.toISOString() });
+
+    cursor = new Date(boundedEnd.getTime() + 1);
+  }
+
+  return out;
 }
 
 export async function runPbxHistorySync(options: RunSyncOptions = {}): Promise<SyncCounters> {
   const { from, to } = parsePeriodRange(options);
   const config = getRuntimeConfig(options);
   const limit = config.defaultLimit > 0 ? config.defaultLimit : 100;
+  const chunks = generateDateChunks(from, to, config.chunkUnit, config.chunkSize);
 
-  console.log(`PBX history sync boshlandi: from=${from} to=${to}`);
+  console.log(`PBX history sync boshlandi: from=${from} to=${to} chunks=${chunks.length} (${config.chunkUnit}:${config.chunkSize})`);
 
   const usersByPhone = await loadUsersPhoneMap();
   console.log(`Users phone map tayyor: ${usersByPhone.size}`);
@@ -423,67 +633,91 @@ export async function runPbxHistorySync(options: RunSyncOptions = {}): Promise<S
   };
 
   const managerCache = new Map<string, { id: string; name: string }>();
+  const pendingRows: CallInsertRow[] = [];
 
-  let page = 1;
-  while (page <= config.maxPages) {
-    const url = buildHistoryUrl(config.historyApiUrl, from, to, page, limit);
-    const payload = await fetchJson(url, config.apiKey);
-    const rawCalls = extractCalls(payload);
+  const flushPendingRows = async () => {
+    if (pendingRows.length === 0) return;
+    const result = await insertCallRowsBatch(pendingRows, config.writeBatchSize);
+    counters.imported += result.inserted;
+    counters.failed += result.failed;
+    counters.skippedExisting += result.duplicates;
+    pendingRows.length = 0;
+  };
 
-    if (rawCalls.length === 0) {
-      console.log(`Page ${page}: yozuv yo‘q, tugadi.`);
-      break;
-    }
+  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+    const chunk = chunks[chunkIndex];
+    console.log(`Chunk ${chunkIndex + 1}/${chunks.length}: from=${chunk.from} to=${chunk.to}`);
 
-    console.log(`Page ${page}: ${rawCalls.length} ta history call olindi.`);
+    let page = 1;
+    while (page <= config.maxPages) {
+      const url = buildHistoryUrl(config.historyApiUrl, chunk.from, chunk.to, page, limit);
+      const payload = await fetchJsonWithRetry(url, config.apiKey, {
+        timeoutMs: config.requestTimeoutMs,
+        retryCount: config.retryCount,
+        retryDelayMs: config.retryDelayMs,
+      });
+      const rawCalls = extractCalls(payload);
 
-    for (const raw of rawCalls) {
-      counters.fetched += 1;
-      const parsed = parseHistoryCall(raw);
-      if (!parsed) {
-        counters.skippedInvalid += 1;
-        continue;
+      if (rawCalls.length === 0) {
+        console.log(`Chunk ${chunkIndex + 1}, page ${page}: yozuv yo‘q, tugadi.`);
+        break;
       }
 
-      try {
-        const exists = await callExistsByCrmId(parsed.crmId);
-        if (exists) {
-          counters.skippedExisting += 1;
+      console.log(`Chunk ${chunkIndex + 1}, page ${page}: ${rawCalls.length} ta history call olindi.`);
+
+      for (const raw of rawCalls) {
+        counters.fetched += 1;
+        const parsed = parseHistoryCall(raw);
+        if (!parsed) {
+          counters.skippedInvalid += 1;
           continue;
         }
 
-        const managerNameKey = parsed.managerName.trim() || 'Tayinlanmagan';
-        let manager = managerCache.get(managerNameKey);
-        if (!manager) {
-          manager = await getOrCreateManagerByName(managerNameKey);
-          managerCache.set(managerNameKey, manager);
+        try {
+          const exists = await callExistsByCrmId(parsed.crmId);
+          if (exists) {
+            counters.skippedExisting += 1;
+            continue;
+          }
+
+          const managerNameKey = parsed.managerName.trim() || 'Tayinlanmagan';
+          let manager = managerCache.get(managerNameKey);
+          if (!manager) {
+            manager = await getOrCreateManagerByName(managerNameKey);
+            managerCache.set(managerNameKey, manager);
+          }
+
+          const normalizedPhone = normalizePhone(parsed.clientPhone);
+          const mappedClient = normalizedPhone ? usersByPhone.get(normalizedPhone) : undefined;
+
+          const sourceAudioUrl = await fetchHistoryAudioUrl(parsed, config);
+          const persisted = await persistAudio(sourceAudioUrl, config);
+
+          pendingRows.push(buildCallInsertRow({
+            call: parsed,
+            managerId: manager.id,
+            client: mappedClient,
+            audioPublicUrl: persisted.publicUrl,
+            audioSourceUrl: sourceAudioUrl,
+            audioStoragePath: persisted.path,
+          }));
+          if (pendingRows.length >= config.writeBatchSize) {
+            await flushPendingRows();
+          }
+        } catch (error: any) {
+          counters.failed += 1;
+          console.error(`Call import failed (id=${parsed.crmId}):`, error?.message || error);
         }
-
-        const normalizedPhone = normalizePhone(parsed.clientPhone);
-        const mappedClient = normalizedPhone ? usersByPhone.get(normalizedPhone) : undefined;
-
-        const sourceAudioUrl = await fetchHistoryAudioUrl(parsed, config);
-        const persisted = await persistAudio(sourceAudioUrl, config);
-
-        await saveCallRecord({
-          call: parsed,
-          managerId: manager.id,
-          client: mappedClient,
-          audioPublicUrl: persisted.publicUrl,
-          audioSourceUrl: sourceAudioUrl,
-          audioStoragePath: persisted.path,
-        });
-
-        counters.imported += 1;
-      } catch (error: any) {
-        counters.failed += 1;
-        console.error(`Call import failed (id=${parsed.crmId}):`, error?.message || error);
       }
-    }
 
-    if (!hasMorePages(payload, rawCalls.length, limit, page)) break;
-    page += 1;
+      await flushPendingRows();
+
+      if (!hasMorePages(payload, rawCalls.length, limit, page)) break;
+      page += 1;
+    }
   }
+
+  await flushPendingRows();
 
   console.log('PBX history sync tugadi:', counters);
   return counters;

@@ -688,8 +688,30 @@ router.post('/admin/sync-calls', async (req: Request, res: Response) => {
     const to = typeof (req.body?.to ?? req.query?.to) === 'string' ? String(req.body?.to ?? req.query?.to) : undefined;
     const limit = Number(req.body?.limit ?? req.query?.limit ?? 0) || undefined;
     const maxPages = Number(req.body?.max_pages ?? req.query?.max_pages ?? 0) || undefined;
+    const retryCount = Number(req.body?.retry_count ?? req.query?.retry_count ?? 0) || undefined;
+    const retryDelayMs = Number(req.body?.retry_delay_ms ?? req.query?.retry_delay_ms ?? 0) || undefined;
+    const requestTimeoutMs = Number(req.body?.request_timeout_ms ?? req.query?.request_timeout_ms ?? 0) || undefined;
+    const audioTimeoutMs = Number(req.body?.audio_timeout_ms ?? req.query?.audio_timeout_ms ?? 0) || undefined;
+    const chunkSize = Number(req.body?.chunk_size ?? req.query?.chunk_size ?? 0) || undefined;
+    const writeBatchSize = Number(req.body?.write_batch_size ?? req.query?.write_batch_size ?? 0) || undefined;
+    const chunkUnitRaw = req.body?.chunk_unit ?? req.query?.chunk_unit;
+    const chunkUnit = chunkUnitRaw === 'month' || chunkUnitRaw === 'day' ? chunkUnitRaw : undefined;
 
-    const result = await runPbxHistorySync({ weeks, months, from, to, limit, maxPages });
+    const result = await runPbxHistorySync({
+      weeks,
+      months,
+      from,
+      to,
+      limit,
+      maxPages,
+      retryCount,
+      retryDelayMs,
+      requestTimeoutMs,
+      audioTimeoutMs,
+      chunkUnit,
+      chunkSize,
+      writeBatchSize,
+    });
     await markSynced();
 
     return res.status(200).json({
