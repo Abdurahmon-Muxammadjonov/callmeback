@@ -1068,10 +1068,16 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
   try {
     const hasSupabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
     const hasSupabaseKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!process.env.GROQ_API_KEY || !hasSupabaseUrl || !hasSupabaseKey) {
-      return res.status(500).json({
+    const missingVars: string[] = [];
+    if (!process.env.GROQ_API_KEY) missingVars.push('GROQ_API_KEY');
+    if (!hasSupabaseUrl) missingVars.push('SUPABASE_URL (yoki NEXT_PUBLIC_SUPABASE_URL)');
+    if (!hasSupabaseKey) missingVars.push('SUPABASE_SERVICE_ROLE_KEY');
+    if (missingVars.length > 0) {
+      console.error('[analyze-call] Missing env vars:', missingVars.join(', '));
+      return res.status(503).json({
         success: false,
-        error: 'Server configuration error: missing required environment credentials.',
+        error: `Missing backend credentials: ${missingVars.join(', ')}. Railway → Variables bo'limiga qo'shing.`,
+        missing: missingVars,
       });
     }
 
