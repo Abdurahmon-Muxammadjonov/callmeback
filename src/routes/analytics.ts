@@ -60,6 +60,37 @@ interface CallAgg {
   total_bonus: number;
 }
 
+// GET /analytics
+// Frontend root endpoint so'rovlarida tezkor umumiy metrikani qaytaradi.
+router.get('/', async (_req: Request, res: Response) => {
+  try {
+    const { curStart, curEnd, prevStart, prevEnd } = periodRanges('day');
+    const [current, previous] = await Promise.all([
+      aggregateCalls(curStart, curEnd, null),
+      aggregateCalls(prevStart, prevEnd, null),
+    ]);
+
+    const keys: (keyof CallAgg)[] = ['total_calls', 'avg_kpi_score', 'avg_duration_sec', 'total_penalty', 'total_bonus'];
+    const change_pct: Record<string, number> = {};
+    keys.forEach((k) => {
+      change_pct[k] = pctChange(current[k], previous[k]);
+    });
+
+    return res.status(200).json({
+      success: true,
+      period: 'day',
+      current,
+      previous,
+      change_pct,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Analytics root xatosi.',
+    });
+  }
+});
+
 // Bitta davr uchun qo'ng'iroq-asosli metrikalar.
 async function aggregateCalls(start: Date, end: Date, managerIds: string[] | null): Promise<CallAgg> {
   let q = supabase
