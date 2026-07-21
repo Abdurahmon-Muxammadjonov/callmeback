@@ -1,6 +1,7 @@
 import '../env';
 
 import { randomUUID } from 'node:crypto';
+import { Agent, setGlobalDispatcher } from 'undici';
 import { supabase } from '../lib/supabase';
 
 type Direction = 'incoming' | 'outgoing' | 'unknown';
@@ -38,9 +39,10 @@ interface SyncRuntimeConfig {
   audioTimeoutMs: number;
   retryCount: number;
   retryDelayMs: number;
-  chunkUnit: 'day' | 'month';
+  chunkUnit: 'hour' | 'day' | 'month';
   chunkSize: number;
   writeBatchSize: number;
+  maxAudioBytes: number;
 }
 
 interface RunSyncOptions {
@@ -54,9 +56,10 @@ interface RunSyncOptions {
   audioTimeoutMs?: number;
   retryCount?: number;
   retryDelayMs?: number;
-  chunkUnit?: 'day' | 'month';
+  chunkUnit?: 'hour' | 'day' | 'month';
   chunkSize?: number;
   writeBatchSize?: number;
+  maxAudioBytes?: number;
 }
 
 type RetryableContext = {
@@ -66,6 +69,14 @@ type RetryableContext = {
 };
 
 type CallInsertRow = Record<string, any>;
+
+const pbxAgent = new Agent({
+  keepAliveTimeout: Number(process.env.PBX_KEEP_ALIVE_TIMEOUT_MS || '30000'),
+  keepAliveMaxTimeout: Number(process.env.PBX_KEEP_ALIVE_MAX_TIMEOUT_MS || '120000'),
+  connections: Number(process.env.PBX_KEEP_ALIVE_CONNECTIONS || '20'),
+  pipelining: Number(process.env.PBX_KEEP_ALIVE_PIPELINING || '1'),
+});
+setGlobalDispatcher(pbxAgent);
 
 function getRuntimeConfig(overrides: RunSyncOptions = {}): SyncRuntimeConfig {
   const historyApiUrl = (process.env.PBX_HISTORY_API_URL || '').trim();
@@ -79,9 +90,12 @@ function getRuntimeConfig(overrides: RunSyncOptions = {}): SyncRuntimeConfig {
   const retryCount = Number(overrides.retryCount ?? process.env.PBX_RETRY_COUNT ?? '3');
   const retryDelayMs = Number(overrides.retryDelayMs ?? process.env.PBX_RETRY_DELAY_MS ?? '1500');
   const chunkUnitRaw = String(overrides.chunkUnit ?? process.env.PBX_SYNC_CHUNK_UNIT ?? 'day').trim().toLowerCase();
-  const chunkUnit: 'day' | 'month' = chunkUnitRaw === 'month' ? 'month' : 'day';
-  const chunkSize = Number(overrides.chunkSize ?? process.env.PBX_SYNC_CHUNK_SIZE ?? (chunkUnit === 'month' ? '1' : '7'));
+  const chunkUnit: 'hour' | 'day' | 'month' = chunkUnitRaw === 'hour'
+    ? 'hour'
+    : (chunkUnitRaw === 'month' ? 'month' : 'day');
+  const chunkSize = Number(overrides.chunkSize ?? process.env.PBX_SYNC_CHUNK_SIZE ?? (chunkUnit === 'month' ? '1' : (chunkUnit === 'hour' ? '6' : '7')));
   const writeBatchSize = Number(overrides.writeBatchSize ?? process.env.PBX_WRITE_BATCH_SIZE ?? '20');
+  const maxAudioBytes = Number(overrides.maxAudioBytes ?? process.env.PBX_MAX_AUDIO_BYTES ?? `${100 * 1024 * 1024}`);
 
   if (!historyApiUrl) {
     throw new Error('PBX_HISTORY_API_URL majburiy (history endpoint URL).');
@@ -102,8 +116,9 @@ function getRuntimeConfig(overrides: RunSyncOptions = {}): SyncRuntimeConfig {
     retryCount: Number.isFinite(retryCount) && retryCount >= 0 ? Math.min(10, Math.floor(retryCount)) : 3,
     retryDelayMs: Number.isFinite(retryDelayMs) && retryDelayMs > 0 ? retryDelayMs : 1500,
     chunkUnit,
-    chunkSize: Number.isFinite(chunkSize) && chunkSize > 0 ? Math.floor(chunkSize) : (chunkUnit === 'month' ? 1 : 7),
+    chunkSize: Number.isFinite(chunkSize) && chunkSize > 0 ? Math.floor(chunkSize) : (chunkUnit === 'month' ? 1 : (chunkUnit === 'hour' ? 6 : 7)),
     writeBatchSize: Number.isFinite(writeBatchSize) && writeBatchSize > 0 ? Math.floor(writeBatchSize) : 20,
+    maxAudioBytes: Number.isFinite(maxAudioBytes) && maxAudioBytes > 0 ? Math.floor(maxAudioBytes) : (100 * 1024 * 1024),
   };
 }
 
@@ -134,6 +149,21 @@ function isRetryableNetworkError(error: unknown): boolean {
     || message.includes('fetch failed')
     || message.includes('aborted')
   );
+}
+
+function installProcessGuards(scope: string): void {
+  process.on('unhandledRejection', (reason) => {
+    console.error(`[${scope}] unhandledRejection:`, (reason as any)?.message || reason);
+  });
+
+  process.on('uncaughtException', (error) => {
+    const msg = (error as any)?.message || String(error);
+    if (isRetryableNetworkError(error)) {
+      console.error(`[${scope}] uncaughtException network:`, msg);
+      return;
+    }
+    console.error(`[${scope}] uncaughtException:`, msg);
+  });
 }
 
 async function runWithRetry<T>(
@@ -317,6 +347,7 @@ async function fetchJsonWithRetry(
       method: 'GET',
       headers: {
         Accept: 'application/json,*/*',
+        Connection: 'keep-alive',
         'X-API-Key': apiKey,
         Authorization: `Bearer ${apiKey}`,
       },
@@ -393,12 +424,35 @@ function mimeToExt(mimeType: string): string {
   return 'mp3';
 }
 
+async function readStreamToBufferInChunks(response: Response, maxBytes: number): Promise<Buffer> {
+  if (!response.body) throw new Error('Audio stream mavjud emas.');
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+
+    total += value.byteLength;
+    if (total > maxBytes) {
+      throw new Error(`Audio fayl juda katta: ${total} bytes (limit ${maxBytes}).`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+
+  return Buffer.concat(chunks, total);
+}
+
 async function persistAudio(audioUrl: string, config: SyncRuntimeConfig): Promise<{ publicUrl: string; path: string }> {
   const response = await runWithRetry(async () => fetch(audioUrl, {
     method: 'GET',
     redirect: 'follow',
     headers: {
       Accept: 'audio/*,*/*',
+      Connection: 'keep-alive',
       'X-API-Key': config.apiKey,
       Authorization: `Bearer ${config.apiKey}`,
       'User-Agent': 'Mozilla/5.0 (compatible; ProcellPBXHistorySync/1.0)',
@@ -419,7 +473,7 @@ async function persistAudio(audioUrl: string, config: SyncRuntimeConfig): Promis
     throw new Error(`Audio emas (content-type=${contentType}).`);
   }
 
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buffer = await readStreamToBufferInChunks(response, config.maxAudioBytes);
   if (!buffer.length) throw new Error('Audio body bo‘sh.');
 
   await supabase.storage.createBucket(config.audioBucket, { public: true }).catch(() => {});
@@ -586,7 +640,7 @@ async function insertCallRowsBatch(
 function generateDateChunks(
   fromIso: string,
   toIso: string,
-  chunkUnit: 'day' | 'month',
+  chunkUnit: 'hour' | 'day' | 'month',
   chunkSize: number,
 ): Array<{ from: string; to: string }> {
   const from = new Date(fromIso);
@@ -599,6 +653,8 @@ function generateDateChunks(
     const next = new Date(cursor);
     if (chunkUnit === 'month') {
       next.setMonth(next.getMonth() + step);
+    } else if (chunkUnit === 'hour') {
+      next.setHours(next.getHours() + step);
     } else {
       next.setDate(next.getDate() + step);
     }
@@ -634,6 +690,7 @@ export async function runPbxHistorySync(options: RunSyncOptions = {}): Promise<S
 
   const managerCache = new Map<string, { id: string; name: string }>();
   const pendingRows: CallInsertRow[] = [];
+  let skippedChunks = 0;
 
   const flushPendingRows = async () => {
     if (pendingRows.length === 0) return;
@@ -647,83 +704,94 @@ export async function runPbxHistorySync(options: RunSyncOptions = {}): Promise<S
   for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
     const chunk = chunks[chunkIndex];
     console.log(`Chunk ${chunkIndex + 1}/${chunks.length}: from=${chunk.from} to=${chunk.to}`);
+    try {
+      let page = 1;
+      while (page <= config.maxPages) {
+        const url = buildHistoryUrl(config.historyApiUrl, chunk.from, chunk.to, page, limit);
+        const payload = await fetchJsonWithRetry(url, config.apiKey, {
+          timeoutMs: config.requestTimeoutMs,
+          retryCount: config.retryCount,
+          retryDelayMs: config.retryDelayMs,
+        });
+        const rawCalls = extractCalls(payload);
 
-    let page = 1;
-    while (page <= config.maxPages) {
-      const url = buildHistoryUrl(config.historyApiUrl, chunk.from, chunk.to, page, limit);
-      const payload = await fetchJsonWithRetry(url, config.apiKey, {
-        timeoutMs: config.requestTimeoutMs,
-        retryCount: config.retryCount,
-        retryDelayMs: config.retryDelayMs,
-      });
-      const rawCalls = extractCalls(payload);
-
-      if (rawCalls.length === 0) {
-        console.log(`Chunk ${chunkIndex + 1}, page ${page}: yozuv yo‘q, tugadi.`);
-        break;
-      }
-
-      console.log(`Chunk ${chunkIndex + 1}, page ${page}: ${rawCalls.length} ta history call olindi.`);
-
-      for (const raw of rawCalls) {
-        counters.fetched += 1;
-        const parsed = parseHistoryCall(raw);
-        if (!parsed) {
-          counters.skippedInvalid += 1;
-          continue;
+        if (rawCalls.length === 0) {
+          console.log(`Chunk ${chunkIndex + 1}, page ${page}: yozuv yo‘q, tugadi.`);
+          break;
         }
 
-        try {
-          const exists = await callExistsByCrmId(parsed.crmId);
-          if (exists) {
-            counters.skippedExisting += 1;
+        console.log(`Chunk ${chunkIndex + 1}, page ${page}: ${rawCalls.length} ta history call olindi.`);
+
+        for (const raw of rawCalls) {
+          counters.fetched += 1;
+          const parsed = parseHistoryCall(raw);
+          if (!parsed) {
+            counters.skippedInvalid += 1;
             continue;
           }
 
-          const managerNameKey = parsed.managerName.trim() || 'Tayinlanmagan';
-          let manager = managerCache.get(managerNameKey);
-          if (!manager) {
-            manager = await getOrCreateManagerByName(managerNameKey);
-            managerCache.set(managerNameKey, manager);
+          try {
+            const exists = await callExistsByCrmId(parsed.crmId);
+            if (exists) {
+              counters.skippedExisting += 1;
+              continue;
+            }
+
+            const managerNameKey = parsed.managerName.trim() || 'Tayinlanmagan';
+            let manager = managerCache.get(managerNameKey);
+            if (!manager) {
+              manager = await getOrCreateManagerByName(managerNameKey);
+              managerCache.set(managerNameKey, manager);
+            }
+
+            const normalizedPhone = normalizePhone(parsed.clientPhone);
+            const mappedClient = normalizedPhone ? usersByPhone.get(normalizedPhone) : undefined;
+
+            const sourceAudioUrl = await fetchHistoryAudioUrl(parsed, config);
+            const persisted = await persistAudio(sourceAudioUrl, config);
+
+            pendingRows.push(buildCallInsertRow({
+              call: parsed,
+              managerId: manager.id,
+              client: mappedClient,
+              audioPublicUrl: persisted.publicUrl,
+              audioSourceUrl: sourceAudioUrl,
+              audioStoragePath: persisted.path,
+            }));
+            if (pendingRows.length >= config.writeBatchSize) {
+              await flushPendingRows();
+            }
+          } catch (error: any) {
+            counters.failed += 1;
+            console.error(`Call import failed (id=${parsed.crmId}):`, error?.message || error);
           }
-
-          const normalizedPhone = normalizePhone(parsed.clientPhone);
-          const mappedClient = normalizedPhone ? usersByPhone.get(normalizedPhone) : undefined;
-
-          const sourceAudioUrl = await fetchHistoryAudioUrl(parsed, config);
-          const persisted = await persistAudio(sourceAudioUrl, config);
-
-          pendingRows.push(buildCallInsertRow({
-            call: parsed,
-            managerId: manager.id,
-            client: mappedClient,
-            audioPublicUrl: persisted.publicUrl,
-            audioSourceUrl: sourceAudioUrl,
-            audioStoragePath: persisted.path,
-          }));
-          if (pendingRows.length >= config.writeBatchSize) {
-            await flushPendingRows();
-          }
-        } catch (error: any) {
-          counters.failed += 1;
-          console.error(`Call import failed (id=${parsed.crmId}):`, error?.message || error);
         }
+
+        await flushPendingRows();
+
+        if (!hasMorePages(payload, rawCalls.length, limit, page)) break;
+        page += 1;
       }
-
-      await flushPendingRows();
-
-      if (!hasMorePages(payload, rawCalls.length, limit, page)) break;
-      page += 1;
+    } catch (chunkError: any) {
+      skippedChunks += 1;
+      counters.failed += 1;
+      console.error(`Chunk ${chunkIndex + 1} skip qilindi (from=${chunk.from} to=${chunk.to}):`, chunkError?.message || chunkError);
+      await flushPendingRows().catch(() => {});
+      continue;
     }
   }
 
   await flushPendingRows();
 
+  if (skippedChunks > 0) {
+    console.warn(`PBX history sync ogohlantirish: ${skippedChunks} ta chunk tarmoq/xato sabab skip qilindi.`);
+  }
   console.log('PBX history sync tugadi:', counters);
   return counters;
 }
 
 if (require.main === module) {
+  installProcessGuards('pbx-history-sync');
   runPbxHistorySync()
     .then(() => process.exit(0))
     .catch((error) => {

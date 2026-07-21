@@ -695,7 +695,7 @@ router.post('/admin/sync-calls', async (req: Request, res: Response) => {
     const chunkSize = Number(req.body?.chunk_size ?? req.query?.chunk_size ?? 0) || undefined;
     const writeBatchSize = Number(req.body?.write_batch_size ?? req.query?.write_batch_size ?? 0) || undefined;
     const chunkUnitRaw = req.body?.chunk_unit ?? req.query?.chunk_unit;
-    const chunkUnit = chunkUnitRaw === 'month' || chunkUnitRaw === 'day' ? chunkUnitRaw : undefined;
+    const chunkUnit = chunkUnitRaw === 'month' || chunkUnitRaw === 'day' || chunkUnitRaw === 'hour' ? chunkUnitRaw : undefined;
 
     const result = await runPbxHistorySync({
       weeks,
