@@ -9,6 +9,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { processLocalAudioWithGroq, processLongAudioWithGroq } from '../lib/groq-audio';
 
 const router = Router();
 
@@ -474,32 +475,60 @@ async function auditAudioFile(filePath: string, mimeType: string, extraRules: st
 
 // Manbani (URL / buffer / fayl yo'li) diskdagi faylga keltirib, auditAudioFile chaqiradi.
 async function auditCallWithGemini(input: AudioInput, extraRules = ''): Promise<GeminiAuditResult> {
-  let filePath: string;
-  let mimeType: string;
-  let cleanupTemp = false;
-
-  if (input.filePath) {
-    filePath = input.filePath; // multer diskka yozgan fayl — egasi tozalaydi
-    mimeType = input.mimeType || 'audio/mpeg';
-  } else if (input.audioBuffer) {
-    mimeType = input.mimeType || 'audio/mpeg';
-    filePath = tmpAudioPath(extFromMime(mimeType));
-    await writeFile(filePath, input.audioBuffer);
-    cleanupTemp = true;
-  } else if (input.audioUrl) {
-    const r = await streamUrlToTempFile(input.audioUrl);
-    filePath = r.filePath;
-    mimeType = r.mimeType;
-    cleanupTemp = true;
-  } else {
-    throw new Error('Audio manbai yo\'q: audioUrl, audioBuffer yoki filePath kerak.');
-  }
-
+  let tempFilePath: string | null = null;
   try {
-    return await auditAudioFile(filePath, mimeType, extraRules);
+    const groqResult = input.filePath
+      ? await processLocalAudioWithGroq(input.filePath)
+      : input.audioBuffer
+        ? await (async () => {
+            const fileExt = extFromMime(input.mimeType || 'audio/mpeg');
+            const localPath = tmpAudioPath(fileExt);
+            await writeFile(localPath, input.audioBuffer as Buffer);
+            tempFilePath = localPath;
+            return processLocalAudioWithGroq(localPath);
+          })()
+        : input.audioUrl
+          ? await processLongAudioWithGroq(input.audioUrl)
+          : null;
+
+    if (!groqResult) {
+      throw new Error('Audio manbai yo\'q: audioUrl, audioBuffer yoki filePath kerak.');
+    }
+
+    const normalized: Partial<GeminiAuditResult> = {
+      transcript: groqResult.transcript,
+      total_calls: 1,
+      incoming_count: 0,
+      outgoing_count: 0,
+      duration: 0,
+      unanswered_count: 0,
+      bad_leads_count: 0,
+      traffic_conversion: 0,
+      sales_conversion: groqResult.analysis.deal_closed ? 100 : 0,
+      kpi_score: 0,
+      penalty_amount: 0,
+      bonus_amount: 0,
+      rop_comment: groqResult.analysis.operator_evaluation,
+      stage_1_to_2: 0,
+      stage_2_to_3: 0,
+      stage_3_to_4: 0,
+      lost_reasons: [],
+      sentiment: groqResult.analysis.sentiment,
+      risk: groqResult.analysis.client_mood,
+      criteria_scores: [],
+      transcript_segments: [],
+      summary: groqResult.analysis.summary,
+      client_info: groqResult.analysis.client_mood,
+      final_agreement: groqResult.analysis.deal_closed
+        ? 'Mijoz bitimga rozilik bildirgan (Groq tahliliga ko\'ra).'
+        : 'Bitim yopilmagan (Groq tahliliga ko\'ra).',
+      next_steps: [],
+    };
+
+    return normalizeAuditResult(normalized);
   } finally {
-    if (cleanupTemp) {
-      try { await unlink(filePath); } catch { /* ignore */ }
+    if (tempFilePath) {
+      try { await unlink(tempFilePath); } catch { /* ignore */ }
     }
   }
 }
@@ -1039,7 +1068,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
   try {
     const hasSupabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
     const hasSupabaseKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!process.env.GEMINI_API_KEY || !hasSupabaseUrl || !hasSupabaseKey) {
+    if (!process.env.GROQ_API_KEY || !hasSupabaseUrl || !hasSupabaseKey) {
       return res.status(500).json({
         success: false,
         error: 'Server configuration error: missing required environment credentials.',
