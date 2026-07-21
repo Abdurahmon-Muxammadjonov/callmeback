@@ -584,9 +584,9 @@ router.get('/dashboard/managers', async (req: Request, res: Response) => {
       .maybeSingle();
 
     if (!hasIntegration?.data?.id) {
-      return res.status(400).json({
+      return res.status(403).json({
         success: false,
-        error: 'amoCRM ulangan emas. Avval /crm/connect orqali ulang.',
+        error: '❌ amoCRM ulangan emas. Avval /crm/connect orqali ulang.',
         managers_count: 0,
         managers: [],
       });
