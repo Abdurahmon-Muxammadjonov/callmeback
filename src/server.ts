@@ -17,6 +17,14 @@ import crmRouter, { runScheduledCrmSync } from './routes/crm';
 
 const app = express();
 
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandledRejection:', (reason as any)?.message || reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('[process] uncaughtException:', error?.message || error);
+});
+
 app.use(cors());
 app.use(express.json());
 
