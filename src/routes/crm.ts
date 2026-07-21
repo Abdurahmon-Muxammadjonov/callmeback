@@ -574,6 +574,63 @@ router.post('/test-connection', async (req: Request, res: Response) => {
   }
 });
 
+// GET /crm/dashboard/managers — amoCRM managers darhol sinxron qilib, dashboard'ga ko'rsatish
+router.get('/dashboard/managers', async (req: Request, res: Response) => {
+  try {
+    const hasIntegration = await supabase
+      .from('crm_integrations')
+      .select('id, enabled')
+      .eq('enabled', true)
+      .maybeSingle();
+
+    if (!hasIntegration?.data?.id) {
+      return res.status(400).json({
+        success: false,
+        error: 'amoCRM ulangan emas. Avval /crm/connect orqali ulang.',
+        managers_count: 0,
+        managers: [],
+      });
+    }
+
+    try {
+      const syncResult = await syncManagers();
+      console.log(`[dashboard/managers] Sync: ${syncResult.synced} synced, ${syncResult.failed} failed`);
+    } catch (syncErr: any) {
+      console.warn('[dashboard/managers] Auto-sync xatosi:', syncErr?.message);
+    }
+
+    const { data: managers, error: fetchErr } = await supabase
+      .from('managers')
+      .select('id, crm_id, name, status')
+      .order('created_at', { ascending: false });
+
+    if (fetchErr) {
+      return res.status(500).json({
+        success: false,
+        error: `Managers yuklab bo'lmadi: ${fetchErr.message}`,
+        managers_count: 0,
+        managers: [],
+      });
+    }
+
+    const activeCount = (managers || []).filter((m) => m.status !== 'inactive').length;
+    return res.status(200).json({
+      success: true,
+      message: `${activeCount}/${(managers || []).length} ta ishchi aktiv`,
+      managers_count: managers?.length || 0,
+      active_count: activeCount,
+      managers: managers || [],
+    });
+  } catch (e: any) {
+    return res.status(500).json({
+      success: false,
+      error: e?.message || 'Dashboard managers xatosi',
+      managers_count: 0,
+      managers: [],
+    });
+  }
+});
+
 router.post('/webhook/pbx', async (req: Request, res: Response) => {
   try {
     const cfg = await loadLatestPbxIntegration({ onlyEnabled: true });
