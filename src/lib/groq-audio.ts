@@ -57,18 +57,27 @@ async function splitAudioToChunks(inputFilePath: string, chunksDir: string): Pro
   const ext = path.extname(inputFilePath) || '.mp3';
   const outputPattern = path.join(chunksDir, `chunk-%05d${ext}`);
 
-  await new Promise<void>((resolve, reject) => {
-    ffmpeg(inputFilePath)
-      .outputOptions([
-        '-f segment',
-        `-segment_time ${SEGMENT_SECONDS}`,
-        '-c copy',
-      ])
-      .output(outputPattern)
-      .on('end', () => resolve())
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inputFilePath)
+        .outputOptions([
+          '-f segment',
+          `-segment_time ${SEGMENT_SECONDS}`,
+          '-c copy',
+        ])
+        .output(outputPattern)
+        .on('end', () => resolve())
         .on('error', (error: Error) => reject(error))
-      .run();
-  });
+        .run();
+    });
+  } catch (error: any) {
+    const msg = String(error?.message || error || '');
+    if (msg.toLowerCase().includes('cannot find ffmpeg') || msg.toLowerCase().includes('ffmpeg was not found')) {
+      console.warn('ffmpeg topilmadi, chunk qilish o\'rniga bitta fayl transkripsiya qilinadi.');
+      return [inputFilePath];
+    }
+    throw error;
+  }
 
   const files = (await readdir(chunksDir))
     .filter((name) => name.startsWith('chunk-'))
@@ -100,7 +109,7 @@ async function transcribeChunk(client: Groq, chunkPath: string): Promise<string>
   return text.trim();
 }
 
-async function analyzeTranscript(client: Groq, transcript: string): Promise<GroqCallAnalysis> {
+async function analyzeTranscript(client: Groq, transcript: string, extraRules = ''): Promise<GroqCallAnalysis> {
   const systemPrompt = [
     'Siz tajribali call-center QA analitikisiz.',
     'Faqat valid JSON object qaytaring. Hech qanday qo\'shimcha matn yozmang.',
@@ -114,12 +123,14 @@ async function analyzeTranscript(client: Groq, transcript: string): Promise<Groq
     '}',
   ].join('\n');
 
+  const finalSystemPrompt = extraRules ? `${systemPrompt}\n\n${extraRules}` : systemPrompt;
+
   const completion = await client.chat.completions.create({
     model: ANALYZE_MODEL,
     temperature: 0.1,
     response_format: { type: 'json_object' },
     messages: [
-      { role: 'system', content: systemPrompt },
+      { role: 'system', content: finalSystemPrompt },
       {
         role: 'user',
         content: `Quyidagi qo'ng'iroq transcriptini tahlil qil:\n\n${transcript}`,
@@ -155,7 +166,7 @@ async function removePathSafe(targetPath: string): Promise<void> {
   }
 }
 
-export async function processLongAudioWithGroq(audioUrl: string): Promise<GroqAudioProcessResult> {
+export async function processLongAudioWithGroq(audioUrl: string, extraRules = ''): Promise<GroqAudioProcessResult> {
   if (!process.env.GROQ_API_KEY) {
     throw new Error('GROQ_API_KEY yo\'q.');
   }
@@ -192,7 +203,7 @@ export async function processLongAudioWithGroq(audioUrl: string): Promise<GroqAu
       throw new Error('Transcription bo\'sh chiqdi.');
     }
 
-    const analysis = await analyzeTranscript(client, transcript);
+    const analysis = await analyzeTranscript(client, transcript, extraRules);
 
     return {
       transcript,
@@ -211,7 +222,7 @@ export async function processLongAudioWithGroq(audioUrl: string): Promise<GroqAu
   }
 }
 
-export async function processLocalAudioWithGroq(localAudioPath: string): Promise<GroqAudioProcessResult> {
+export async function processLocalAudioWithGroq(localAudioPath: string, extraRules = ''): Promise<GroqAudioProcessResult> {
   if (!process.env.GROQ_API_KEY) {
     throw new Error('GROQ_API_KEY yo\'q.');
   }
@@ -248,7 +259,7 @@ export async function processLocalAudioWithGroq(localAudioPath: string): Promise
       throw new Error('Transcription bo\'sh chiqdi.');
     }
 
-    const analysis = await analyzeTranscript(client, transcript);
+    const analysis = await analyzeTranscript(client, transcript, extraRules);
 
     return {
       transcript,

@@ -1,12 +1,7 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { SchemaType, type Schema } from '@google/generative-ai';
-import { GoogleAIFileManager, FileState } from '@google/generative-ai/server';
-import { createWriteStream } from 'node:fs';
-import { stat, unlink, readFile, writeFile } from 'node:fs/promises';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
+import { unlink, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { processLocalAudioWithGroq, processLongAudioWithGroq } from '../lib/groq-audio';
@@ -14,18 +9,14 @@ import { processLocalAudioWithGroq, processLongAudioWithGroq } from '../lib/groq
 const router = Router();
 
 // Yuklangan audio faylni DISKKA yozamiz (heap'da ulkan buffer ushlamaymiz).
-// Limit 2GB — Gemini File API katta/uzoq audiolarni qo'llaydi (30 daqiqa+).
+// Limit 2GB — uzun audio yozuvlar uchun.
 const upload = multer({
   storage: multer.diskStorage({ destination: os.tmpdir() }),
   limits: { fileSize: 2 * 1024 * 1024 * 1024 },
 });
 
-// Inline (base64) chegarasi: shundan kichik bo'lsa to'g'ridan-to'g'ri inline,
-// kattasi Gemini File API orqali yuboriladi (20MB inline limitini chetlab o'tadi).
-const INLINE_MAX_BYTES = 18 * 1024 * 1024;
 // Bir vaqtda nechta qo'ng'iroq parallel tahlil qilinadi (memory/limit nazorati).
 const ANALYZE_CONCURRENCY = parseInt(process.env.ANALYZE_CONCURRENCY || '4', 10);
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface LostReason {
   reason_text: string;
@@ -44,7 +35,7 @@ interface TranscriptSegment {
   start: number;   // segment boshlanishi (sekund)
 }
 
-interface GeminiAuditResult {
+interface AuditResult {
   transcript: string;
   total_calls: number;
   incoming_count: number;
@@ -84,7 +75,6 @@ interface CriticalAlert {
 
 const KPI_THRESHOLD = 40;
 const KPI_MIN_DURATION_SEC = 60;
-const GEMINI_INLINE_LIMIT_BYTES = 20 * 1024 * 1024;
 
 let cachedMetrics: any = null;
 let lastCacheTime = 0;
@@ -114,139 +104,7 @@ const isValidHttpUrl = (v: string) => {
   }
 };
 
-const STRICT_AUDITOR_INSTRUCTION = `You are an uncompromising, expert AI Sales Quality Assurance (QA) Auditor for the "Procell" platform. Your task is to analyze the provided audio transcript of an Uzbek sales call and strictly evaluate the manager's performance against the official script structure.
-
-You must score the call and populate the JSON response schema according to these detailed operational stages:
-
-### 1. EVALUATION CRITERIA (Script Stages)
-- **Stage 0 & 1: Preparation & Greeting ("Salomlashish")**
-  * Check if the manager uses an energetic, helpful tone.
-  * Must state their name and mention they are from "Axror Abrooriyev's team".
-  * Must cite the lead source ("brend sahifamizga qoldirilgan so'rov") and execute a strategic pause for confirmation.
-- **Stage 2: Filtering ("Filtrlash")**
-  * Must ask the filter question: "Kurs haqida ma'lumot olmoqchimisiz yoki biznesda qatnashmoqchimisiz?"
-  * Must qualify the prospect's profession/niche to see if they fit. If they don't fit, the call should be professionally shortened.
-- **Stage 3: Programming ("Programmalashtirish")**
-  * Must gain permission to lead the call: "Suhbatimiz faloncha daqiqa bo'ladi... savollar beraman va oxirida birgalikda qaror qabul qilamiz. Kelishdikmi?"
-- **Stage 4 & 5: Discovery & SPIN ("Ehtiyoj aniqlash & A dan B nuqtaga")**
-  * Must uncover Point A (current state/problems) and Point B (goals, income desires by September).
-  * Must dive into "Hidden Needs" and obstacles: "O'zingiz mustaqil bunga erisholmayapsizmi? To'siq nima?"
-- **Stage 6: Presentation ("Taqdimot")**
-  * Must pitch the specific course modules based on client needs (Standard: 5M, Premium: 12M, VIP: 25M UZS).
-  * Must tie value to price before revealing the amount if the client is price-focused.
-- **Stage 7: Objection Handling ("E'tirozlar")**
-  * Must strictly follow the formula: **Acceptance + Argument + Offer** (Qabul qilish + Argument + Taklif) for objections like "Qimmat" (Expensive), "O'ylab ko'raman" (I'll think about it), or "Pulim yo'q" (No money).
-- **Stage 8: Closing ("Yopish")**
-  * Must push for a commitment or deposit/reservation (Bron: 1,500,000 UZS) and set deadlines.
-
-### 2. AUTOMATIC FINANCIAL PENALTIES (Deducted from Base Salary parameters)
-- **Suv ko'pirtirish (Fluff/Filler content)**: Vague, unprofessional chitchat instead of driving script value -> Penalty: 20,000 UZS.
-- **No Programming / No Discovery**: Skipping Stage 3 or failing to find deep hidden needs in Stage 5 -> Penalty: 30,000 UZS.
-- **Broken Objection Formula**: Handled objections without using the Acceptance+Argument+Offer sequence -> Penalty: 25,000 UZS.
-- **Missed Close**: Failed to offer a hard reservation ("Bron") or payment link -> Penalty: 25,000 UZS.
-
-### 3. AUTOMATIC BONUS STATUS
-- If \`sales_conversion\` or \`traffic_conversion\` is greater than 75% and the KPI Score is above 80% -> Award Bonus: 50,000 UZS. Else, 0.
-
-### 4. OUTPUT INSTRUCTIONS
-- Generate an accurate word-for-word string \`transcript\`.
-- ALSO populate \`transcript_segments\`: the FULL dialogue split turn-by-turn. For every spoken turn output an object { speaker, text, start } where speaker is exactly "Manager" or "Mijoz", text is the verbatim Uzbek words for that turn, and start is the approximate start time in SECONDS from the beginning of the audio. Keep chronological order and do not skip any turn.
-- Calculate absolute metrics for the JSON payload.
-- Provide a 2-3 sentence strict, constructive \`rop_comment\` written in fluent UZBEK, addressing exactly which script stages were executed perfectly and where penalties were applied.
-- Populate \`summary\` (UZBEK, multi-line): a fuller audit summary — what the manager did well and exactly what they did wrong, which stages succeeded and which failed.
-- Populate \`client_info\` (UZBEK): everything learned about the client — profession, business, niche, current problems, goals, follower counts, budget, income. Be specific with numbers mentioned.
-- Populate \`final_agreement\` (UZBEK): the final agreement — which tariff/price was chosen, deposit (zakolat) amount, and the agreed call-back time. If no deal was closed, state that clearly.
-- Populate \`next_steps\` (UZBEK array): concrete follow-up actions (e.g. send card number via Telegram, call back at 16:30 to verify deposit, send promised videos, add client to channel).
-- Do not output any prose outside the valid JSON.`;
-
-const RESPONSE_SCHEMA: Schema = {
-  type: SchemaType.OBJECT,
-  properties: {
-    transcript: { type: SchemaType.STRING },
-    total_calls: { type: SchemaType.INTEGER },
-    incoming_count: { type: SchemaType.INTEGER },
-    outgoing_count: { type: SchemaType.INTEGER },
-    duration: { type: SchemaType.INTEGER },
-    unanswered_count: { type: SchemaType.INTEGER },
-    bad_leads_count: { type: SchemaType.INTEGER },
-    traffic_conversion: { type: SchemaType.NUMBER },
-    sales_conversion: { type: SchemaType.NUMBER },
-    kpi_score: { type: SchemaType.NUMBER, description: 'Overall strict KPI score from 0 to 100' },
-    penalty_amount: { type: SchemaType.NUMBER, description: 'Calculated penalty in UZS based on mistakes' },
-    bonus_amount: { type: SchemaType.NUMBER, description: 'Calculated bonus in UZS' },
-    rop_comment: { type: SchemaType.STRING, description: '2-3 specific audit sentences in Uzbek (ROP Izoh)' },
-    stage_1_to_2: { type: SchemaType.INTEGER },
-    stage_2_to_3: { type: SchemaType.INTEGER },
-    stage_3_to_4: { type: SchemaType.INTEGER },
-    lost_reasons: {
-      type: SchemaType.ARRAY,
-      items: {
-        type: SchemaType.OBJECT,
-        properties: {
-          reason_text: { type: SchemaType.STRING },
-          count: { type: SchemaType.INTEGER },
-        },
-        required: ['reason_text', 'count'],
-      },
-    },
-    sentiment: { type: SchemaType.STRING, description: 'Umumiy hissiy ton (masalan: ijobiy/neytral/salbiy + qisqa izoh, Uzbek)' },
-    risk: { type: SchemaType.STRING, description: 'Asosiy xavf/risk darajasi va sababi (Uzbek)' },
-    criteria_scores: {
-      type: SchemaType.ARRAY,
-      items: {
-        type: SchemaType.OBJECT,
-        properties: {
-          title: { type: SchemaType.STRING },
-          category: { type: SchemaType.STRING },
-          score: { type: SchemaType.INTEGER, description: '0 dan 100 gacha ball' },
-        },
-        required: ['title', 'score'],
-      },
-    },
-    transcript_segments: {
-      type: SchemaType.ARRAY,
-      description: 'To\'liq dialog: har bir gap alohida (kim aytdi + matn + taxminiy vaqt)',
-      items: {
-        type: SchemaType.OBJECT,
-        properties: {
-          speaker: { type: SchemaType.STRING, description: "'Manager' yoki 'Mijoz'" },
-          text: { type: SchemaType.STRING, description: 'Aynan nima gapirilgani (so\'zma-so\'z)' },
-          start: { type: SchemaType.NUMBER, description: 'Segment boshlanish vaqti (sekundlarda)' },
-        },
-        required: ['speaker', 'text'],
-      },
-    },
-    summary: { type: SchemaType.STRING, description: 'Qo\'ng\'iroq xulosasi: menejer nimani yaxshi, nimani noto\'g\'ri qildi (ko\'p qatorli) — Uzbek' },
-    client_info: { type: SchemaType.STRING, description: 'Mijoz haqida to\'plangan barcha ma\'lumot (kasbi, biznesi, muammosi, maqsadi, byudjeti) — Uzbek' },
-    final_agreement: { type: SchemaType.STRING, description: 'Oxirgi kelishuv: tanlangan tarif, summa, zakolat, qayta bog\'lanish vaqti — Uzbek' },
-    next_steps: {
-      type: SchemaType.ARRAY,
-      description: 'Keyingi qadamlar ro\'yxati (Uzbek)',
-      items: { type: SchemaType.STRING },
-    },
-  },
-  required: [
-    'transcript',
-    'total_calls',
-    'incoming_count',
-    'outgoing_count',
-    'duration',
-    'unanswered_count',
-    'bad_leads_count',
-    'traffic_conversion',
-    'sales_conversion',
-    'kpi_score',
-    'penalty_amount',
-    'bonus_amount',
-    'rop_comment',
-    'stage_1_to_2',
-    'stage_2_to_3',
-    'stage_3_to_4',
-    'lost_reasons',
-  ],
-};
-
-// Bazadagi aktiv qoidalarni o'qib, Gemini uchun qo'shimcha ko'rsatma matnini quradi.
+// Bazadagi aktiv qoidalarni o'qib, Groq tahlili uchun qo'shimcha ko'rsatma matnini quradi.
 // Admin yangi qoida qo'shsa, keyingi tahlilda darhol shu yerda paydo bo'ladi.
 async function buildDynamicRules(supabase: SupabaseClient): Promise<string> {
   const { data, error } = await supabase
@@ -270,64 +128,6 @@ async function buildDynamicRules(supabase: SupabaseClient): Promise<string> {
   );
 }
 
-const RETRIABLE_RE = /UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded|high demand/i;
-
-function isRetriableGeminiError(e: any): boolean {
-  const status = e?.status ?? e?.response?.status ?? e?.code;
-  return status === 503 || status === 429 || RETRIABLE_RE.test(e?.message || '');
-}
-
-// Exponential backoff + jitter bilan qayta urinish (vaqtinchalik 503/429 uchun).
-async function callGeminiWithRetry<T>(
-  fn: () => Promise<T>,
-  { retries = 4, baseMs = 1000 }: { retries?: number; baseMs?: number } = {}
-): Promise<T> {
-  let lastErr: any;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      return await fn();
-    } catch (e: any) {
-      lastErr = e;
-      const status = e?.status ?? e?.response?.status ?? e?.code;
-      if (!isRetriableGeminiError(e) || attempt === retries) throw e;
-      const delay = baseMs * 2 ** attempt + Math.floor(Math.random() * 400); // jitter
-      console.warn(`Gemini ${status} — retry ${attempt + 1}/${retries} ${delay}ms ichida`);
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-  throw lastErr;
-}
-
-// Gemini xatosini frontend uchun toza xabarga aylantiradi.
-function makeBusyError(e: any): Error & { statusCode: number } {
-  const busy = isRetriableGeminiError(e);
-  const err = new Error(
-    busy
-      ? "AI auditor (Gemini) hozir band. Iltimos, bir necha daqiqadan so'ng qayta urining."
-      : `Gemini Direct API Error: ${e?.message || e}`
-  ) as Error & { statusCode: number };
-  // Band/limit (503/429) -> 503; boshqa Gemini xatolari (404 model, 400 kalit) -> 502.
-  err.statusCode = busy ? 503 : 502;
-  return err;
-}
-
-// Bitta Gemini generateContent so'rovi. Xato bo'lsa, .status bilan Error tashlaydi.
-async function requestGeminiOnce(model: string, requestBody: object): Promise<any> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(requestBody),
-  });
-  if (!resp.ok) {
-    const errText = await resp.text();
-    const err = new Error(`Gemini Direct API Error: ${errText}`) as Error & { status?: number };
-    err.status = resp.status;
-    throw err;
-  }
-  return resp.json();
-}
-
 interface AudioInput {
   audioUrl?: string;
   audioBuffer?: Buffer;
@@ -346,156 +146,29 @@ function tmpAudioPath(ext: string): string {
   return path.join(os.tmpdir(), `procell-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
 }
 
-// URL'dan vaqtinchalik faylga STREAM qiladi — ulkan buffer'ni Node heap'iga yuklamaydi.
-async function streamUrlToTempFile(url: string): Promise<{ filePath: string; mimeType: string }> {
-  // Brauzerga o'xshash sarlavhalar — ko'p CRM serverlari User-Agent'siz so'rovni bloklaydi.
-  const res = await fetch(url, {
-    redirect: 'follow',
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ProsellBot/1.0)', Accept: 'audio/*,*/*' },
-  });
-  if (!res.ok || !res.body) throw new Error(`Audio fetch failed: HTTP ${res.status}`);
-  const ct = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-  // CRM ba'zan audio o'rniga HTML/JSON (login yoki xato sahifa) qaytaradi.
-  if (ct.startsWith('text/') || ct.includes('html') || ct.includes('json')) {
-    throw new Error(
-      `Audio fetch failed: URL audio emas (content-type: ${ct || 'noma\'lum'}). ` +
-      `CRM linki avtorizatsiya yoki redirect talab qilishi mumkin — faylni Catbox/Supabase Storage kabi ` +
-      `to'g'ridan-to'g'ri ochiladigan manzilga joylang yoki "audio" faylni multipart bilan yuboring.`,
-    );
-  }
-  const mimeType = ct || 'audio/mpeg';
-  const filePath = tmpAudioPath(extFromMime(mimeType));
-  await pipeline(Readable.fromWeb(res.body as any), createWriteStream(filePath));
-  return { filePath, mimeType };
-}
-
-// Audio "part" (inline yoki File API) ni Gemini'ga yuboradi; retry + model fallback bilan.
-async function runGeminiAudit(audioPart: any, extraRules: string): Promise<Partial<GeminiAuditResult>> {
-  const primaryModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-  const fallbackModel = process.env.GEMINI_FALLBACK_MODEL || 'gemini-2.0-flash';
-
-  const requestBody = {
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { text: "Auditor! Transcribe and strictly judge this sales call using the structural options provided." },
-          audioPart,
-        ],
-      },
-    ],
-    systemInstruction: { parts: [{ text: STRICT_AUDITOR_INSTRUCTION + extraRules }] },
-    generationConfig: {
-      responseMimeType: 'application/json',
-      responseSchema: RESPONSE_SCHEMA,
-      temperature: 0.1,
-    },
-  };
-
-  let geminiData: any;
-  try {
-    geminiData = await callGeminiWithRetry(() => requestGeminiOnce(primaryModel, requestBody));
-  } catch (primaryErr: any) {
-    if (isRetriableGeminiError(primaryErr) && fallbackModel && fallbackModel !== primaryModel) {
-      console.warn(`Birlamchi model (${primaryModel}) band — fallback (${fallbackModel}) bilan urinamiz`);
-      try {
-        geminiData = await callGeminiWithRetry(() => requestGeminiOnce(fallbackModel, requestBody), { retries: 1 });
-      } catch (fallbackErr: any) {
-        throw makeBusyError(fallbackErr);
-      }
-    } else {
-      throw makeBusyError(primaryErr);
-    }
-  }
-
-  const resultText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!resultText) throw new Error('Gemini returned empty response content');
-  try {
-    return JSON.parse(resultText) as Partial<GeminiAuditResult>;
-  } catch (e) {
-    throw new Error(`Gemini returned invalid JSON: ${(e as Error).message}`);
-  }
-}
-
-// Diskdagi audio faylni tahlil qiladi: HAQIQIY uzunlik + (kichik→inline / katta→File API).
-async function auditAudioFile(filePath: string, mimeType: string, extraRules: string): Promise<GeminiAuditResult> {
-  // Audio faylning HAQIQIY uzunligini diskdan o'lchaymiz (Gemini taxminiga ishonmaymiz).
-  let realDurationSec = 0;
-  try {
-    const mm = await import('music-metadata');
-    const meta = await mm.parseFile(filePath);
-    realDurationSec = Math.round(meta.format.duration || 0);
-  } catch (e) {
-    console.warn('Audio duration parse failed:', (e as Error).message);
-  }
-
-  const { size } = await stat(filePath);
-  let audioPart: any;
-  let uploadedFileName: string | undefined;
-
-  if (size <= INLINE_MAX_BYTES) {
-    // Kichik fayl — inline base64 (tez, qo'shimcha yuklash kerak emas).
-    const buf = await readFile(filePath);
-    audioPart = { inlineData: { mimeType, data: buf.toString('base64') } };
-  } else {
-    // Katta/uzoq audio (30 daqiqa+) — Gemini File API. Heap'ga base64 yuklamaymiz.
-    const fm = new GoogleAIFileManager(process.env.GEMINI_API_KEY || '');
-    const uploaded = await fm.uploadFile(filePath, { mimeType, displayName: path.basename(filePath) });
-    uploadedFileName = uploaded.file.name;
-    let f = uploaded.file;
-    // Fayl ACTIVE bo'lguncha kutamiz (Gemini uni qabul qilib qayta ishlaydi).
-    let guard = 0;
-    while (f.state === FileState.PROCESSING && guard++ < 150) {
-      await sleep(2000);
-      f = await fm.getFile(uploaded.file.name);
-    }
-    if (f.state !== FileState.ACTIVE) {
-      throw new Error(`Gemini fayl ishlovi muvaffaqiyatsiz (state: ${f.state})`);
-    }
-    audioPart = { fileData: { fileUri: f.uri, mimeType } };
-  }
-
-  try {
-    const parsed = await runGeminiAudit(audioPart, extraRules);
-    const result = normalizeAuditResult(parsed);
-    if (realDurationSec > 0) result.duration = realDurationSec; // 1:58 emas, aniq 27:00
-    return result;
-  } finally {
-    // Gemini'ga yuklangan faylni tozalaymiz (best-effort).
-    if (uploadedFileName) {
-      try {
-        const fm = new GoogleAIFileManager(process.env.GEMINI_API_KEY || '');
-        await fm.deleteFile(uploadedFileName);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-}
-
-// Manbani (URL / buffer / fayl yo'li) diskdagi faylga keltirib, auditAudioFile chaqiradi.
-async function auditCallWithGemini(input: AudioInput, extraRules = ''): Promise<GeminiAuditResult> {
+// Manbani (URL / buffer / fayl yo'li) Groq orqali audit qiladi.
+async function auditCallWithGroq(input: AudioInput, extraRules = ''): Promise<AuditResult> {
   let tempFilePath: string | null = null;
   try {
     const groqResult = input.filePath
-      ? await processLocalAudioWithGroq(input.filePath)
+      ? await processLocalAudioWithGroq(input.filePath, extraRules)
       : input.audioBuffer
         ? await (async () => {
             const fileExt = extFromMime(input.mimeType || 'audio/mpeg');
             const localPath = tmpAudioPath(fileExt);
             await writeFile(localPath, input.audioBuffer as Buffer);
             tempFilePath = localPath;
-            return processLocalAudioWithGroq(localPath);
+            return processLocalAudioWithGroq(localPath, extraRules);
           })()
         : input.audioUrl
-          ? await processLongAudioWithGroq(input.audioUrl)
+          ? await processLongAudioWithGroq(input.audioUrl, extraRules)
           : null;
 
     if (!groqResult) {
       throw new Error('Audio manbai yo\'q: audioUrl, audioBuffer yoki filePath kerak.');
     }
 
-    const normalized: Partial<GeminiAuditResult> = {
+    const normalized: Partial<AuditResult> = {
       transcript: groqResult.transcript,
       total_calls: 1,
       incoming_count: 0,
@@ -533,7 +206,7 @@ async function auditCallWithGemini(input: AudioInput, extraRules = ''): Promise<
   }
 }
 
-function normalizeAuditResult(r: Partial<GeminiAuditResult>): GeminiAuditResult {
+function normalizeAuditResult(r: Partial<AuditResult>): AuditResult {
   const clamp = (v: number | undefined, min: number, max: number) =>
     Math.max(min, Math.min(max, v ?? min));
   const intMin0 = (v: number | undefined) => Math.max(0, Math.floor(v ?? 0));
@@ -631,6 +304,10 @@ async function evaluateManagerKpi(
 
 // manager_id berilmaganda ishlatiladigan "Tayinlanmagan" menejer (bir marta yaratiladi).
 const DEFAULT_MANAGER_NAME = 'Tayinlanmagan';
+function makeAutoCrmId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 async function getOrCreateDefaultManager(
   supabase: SupabaseClient
 ): Promise<{ id: string; name: string; status: string }> {
@@ -643,7 +320,7 @@ async function getOrCreateDefaultManager(
 
   const { data: created, error } = await supabase
     .from('managers')
-    .insert({ name: DEFAULT_MANAGER_NAME, status: 'active' })
+    .insert({ name: DEFAULT_MANAGER_NAME, status: 'active', crm_id: makeAutoCrmId('auto-default') })
     .select('id, name, status')
     .single();
   if (error || !created) {
@@ -664,7 +341,7 @@ async function getOrCreateManagerByName(
   if (existing && existing.length > 0) return existing[0];
 
   const { data: created, error } = await supabase
-    .from('managers').insert({ name: clean, status: 'active' }).select('id, name, status').single();
+    .from('managers').insert({ name: clean, status: 'active', crm_id: makeAutoCrmId('auto-manager') }).select('id, name, status').single();
   if (error || !created) {
     throw new Error(`Manager yaratib bo'lmadi: ${error?.message || 'unknown'}`);
   }
@@ -699,7 +376,7 @@ async function uploadAudioToStorage(
 }
 
 // calls jadvalining ustun qiymatlari (yakka va batch rejim uchun umumiy).
-function callRowFields(audit: GeminiAuditResult) {
+function callRowFields(audit: AuditResult) {
   return {
     total_calls: audit.total_calls,
     incoming_count: audit.incoming_count,
@@ -724,7 +401,7 @@ function callRowFields(audit: GeminiAuditResult) {
 }
 
 // Bog'liq jadvallarga (conversions/lost_reasons/call_criteria_scores) yozish promise'lari.
-function childWritePromises(supabase: SupabaseClient, callId: string, audit: GeminiAuditResult) {
+function childWritePromises(supabase: SupabaseClient, callId: string, audit: AuditResult) {
   const writes = [
     supabase.from('conversions').insert({
       call_id: callId,
@@ -807,7 +484,7 @@ const inFlightCalls = new Set<string>();
 async function processOneBatchCall(supabase: SupabaseClient, prep: PreparedCall, extraRules: string): Promise<void> {
   inFlightCalls.add(prep.callId);
   try {
-    const audit = await auditCallWithGemini({ audioUrl: prep.audioUrl }, extraRules);
+    const audit = await auditCallWithGroq({ audioUrl: prep.audioUrl }, extraRules);
     const { error: upErr } = await supabase
       .from('calls')
       .update({ ...callRowFields(audit), status: 'done', error: null })
@@ -1071,7 +748,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
     const missingVars: string[] = [];
     if (!process.env.GROQ_API_KEY) missingVars.push('GROQ_API_KEY');
     if (!hasSupabaseUrl) missingVars.push('SUPABASE_URL (yoki NEXT_PUBLIC_SUPABASE_URL)');
-    if (!hasSupabaseKey) missingVars.push('SUPABASE_SERVICE_ROLE_KEY');
+    if (!hasSupabaseKey) missingVars.push('SUPABASE_SECRET_KEY (yoki SUPABASE_SERVICE_ROLE_KEY)');
     if (missingVars.length > 0) {
       console.error('[analyze-call] Missing env vars:', missingVars.join(', '));
       return res.status(503).json({
@@ -1136,9 +813,9 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
 
     // Audit kirishi: fayl bo'lsa diskdagi fayldan, aks holda URL'dan.
     let audio_url = bodyAudioUrl;
-    let audit: GeminiAuditResult;
+    let audit: AuditResult;
     if (uploadedFile) {
-      audit = await auditCallWithGemini({ filePath: uploadedFile.path, mimeType: uploadedFile.mimetype }, extraRules);
+      audit = await auditCallWithGroq({ filePath: uploadedFile.path, mimeType: uploadedFile.mimetype }, extraRules);
       // Faylni Storage'ga saqlab, qayta eshitish uchun public URL olamiz, so'ng tmp'ni tozalaymiz.
       try {
         const buf = await readFile(uploadedFile.path);
@@ -1147,7 +824,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
         await unlink(uploadedFile.path).catch(() => {});
       }
     } else {
-      audit = await auditCallWithGemini({ audioUrl: bodyAudioUrl }, extraRules);
+      audit = await auditCallWithGroq({ audioUrl: bodyAudioUrl }, extraRules);
     }
 
     const { data: callRow, error: callInsertError } = await supabase
@@ -1253,8 +930,17 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
     });
   } catch (err: any) {
     console.error('Audit handler error:', err);
+    const message = String(err?.message || 'Unknown error');
+    const invalidGroqKey = /invalid api key|invalid_api_key/i.test(message);
+    if (invalidGroqKey) {
+      return res.status(503).json({
+        success: false,
+        error: 'Server configuration error: invalid GROQ_API_KEY.',
+        missing: ['GROQ_API_KEY'],
+      });
+    }
     const statusCode = typeof err?.statusCode === 'number' ? err.statusCode : 500;
-    return res.status(statusCode).json({ success: false, error: err.message });
+    return res.status(statusCode).json({ success: false, error: message });
   }
 });
 
