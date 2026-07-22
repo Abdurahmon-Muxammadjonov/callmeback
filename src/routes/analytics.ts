@@ -56,32 +56,55 @@ interface CallAgg {
   total_calls: number;
   avg_kpi_score: number;
   avg_duration_sec: number;
+  total_duration_sec: number;
   total_penalty: number;
   total_bonus: number;
 }
 
 // GET /analytics
-// Frontend root endpoint so'rovlarida tezkor umumiy metrikani qaytaradi.
+// Frontend root endpoint so'rovlarida umumiy metrikani frontend kutgan formatda qaytaradi.
 router.get('/', async (_req: Request, res: Response) => {
   try {
-    const { curStart, curEnd, prevStart, prevEnd } = periodRanges('day');
-    const [current, previous] = await Promise.all([
-      aggregateCalls(curStart, curEnd, null),
-      aggregateCalls(prevStart, prevEnd, null),
+    const [callsRes, conversionsRes, lostReasonsRes] = await Promise.all([
+      supabase.from('calls').select('id, duration'),
+      supabase.from('conversions').select('traffic_conversion, sales_conversion'),
+      supabase.from('lost_reasons').select('reason_text'),
     ]);
 
-    const keys: (keyof CallAgg)[] = ['total_calls', 'avg_kpi_score', 'avg_duration_sec', 'total_penalty', 'total_bonus'];
-    const change_pct: Record<string, number> = {};
-    keys.forEach((k) => {
-      change_pct[k] = pctChange(current[k], previous[k]);
+    if (callsRes.error) throw new Error(callsRes.error.message);
+    if (conversionsRes.error) throw new Error(conversionsRes.error.message);
+    if (lostReasonsRes.error) throw new Error(lostReasonsRes.error.message);
+
+    const totalCalls = callsRes.data?.length || 0;
+    const averageDurationSeconds = totalCalls > 0
+      ? Math.round((callsRes.data?.reduce((acc, row) => acc + (row.duration || 0), 0) || 0) / totalCalls)
+      : 0;
+
+    const convRows = conversionsRes.data || [];
+    const averages = {
+      traffic_conversion: convRows.length > 0
+        ? Number((convRows.reduce((acc, row) => acc + Number(row.traffic_conversion || 0), 0) / convRows.length).toFixed(2))
+        : 0,
+      sales_conversion: convRows.length > 0
+        ? Number((convRows.reduce((acc, row) => acc + Number(row.sales_conversion || 0), 0) / convRows.length).toFixed(2))
+        : 0,
+    };
+
+    const lostReasonsSummary: Record<string, number> = {};
+    (lostReasonsRes.data || []).forEach((row) => {
+      lostReasonsSummary[row.reason_text] = (lostReasonsSummary[row.reason_text] || 0) + 1;
     });
 
     return res.status(200).json({
       success: true,
-      period: 'day',
-      current,
-      previous,
-      change_pct,
+      data: {
+        totalCalls,
+        averageDurationSeconds,
+        averages,
+        lostReasonsSummary,
+        cachedAt: new Date().toISOString(),
+      },
+      cached: false,
     });
   } catch (err: any) {
     return res.status(500).json({
@@ -99,7 +122,7 @@ async function aggregateCalls(start: Date, end: Date, managerIds: string[] | nul
     .gte('created_at', start.toISOString())
     .lt('created_at', end.toISOString());
   if (managerIds) {
-    if (managerIds.length === 0) return { total_calls: 0, avg_kpi_score: 0, avg_duration_sec: 0, total_penalty: 0, total_bonus: 0 };
+    if (managerIds.length === 0) return { total_calls: 0, avg_kpi_score: 0, avg_duration_sec: 0, total_duration_sec: 0, total_penalty: 0, total_bonus: 0 };
     q = q.in('manager_id', managerIds);
   }
   const { data, error } = await q;
@@ -108,45 +131,71 @@ async function aggregateCalls(start: Date, end: Date, managerIds: string[] | nul
   const rows = data || [];
   const n = rows.length;
   const sum = (f: (r: any) => number) => rows.reduce((a, r) => a + (Number(f(r)) || 0), 0);
+  const totalDurationSec = Math.round(sum((r) => r.duration));
   return {
     total_calls: n,
     avg_kpi_score: n ? Number((sum((r) => r.kpi_score) / n).toFixed(2)) : 0,
     avg_duration_sec: n ? Math.round(sum((r) => r.duration) / n) : 0,
+    total_duration_sec: totalDurationSec,
     total_penalty: Number(sum((r) => r.penalty_amount).toFixed(2)),
     total_bonus: Number(sum((r) => r.bonus_amount).toFixed(2)),
   };
 }
 
 // GET /analytics/overview?period=day|week|month&tenant_id=
-// Joriy davr metrikalarini oldingi davr bilan solishtiradi (period-over-period).
+// Frontend kutgan ko'rinishda day/week/month PoP statistikani bitta javobda qaytaradi.
 router.get('/overview', async (req: Request, res: Response) => {
   try {
-    const period = (['day', 'week', 'month'].includes(String(req.query.period)) ? req.query.period : 'day') as Period;
     const tenantId = typeof req.query.tenant_id === 'string' && req.query.tenant_id ? req.query.tenant_id : null;
     if (tenantId && !UUID_REGEX.test(tenantId)) {
       return res.status(400).json({ success: false, error: 'tenant_id yaroqli UUID bo\'lishi kerak.' });
     }
 
-    const { curStart, curEnd, prevStart, prevEnd } = periodRanges(period);
     const managerIds = await managerIdsForTenant(tenantId);
 
-    const [current, previous] = await Promise.all([
-      aggregateCalls(curStart, curEnd, managerIds),
-      aggregateCalls(prevStart, prevEnd, managerIds),
-    ]);
+    const summarizePeriod = async (period: Period) => {
+      const { curStart, curEnd, prevStart, prevEnd } = periodRanges(period);
+      const [current, previous] = await Promise.all([
+        aggregateCalls(curStart, curEnd, managerIds),
+        aggregateCalls(prevStart, prevEnd, managerIds),
+      ]);
 
-    // Har bir metrika uchun o'zgarish foizi.
-    const keys: (keyof CallAgg)[] = ['total_calls', 'avg_kpi_score', 'avg_duration_sec', 'total_penalty', 'total_bonus'];
-    const change: Record<string, number> = {};
-    keys.forEach((k) => (change[k] = pctChange(current[k], previous[k])));
+      const currentDurationMinutes = Number((current.total_duration_sec / 60).toFixed(1));
+      const previousDurationMinutes = Number((previous.total_duration_sec / 60).toFixed(1));
+
+      return {
+        calls: {
+          current: current.total_calls,
+          previous: previous.total_calls,
+          change_pct: pctChange(current.total_calls, previous.total_calls),
+        },
+        duration_minutes: {
+          current: currentDurationMinutes,
+          previous: previousDurationMinutes,
+          change_pct: pctChange(currentDurationMinutes, previousDurationMinutes),
+        },
+        avg_kpi: {
+          current: current.avg_kpi_score,
+          previous: previous.avg_kpi_score,
+          change_pct: pctChange(current.avg_kpi_score, previous.avg_kpi_score),
+        },
+      };
+    };
+
+    const [daily, weekly, monthly] = await Promise.all([
+      summarizePeriod('day'),
+      summarizePeriod('week'),
+      summarizePeriod('month'),
+    ]);
 
     return res.status(200).json({
       success: true,
-      period,
-      range: { current: { from: curStart, to: curEnd }, previous: { from: prevStart, to: prevEnd } },
-      current,
-      previous,
-      change_pct: change,
+      data: {
+        daily,
+        weekly,
+        monthly,
+        generated_at: new Date().toISOString(),
+      },
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Overview hisoblashda xatolik.' });

@@ -16,6 +16,7 @@ import shiftsRouter from './routes/shifts';
 import crmRouter, { runScheduledCrmSync } from './routes/crm';
 
 const app = express();
+const allowedOrigins = ['https://prosell.vercel.app', 'http://localhost:3000'];
 
 process.on('unhandledRejection', (reason) => {
   console.error('[process] unhandledRejection:', (reason as any)?.message || reason);
@@ -25,7 +26,15 @@ process.on('uncaughtException', (error) => {
   console.error('[process] uncaughtException:', error?.message || error);
 });
 
-app.use(cors());
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Accept', 'Content-Type', 'Authorization'],
+  credentials: true,
+}));
 app.use(express.json());
 
 app.use('/users', usersRouter);
@@ -53,10 +62,10 @@ app.get('/', (_req, res) => {
   });
 });
 app.get('/health', (_req, res) => {
-  return res.status(200).json({ success: true, status: 'healthy' });
+  return res.status(200).json({ success: true, status: 'ok' });
 });
 app.get('/api/health', (_req, res) => {
-  return res.status(200).json({ success: true, status: 'healthy' });
+  return res.status(200).json({ success: true, status: 'ok' });
 });
 app.get('/crm/webhook/pbx', (_req, res) => {
   return res.status(200).json({ status: 1 });

@@ -882,7 +882,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
       }).catch((e) => console.error('n8n webhook failed:', e));
     }
 
-    return res.status(200).json({
+    const payload = {
       success: true,
       call_id: callId,
       manager: {
@@ -927,6 +927,12 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
         is_critical: !!kpi.alert,
         alert: kpi.alert,
       },
+    };
+
+    return res.status(200).json({
+      ...payload,
+      data: payload,
+      cached: false,
     });
   } catch (err: any) {
     console.error('Audit handler error:', err);
