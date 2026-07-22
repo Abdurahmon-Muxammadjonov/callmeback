@@ -16,7 +16,12 @@ import shiftsRouter from './routes/shifts';
 import crmRouter, { runScheduledCrmSync } from './routes/crm';
 
 const app = express();
-const allowedOrigins = ['https://prosell.vercel.app', 'http://localhost:3000'];
+const allowedOrigins = [
+  'https://procell.uz',
+  'https://www.procell.uz',
+  'https://prosell.vercel.app',
+  'http://localhost:3000',
+];
 
 process.on('unhandledRejection', (reason) => {
   console.error('[process] unhandledRejection:', (reason as any)?.message || reason);
