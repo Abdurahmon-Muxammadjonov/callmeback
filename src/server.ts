@@ -34,6 +34,7 @@ app.use('/criteria', criteriaRouter);
 app.use('/api/analyze-call', analyzeCallRouter);
 app.use('/api/calls', callsRouter);
 app.use('/analytics', analyticsRouter);
+app.use('/api/analytics', analyticsRouter);
 app.use('/api/management', managementRouter);
 app.use('/manager-notifications', notificationsRouter);
 app.use('/shifts', shiftsRouter);
@@ -52,6 +53,9 @@ app.get('/', (_req, res) => {
   });
 });
 app.get('/health', (_req, res) => {
+  return res.status(200).json({ success: true, status: 'healthy' });
+});
+app.get('/api/health', (_req, res) => {
   return res.status(200).json({ success: true, status: 'healthy' });
 });
 app.get('/crm/webhook/pbx', (_req, res) => {
