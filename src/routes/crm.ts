@@ -631,6 +631,80 @@ router.get('/dashboard/managers', async (req: Request, res: Response) => {
   }
 });
 
+// Bitta webhook payload'idagi qo'ng'iroqlarni (audio yuklab olish, Storage'ga yozish,
+// tahlilga qo'yish) fon rejimida ishlaydi. Bu og'ir ish PBX'ning javob kutish vaqtidan
+// (yoki Railway proxy timeout'idan) chiqib ketmasligi uchun response'dan KEYIN ishga tushadi.
+async function processPbxWebhookCallsInBackground(
+  calls: BatchCallItem[],
+  webhookUrl: string,
+  expectedKey: string,
+): Promise<void> {
+  const enrichedCalls: BatchCallItem[] = [];
+  const skipped: Array<{ index: number; error: string }> = [];
+
+  for (let index = 0; index < calls.length; index++) {
+    const call = calls[index];
+    try {
+      const status = (call.call_status || '').toLowerCase();
+      if (status && ['started', 'ringing', 'in_progress', 'progress'].includes(status) && !call.audio_url) {
+        skipped.push({ index, error: `call hali tugamagan (${status})` });
+        continue;
+      }
+
+      const callId = call.pbx_call_id || call.crm_id || '';
+      const sourceAudioUrl = call.audio_url
+        || (callId && webhookUrl && !isInternalPbxWebhookUrl(webhookUrl)
+          ? await resolveAudioUrlByCallId(callId, webhookUrl, expectedKey)
+          : '');
+      if (!sourceAudioUrl) {
+        skipped.push({ index, error: 'audio_url topilmadi (payload yoki PBX lookup orqali).' });
+        continue;
+      }
+
+      const persisted = await persistAudioToStorage(sourceAudioUrl, expectedKey);
+
+      let mappedClientId = call.client_id;
+      let mappedClientName = call.client_name;
+      const phone = call.client_phone || '';
+      if (!mappedClientId && phone) {
+        const mapped = await findClientByPhone(phone);
+        if (mapped) {
+          mappedClientId = mapped.id;
+          mappedClientName = mappedClientName || mapped.name;
+        }
+      }
+
+      enrichedCalls.push({
+        ...call,
+        audio_url: persisted.publicUrl,
+        audio_source_url: sourceAudioUrl,
+        audio_storage_url: persisted.publicUrl,
+        audio_storage_path: persisted.path,
+        client_id: mappedClientId,
+        client_name: mappedClientName,
+        client_phone: phone || undefined,
+        pbx_call_id: callId || undefined,
+      });
+    } catch (e: any) {
+      skipped.push({ index, error: e?.message || 'Webhook call processing failed' });
+    }
+  }
+
+  if (skipped.length > 0) {
+    console.warn(`PBX webhook: ${skipped.length} ta qo'ng'iroq o'tkazib yuborildi:`, skipped);
+  }
+
+  if (enrichedCalls.length === 0) return;
+
+  try {
+    const out = await enqueueBatchCalls(enrichedCalls, supabase);
+    if (out.status === 202) await markSynced();
+    else console.error('PBX webhook fon rejimidagi enqueue xatosi:', out.body);
+  } catch (e: any) {
+    console.error('PBX webhook fon rejimidagi xato:', e?.message || e);
+  }
+}
+
 router.post('/webhook/pbx', async (req: Request, res: Response) => {
   try {
     const cfg = await loadLatestPbxIntegration({ onlyEnabled: true });
@@ -654,73 +728,24 @@ router.post('/webhook/pbx', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Payloadda yaroqli qo\'ng\'iroq topilmadi (audio_url kerak).' });
     }
 
-    const webhookUrl = typeof cfg?.webhook_url === 'string' ? cfg.webhook_url.trim() : '';
-    const enrichedCalls: BatchCallItem[] = [];
-    const skipped: Array<{ index: number; error: string }> = [];
-
-    for (let index = 0; index < calls.length; index++) {
-      const call = calls[index];
-      try {
-        const status = (call.call_status || '').toLowerCase();
-        if (status && ['started', 'ringing', 'in_progress', 'progress'].includes(status) && !call.audio_url) {
-          skipped.push({ index, error: `call hali tugamagan (${status})` });
-          continue;
-        }
-
-        const callId = call.pbx_call_id || call.crm_id || '';
-        const sourceAudioUrl = call.audio_url
-          || (callId && webhookUrl && !isInternalPbxWebhookUrl(webhookUrl)
-            ? await resolveAudioUrlByCallId(callId, webhookUrl, expectedKey)
-            : '');
-        if (!sourceAudioUrl) {
-          skipped.push({ index, error: 'audio_url topilmadi (payload yoki PBX lookup orqali).' });
-          continue;
-        }
-
-        const persisted = await persistAudioToStorage(sourceAudioUrl, expectedKey);
-
-        let mappedClientId = call.client_id;
-        let mappedClientName = call.client_name;
-        const phone = call.client_phone || '';
-        if (!mappedClientId && phone) {
-          const mapped = await findClientByPhone(phone);
-          if (mapped) {
-            mappedClientId = mapped.id;
-            mappedClientName = mappedClientName || mapped.name;
-          }
-        }
-
-        enrichedCalls.push({
-          ...call,
-          audio_url: persisted.publicUrl,
-          audio_source_url: sourceAudioUrl,
-          audio_storage_url: persisted.publicUrl,
-          audio_storage_path: persisted.path,
-          client_id: mappedClientId,
-          client_name: mappedClientName,
-          client_phone: phone || undefined,
-          pbx_call_id: callId || undefined,
-        });
-      } catch (e: any) {
-        skipped.push({ index, error: e?.message || 'Webhook call processing failed' });
-      }
-    }
-
-    if (enrichedCalls.length === 0) {
-      return res.status(400).json({ success: false, error: 'Yaroqli qo\'ng\'iroq qolmadi.', skipped });
-    }
-
-    const out = await enqueueBatchCalls(enrichedCalls, supabase);
-    if (out.status === 202) await markSynced();
-
-    return res.status(out.status).json({
-      ...out.body,
+    // PBX'ga DARHOL javob qaytaramiz — audio yuklab olish/Storage'ga yozish uzoq
+    // vaqt olishi mumkin, shu tufayli PBX yoki proxy connectionni ECONNRESET bilan
+    // uzib yubormasligi uchun qolgan ishlov fon rejimida davom etadi.
+    res.status(202).json({
+      success: true,
+      status: 'processing',
       source: 'pbx-webhook',
+      message: 'PBX webhook qabul qilindi, fon rejimida ishlanmoqda.',
       received_count: calls.length,
-      pre_skipped: skipped,
     });
+
+    const webhookUrl = typeof cfg?.webhook_url === 'string' ? cfg.webhook_url.trim() : '';
+    void processPbxWebhookCallsInBackground(calls, webhookUrl, expectedKey);
   } catch (e: any) {
-    return res.status(500).json({ success: false, error: e?.message || 'PBX webhook xatosi.' });
+    if (!res.headersSent) {
+      return res.status(500).json({ success: false, error: e?.message || 'PBX webhook xatosi.' });
+    }
+    console.error('PBX webhook xatosi (javob allaqachon yuborilgan):', e?.message || e);
   }
 });
 
