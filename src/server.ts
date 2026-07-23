@@ -40,7 +40,7 @@ app.use(cors({
   allowedHeaders: ['Accept', 'Content-Type', 'Authorization'],
   credentials: true,
 }));
-app.use(express.json());
+app.use(express.json({ limit: '25mb' }));
 
 app.use('/users', usersRouter);
 app.use('/managers', managersRouter);
