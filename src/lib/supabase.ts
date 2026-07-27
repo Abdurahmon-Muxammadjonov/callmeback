@@ -26,3 +26,32 @@ export const supabase = createClient(supabaseUrl, supabaseServiceKey, {
     autoRefreshToken: false,
   },
 });
+
+// PostgREST ba'zan yangi qo'shilgan foreign key'larni schema keshida ko'rmay qoladi
+// ("Could not find a relationship..." xatosi). Shu holatda keshni yangilashga urinib,
+// so'rovni bir marta qayta ishga tushiramiz.
+export async function reloadSchemaCache(): Promise<void> {
+  try {
+    const schemaClient = typeof (supabase as any).schema === 'function'
+      ? (supabase as any).schema('pg_catalog')
+      : supabase;
+    if (typeof (schemaClient as any).rpc === 'function') {
+      await (schemaClient as any).rpc('pg_notify', { channel: 'pgrst', payload: 'reload schema' });
+    }
+  } catch (error: any) {
+    console.warn('PostgREST schema reload failed:', error?.message || error);
+  }
+}
+
+export async function withSchemaReloadRetry<T>(
+  action: () => PromiseLike<{ data: T; error: any }>
+): Promise<{ data: T; error: any }> {
+  const first = await action();
+  if (!first.error) return first;
+
+  const isRelationshipError = /Could not find a relationship/i.test(first.error?.message || '');
+  if (!isRelationshipError) return first;
+
+  await reloadSchemaCache();
+  return action();
+}

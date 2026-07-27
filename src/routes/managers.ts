@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { supabase } from '../lib/supabase';
+import { supabase, withSchemaReloadRetry } from '../lib/supabase';
 
 const router = Router();
 
@@ -15,7 +15,7 @@ router.get('/', async (req: Request, res: Response) => {
       .select('*, calls(count)')
       .order('created_at', { ascending: false });
     if (platformId) q = q.eq('platform_id', platformId);
-    const { data, error } = await q;
+    const { data, error } = await withSchemaReloadRetry(() => q);
     if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
     const mapped = (data || []).map((m: any) => {
       const { calls, ...rest } = m;

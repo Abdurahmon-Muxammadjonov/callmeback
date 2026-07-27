@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { supabase } from '../lib/supabase';
+import { supabase, withSchemaReloadRetry } from '../lib/supabase';
 import { connect, getUsers, getStatus, markSynced } from '../lib/amocrm';
 import { enqueueBatchCalls, type BatchCallItem } from './analyze-call';
 import { randomUUID } from 'node:crypto';
@@ -27,27 +27,6 @@ const isValidHttpUrl = (v: string) => {
     return false;
   }
 };
-
-async function reloadSchemaCache(): Promise<void> {
-  try {
-    const schemaClient = typeof (supabase as any).schema === 'function'
-      ? (supabase as any).schema('pg_catalog')
-      : supabase;
-    if (typeof (schemaClient as any).rpc === 'function') {
-      await (schemaClient as any).rpc('pg_notify', { channel: 'pgrst', payload: 'reload schema' });
-    }
-  } catch (error: any) {
-    console.warn('PostgREST schema reload failed:', error?.message || error);
-  }
-}
-
-async function withSchemaReloadRetry<T>(action: () => PromiseLike<{ data: T; error: any }>): Promise<{ data: T; error: any }> {
-  const first = await action();
-  if (!first.error) return first;
-
-  await reloadSchemaCache();
-  return action();
-}
 
 function isInternalPbxWebhookUrl(value: string): boolean {
   if (!isValidHttpUrl(value)) return false;
