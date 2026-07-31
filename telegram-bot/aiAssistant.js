@@ -1,7 +1,20 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { TARIFFS, TARIFF_ORDER, DURATION_DISCOUNT_LABELS, FULL_FEATURE_CATEGORIES, formatSum } from './pricing.js';
 
-const client = new Anthropic(); // ANTHROPIC_API_KEY env orqali o'qiladi
+// Client faqat birinchi so'rov kelganda yaratiladi — ANTHROPIC_API_KEY hali
+// sozlanmagan bo'lsa ham, botning qolgan qismi (menyu, sotib olish oqimi,
+// Supabase'ga saqlash) ishlashda davom etadi; faqat FAQ savoliga xushmuomala
+// xato qaytadi.
+let client = null;
+function getClient() {
+  if (!client) {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      throw new Error('ANTHROPIC_API_KEY sozlanmagan.');
+    }
+    client = new Anthropic();
+  }
+  return client;
+}
 
 function buildKnowledgeBase() {
   const tariffLines = TARIFF_ORDER.map((key) => {
@@ -43,7 +56,7 @@ Qoidalar:
 - Agar savol platformaga aloqador bo'lmasa yoki ishonchli javob berolmasang, shuni ochiq ayt va taxmin qilish o'rniga "Admin bilan bog'lanish" tugmasini taklif qil.`;
 
 export async function askQuestion(question) {
-  const response = await client.messages.create({
+  const response = await getClient().messages.create({
     model: 'claude-opus-5',
     max_tokens: 1024,
     system: SYSTEM_PROMPT,
