@@ -43,7 +43,7 @@ Minimal kerakli o'zgaruvchilar:
 
 - `SUPABASE_URL` (yoki `NEXT_PUBLIC_SUPABASE_URL`)
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `API_KEY` (Muxlisa.uz nutqni matnga aylantirish)
+- `MUXLISA_API_KEY` (Muxlisa.uz nutqni matnga aylantirish)
 - `GEMINI_API_KEY` (Google Gemini — transkriptni tahlil qilish)
 
 Audio chunking uchun `ffmpeg` serverda o'rnatilgan bo'lishi shart (Railway image yoki Docker'da mavjudligini tekshiring).

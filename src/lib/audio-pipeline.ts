@@ -107,9 +107,9 @@ async function splitAudioToChunks(inputFilePath: string, chunksDir: string): Pro
 
 // Muxlisa.uz — nutqni matnga aylantirish (STT).
 async function transcribeChunkWithMuxlisa(chunkPath: string): Promise<string> {
-  const apiKey = process.env.API_KEY;
+  const apiKey = process.env.MUXLISA_API_KEY;
   if (!apiKey) {
-    throw new Error('API_KEY yo\'q.');
+    throw new Error('MUXLISA_API_KEY yo\'q.');
   }
 
   const form = new FormData();
@@ -207,8 +207,8 @@ async function transcribeAndAnalyze(chunkPaths: string[], extraRules: string): P
 }
 
 export async function processLongAudio(audioUrl: string, extraRules = ''): Promise<AudioProcessResult> {
-  if (!process.env.API_KEY) {
-    throw new Error('API_KEY yo\'q.');
+  if (!process.env.MUXLISA_API_KEY) {
+    throw new Error('MUXLISA_API_KEY yo\'q.');
   }
   if (!process.env.GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY yo\'q.');
@@ -246,8 +246,8 @@ export async function processLongAudio(audioUrl: string, extraRules = ''): Promi
 }
 
 export async function processLocalAudio(localAudioPath: string, extraRules = ''): Promise<AudioProcessResult> {
-  if (!process.env.API_KEY) {
-    throw new Error('API_KEY yo\'q.');
+  if (!process.env.MUXLISA_API_KEY) {
+    throw new Error('MUXLISA_API_KEY yo\'q.');
   }
   if (!process.env.GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY yo\'q.');
