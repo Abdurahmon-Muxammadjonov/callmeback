@@ -95,8 +95,10 @@ async function downloadAudioToTmp(audioUrl: string, targetFilePath: string): Pro
 
 async function splitAudioToChunks(inputFilePath: string, chunksDir: string): Promise<string[]> {
   await mkdir(chunksDir, { recursive: true });
-  const ext = path.extname(inputFilePath) || '.mp3';
-  const outputPattern = path.join(chunksDir, `chunk-%05d${ext}`);
+  // WAV'ga qayta kodlaymiz (stream-copy emas) — shunda har bir bo'lak har doim
+  // to'liq to'g'ri sarlavha/format bilan chiqadi (kesish nuqtasida buzilgan MP3
+  // freym bo'lish ehtimoli yo'q). Muxlisa bilan WAV avval sinalgan va ishlaydi.
+  const outputPattern = path.join(chunksDir, 'chunk-%05d.wav');
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -104,7 +106,8 @@ async function splitAudioToChunks(inputFilePath: string, chunksDir: string): Pro
         .outputOptions([
           '-f segment',
           `-segment_time ${SEGMENT_SECONDS}`,
-          '-c copy',
+          '-ar 16000',
+          '-ac 1',
         ])
         .output(outputPattern)
         .on('end', () => resolve())
