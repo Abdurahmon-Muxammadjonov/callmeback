@@ -1,3 +1,4 @@
+import { GoogleGenAI, Type } from '@google/genai';
 import axios from 'axios';
 import FormData from 'form-data';
 import ffmpeg from 'fluent-ffmpeg';
@@ -6,7 +7,6 @@ import { copyFile, readdir, mkdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import Groq from 'groq-sdk';
 
 export interface CallAnalysis {
   sentiment: 'positive' | 'negative' | 'neutral';
@@ -23,9 +23,21 @@ export interface AudioProcessResult {
 }
 
 const SEGMENT_SECONDS = 600;
-const ANALYZE_MODEL = 'llama-3.3-70b-versatile';
+const ANALYZE_MODEL = 'gemini-3.6-flash';
 const TMP_ROOT = path.join(os.tmpdir(), 'procell-audio');
 const MUXLISA_STT_URL = 'https://service.muxlisa.uz/api/v2/stt';
+
+const CALL_ANALYSIS_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    sentiment: { type: Type.STRING, format: 'enum', enum: ['positive', 'negative', 'neutral'] },
+    client_mood: { type: Type.STRING },
+    operator_evaluation: { type: Type.STRING },
+    deal_closed: { type: Type.BOOLEAN },
+    summary: { type: Type.STRING },
+  },
+  required: ['sentiment', 'client_mood', 'operator_evaluation', 'deal_closed', 'summary'],
+};
 
 function sortChunkFiles(files: string[]): string[] {
   return [...files].sort((left, right) => {
@@ -120,51 +132,41 @@ async function transcribeChunkWithMuxlisa(chunkPath: string): Promise<string> {
   return text.trim();
 }
 
-// Groq (llama) — Muxlisa bergan transkriptni qo'ng'iroq tahlil skripti (mezonlari) bo'yicha baholaydi.
+// Gemini — Muxlisa bergan transkriptni qo'ng'iroq tahlil skripti (mezonlari) bo'yicha baholaydi.
 async function analyzeTranscript(transcript: string, extraRules = ''): Promise<CallAnalysis> {
-  if (!process.env.GROQ_API_KEY) {
-    throw new Error('GROQ_API_KEY yo\'q.');
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY yo\'q.');
   }
 
-  const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
   const systemPrompt = [
-    'Siz tajribali call-center QA analitikisiz.',
-    'Faqat valid JSON object qaytaring. Hech qanday qo\'shimcha matn yozmang.',
-    'JSON sxemasi aniq quyidagicha bo\'lsin:',
-    '{',
-    '  "sentiment": "positive" | "negative" | "neutral",',
-    '  "client_mood": "Short context on the customer\'s emotional state in Uzbek",',
-    '  "operator_evaluation": "A brief analysis of the agent\'s performance and tone in Uzbek",',
-    '  "deal_closed": true | false,',
-    '  "summary": "A concise 3-4 sentence summary of the entire conversation in Uzbek"',
-    '}',
-  ].join('\n');
+    'Siz tajribali call-center QA analitikisiz. Berilgan qo\'ng\'iroq transkriptini diqqat bilan tahlil qiling.',
+    'client_mood, operator_evaluation va summary maydonlarini o\'zbek tilida yozing.',
+    extraRules,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 
-  const finalSystemPrompt = extraRules ? `${systemPrompt}\n\n${extraRules}` : systemPrompt;
-
-  const completion = await client.chat.completions.create({
+  const response = await client.models.generateContent({
     model: ANALYZE_MODEL,
-    temperature: 0.1,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: finalSystemPrompt },
-      {
-        role: 'user',
-        content: `Quyidagi qo'ng'iroq transcriptini tahlil qil:\n\n${transcript}`,
-      },
-    ],
+    contents: `Quyidagi qo'ng'iroq transkriptini tahlil qil:\n\n${transcript}`,
+    config: {
+      systemInstruction: systemPrompt,
+      responseMimeType: 'application/json',
+      responseSchema: CALL_ANALYSIS_SCHEMA,
+    },
   });
 
-  const text = completion.choices?.[0]?.message?.content;
+  const text = response.text;
   if (!text) {
-    throw new Error('Groq chat completion bo\'sh qaytdi.');
+    throw new Error('Gemini javobi bo\'sh qaytdi.');
   }
 
   const parsed = JSON.parse(text) as Partial<CallAnalysis>;
   const sentiment = parsed.sentiment;
   if (sentiment !== 'positive' && sentiment !== 'negative' && sentiment !== 'neutral') {
-    throw new Error('Groq JSON sentiment maydoni noto\'g\'ri.');
+    throw new Error('Gemini JSON sentiment maydoni noto\'g\'ri.');
   }
 
   return {
@@ -208,8 +210,8 @@ export async function processLongAudio(audioUrl: string, extraRules = ''): Promi
   if (!process.env.API_KEY) {
     throw new Error('API_KEY yo\'q.');
   }
-  if (!process.env.GROQ_API_KEY) {
-    throw new Error('GROQ_API_KEY yo\'q.');
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY yo\'q.');
   }
 
   const workspaceDir = path.join(TMP_ROOT, `${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -247,8 +249,8 @@ export async function processLocalAudio(localAudioPath: string, extraRules = '')
   if (!process.env.API_KEY) {
     throw new Error('API_KEY yo\'q.');
   }
-  if (!process.env.GROQ_API_KEY) {
-    throw new Error('GROQ_API_KEY yo\'q.');
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY yo\'q.');
   }
 
   const workspaceDir = path.join(TMP_ROOT, `${Date.now()}-${Math.random().toString(36).slice(2)}`);

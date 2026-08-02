@@ -747,7 +747,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
     const hasSupabaseKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
     const missingVars: string[] = [];
     if (!process.env.API_KEY) missingVars.push('API_KEY');
-    if (!process.env.GROQ_API_KEY) missingVars.push('GROQ_API_KEY');
+    if (!process.env.GEMINI_API_KEY) missingVars.push('GEMINI_API_KEY');
     if (!hasSupabaseUrl) missingVars.push('SUPABASE_URL (yoki NEXT_PUBLIC_SUPABASE_URL)');
     if (!hasSupabaseKey) missingVars.push('SUPABASE_SECRET_KEY (yoki SUPABASE_SERVICE_ROLE_KEY)');
     if (missingVars.length > 0) {
@@ -942,8 +942,8 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
     if (invalidApiKey) {
       return res.status(503).json({
         success: false,
-        error: 'Server configuration error: invalid API_KEY or GROQ_API_KEY.',
-        missing: ['API_KEY', 'GROQ_API_KEY'],
+        error: 'Server configuration error: invalid API_KEY or GEMINI_API_KEY.',
+        missing: ['API_KEY', 'GEMINI_API_KEY'],
       });
     }
     const statusCode = typeof err?.statusCode === 'number' ? err.statusCode : 500;
