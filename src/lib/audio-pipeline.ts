@@ -1,4 +1,5 @@
 import axios from 'axios';
+import FormData from 'form-data';
 import ffmpeg from 'fluent-ffmpeg';
 import fs from 'node:fs';
 import { copyFile, readdir, mkdir, rm, stat } from 'node:fs/promises';
@@ -7,7 +8,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import Groq from 'groq-sdk';
 
-export interface GroqCallAnalysis {
+export interface CallAnalysis {
   sentiment: 'positive' | 'negative' | 'neutral';
   client_mood: string;
   operator_evaluation: string;
@@ -15,16 +16,16 @@ export interface GroqCallAnalysis {
   summary: string;
 }
 
-export interface GroqAudioProcessResult {
+export interface AudioProcessResult {
   transcript: string;
-  analysis: GroqCallAnalysis;
+  analysis: CallAnalysis;
   chunks: number;
 }
 
 const SEGMENT_SECONDS = 600;
-const TRANSCRIBE_MODEL = 'whisper-large-v3-turbo';
 const ANALYZE_MODEL = 'llama-3.3-70b-versatile';
-const TMP_ROOT = path.join(os.tmpdir(), 'procell-groq');
+const TMP_ROOT = path.join(os.tmpdir(), 'procell-audio');
+const MUXLISA_STT_URL = 'https://service.muxlisa.uz/api/v2/stt';
 
 function sortChunkFiles(files: string[]): string[] {
   return [...files].sort((left, right) => {
@@ -40,7 +41,7 @@ async function downloadAudioToTmp(audioUrl: string, targetFilePath: string): Pro
     maxRedirects: 5,
     timeout: 120000,
     headers: {
-      'User-Agent': 'Procell-Groq/1.0',
+      'User-Agent': 'Procell-Audio/1.0',
       Accept: 'audio/*,*/*',
     },
   });
@@ -92,24 +93,41 @@ async function splitAudioToChunks(inputFilePath: string, chunksDir: string): Pro
   return sortChunkFiles(files);
 }
 
-async function transcribeChunk(client: Groq, chunkPath: string): Promise<string> {
-  const transcription = await client.audio.transcriptions.create({
-    file: fs.createReadStream(chunkPath),
-    model: TRANSCRIBE_MODEL,
-    language: 'uz',
-    temperature: 0,
-    response_format: 'verbose_json',
+// Muxlisa.uz — nutqni matnga aylantirish (STT).
+async function transcribeChunkWithMuxlisa(chunkPath: string): Promise<string> {
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
+    throw new Error('API_KEY yo\'q.');
+  }
+
+  const form = new FormData();
+  form.append('audio', fs.createReadStream(chunkPath));
+
+  const response = await axios.request({
+    method: 'POST',
+    maxBodyLength: Infinity,
+    url: MUXLISA_STT_URL,
+    headers: { 'x-api-key': apiKey, ...form.getHeaders() },
+    data: form,
+    timeout: 120000,
   });
 
-  const text = (transcription as any)?.text;
-  if (!text || typeof text !== 'string') {
-    throw new Error(`Chunk transcription bo\'sh: ${path.basename(chunkPath)}`);
+  const text = response.data?.text;
+  if (typeof text !== 'string') {
+    throw new Error(`Muxlisa kutilmagan javob formati qaytardi: ${path.basename(chunkPath)}`);
   }
 
   return text.trim();
 }
 
-async function analyzeTranscript(client: Groq, transcript: string, extraRules = ''): Promise<GroqCallAnalysis> {
+// Groq (llama) — Muxlisa bergan transkriptni qo'ng'iroq tahlil skripti (mezonlari) bo'yicha baholaydi.
+async function analyzeTranscript(transcript: string, extraRules = ''): Promise<CallAnalysis> {
+  if (!process.env.GROQ_API_KEY) {
+    throw new Error('GROQ_API_KEY yo\'q.');
+  }
+
+  const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
   const systemPrompt = [
     'Siz tajribali call-center QA analitikisiz.',
     'Faqat valid JSON object qaytaring. Hech qanday qo\'shimcha matn yozmang.',
@@ -143,7 +161,7 @@ async function analyzeTranscript(client: Groq, transcript: string, extraRules = 
     throw new Error('Groq chat completion bo\'sh qaytdi.');
   }
 
-  const parsed = JSON.parse(text) as Partial<GroqCallAnalysis>;
+  const parsed = JSON.parse(text) as Partial<CallAnalysis>;
   const sentiment = parsed.sentiment;
   if (sentiment !== 'positive' && sentiment !== 'negative' && sentiment !== 'neutral') {
     throw new Error('Groq JSON sentiment maydoni noto\'g\'ri.');
@@ -166,7 +184,30 @@ async function removePathSafe(targetPath: string): Promise<void> {
   }
 }
 
-export async function processLongAudioWithGroq(audioUrl: string, extraRules = ''): Promise<GroqAudioProcessResult> {
+async function transcribeAndAnalyze(chunkPaths: string[], extraRules: string): Promise<{ transcript: string; analysis: CallAnalysis }> {
+  const transcriptParts = await Promise.all(
+    chunkPaths.map((chunkPath) => transcribeChunkWithMuxlisa(chunkPath))
+  );
+
+  const transcript = transcriptParts
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+
+  if (!transcript) {
+    throw new Error('Transcription bo\'sh chiqdi.');
+  }
+
+  const analysis = await analyzeTranscript(transcript, extraRules);
+
+  return { transcript, analysis };
+}
+
+export async function processLongAudio(audioUrl: string, extraRules = ''): Promise<AudioProcessResult> {
+  if (!process.env.API_KEY) {
+    throw new Error('API_KEY yo\'q.');
+  }
   if (!process.env.GROQ_API_KEY) {
     throw new Error('GROQ_API_KEY yo\'q.');
   }
@@ -176,7 +217,7 @@ export async function processLongAudioWithGroq(audioUrl: string, extraRules = ''
   const chunksDir = path.join(workspaceDir, 'chunks');
 
   const createdFiles: string[] = [];
-  console.time('groq-audio-pipeline');
+  console.time('audio-pipeline');
 
   try {
     await mkdir(workspaceDir, { recursive: true });
@@ -187,42 +228,25 @@ export async function processLongAudioWithGroq(audioUrl: string, extraRules = ''
     const chunkPaths = await splitAudioToChunks(sourcePath, chunksDir);
     createdFiles.push(...chunkPaths);
 
-    const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const { transcript, analysis } = await transcribeAndAnalyze(chunkPaths, extraRules);
 
-    const transcriptParts = await Promise.all(
-      chunkPaths.map((chunkPath) => transcribeChunk(client, chunkPath))
-    );
-
-    const transcript = transcriptParts
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .join('\n\n')
-      .trim();
-
-    if (!transcript) {
-      throw new Error('Transcription bo\'sh chiqdi.');
-    }
-
-    const analysis = await analyzeTranscript(client, transcript, extraRules);
-
-    return {
-      transcript,
-      analysis,
-      chunks: chunkPaths.length,
-    };
+    return { transcript, analysis, chunks: chunkPaths.length };
   } catch (error: any) {
-    throw new Error(`Groq audio pipeline xatosi: ${error?.message || 'unknown'}`);
+    throw new Error(`Audio pipeline xatosi: ${error?.message || 'unknown'}`);
   } finally {
     await removePathSafe(chunksDir);
     for (const filePath of createdFiles) {
       await removePathSafe(filePath);
     }
     await removePathSafe(workspaceDir);
-    console.timeEnd('groq-audio-pipeline');
+    console.timeEnd('audio-pipeline');
   }
 }
 
-export async function processLocalAudioWithGroq(localAudioPath: string, extraRules = ''): Promise<GroqAudioProcessResult> {
+export async function processLocalAudio(localAudioPath: string, extraRules = ''): Promise<AudioProcessResult> {
+  if (!process.env.API_KEY) {
+    throw new Error('API_KEY yo\'q.');
+  }
   if (!process.env.GROQ_API_KEY) {
     throw new Error('GROQ_API_KEY yo\'q.');
   }
@@ -232,7 +256,7 @@ export async function processLocalAudioWithGroq(localAudioPath: string, extraRul
   const chunksDir = path.join(workspaceDir, 'chunks');
 
   const createdFiles: string[] = [];
-  console.time('groq-audio-pipeline');
+  console.time('audio-pipeline');
 
   try {
     await mkdir(workspaceDir, { recursive: true });
@@ -243,37 +267,17 @@ export async function processLocalAudioWithGroq(localAudioPath: string, extraRul
     const chunkPaths = await splitAudioToChunks(sourcePath, chunksDir);
     createdFiles.push(...chunkPaths);
 
-    const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const { transcript, analysis } = await transcribeAndAnalyze(chunkPaths, extraRules);
 
-    const transcriptParts = await Promise.all(
-      chunkPaths.map((chunkPath) => transcribeChunk(client, chunkPath))
-    );
-
-    const transcript = transcriptParts
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .join('\n\n')
-      .trim();
-
-    if (!transcript) {
-      throw new Error('Transcription bo\'sh chiqdi.');
-    }
-
-    const analysis = await analyzeTranscript(client, transcript, extraRules);
-
-    return {
-      transcript,
-      analysis,
-      chunks: chunkPaths.length,
-    };
+    return { transcript, analysis, chunks: chunkPaths.length };
   } catch (error: any) {
-    throw new Error(`Groq audio pipeline xatosi: ${error?.message || 'unknown'}`);
+    throw new Error(`Audio pipeline xatosi: ${error?.message || 'unknown'}`);
   } finally {
     await removePathSafe(chunksDir);
     for (const filePath of createdFiles) {
       await removePathSafe(filePath);
     }
     await removePathSafe(workspaceDir);
-    console.timeEnd('groq-audio-pipeline');
+    console.timeEnd('audio-pipeline');
   }
 }

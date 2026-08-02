@@ -4,7 +4,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { unlink, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { processLocalAudioWithGroq, processLongAudioWithGroq } from '../lib/groq-audio';
+import { processLocalAudio, processLongAudio } from '../lib/audio-pipeline';
 
 const router = Router();
 
@@ -104,7 +104,7 @@ const isValidHttpUrl = (v: string) => {
   }
 };
 
-// Bazadagi aktiv qoidalarni o'qib, Groq tahlili uchun qo'shimcha ko'rsatma matnini quradi.
+// Bazadagi aktiv qoidalarni o'qib, AI tahlili uchun qo'shimcha ko'rsatma matnini quradi.
 // Admin yangi qoida qo'shsa, keyingi tahlilda darhol shu yerda paydo bo'ladi.
 async function buildDynamicRules(supabase: SupabaseClient): Promise<string> {
   const { data, error } = await supabase
@@ -146,30 +146,30 @@ function tmpAudioPath(ext: string): string {
   return path.join(os.tmpdir(), `procell-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
 }
 
-// Manbani (URL / buffer / fayl yo'li) Groq orqali audit qiladi.
-async function auditCallWithGroq(input: AudioInput, extraRules = ''): Promise<AuditResult> {
+// Manbani (URL / buffer / fayl yo'li) audit qiladi: Muxlisa STT + Claude tahlil.
+async function auditCall(input: AudioInput, extraRules = ''): Promise<AuditResult> {
   let tempFilePath: string | null = null;
   try {
-    const groqResult = input.filePath
-      ? await processLocalAudioWithGroq(input.filePath, extraRules)
+    const result = input.filePath
+      ? await processLocalAudio(input.filePath, extraRules)
       : input.audioBuffer
         ? await (async () => {
             const fileExt = extFromMime(input.mimeType || 'audio/mpeg');
             const localPath = tmpAudioPath(fileExt);
             await writeFile(localPath, input.audioBuffer as Buffer);
             tempFilePath = localPath;
-            return processLocalAudioWithGroq(localPath, extraRules);
+            return processLocalAudio(localPath, extraRules);
           })()
         : input.audioUrl
-          ? await processLongAudioWithGroq(input.audioUrl, extraRules)
+          ? await processLongAudio(input.audioUrl, extraRules)
           : null;
 
-    if (!groqResult) {
+    if (!result) {
       throw new Error('Audio manbai yo\'q: audioUrl, audioBuffer yoki filePath kerak.');
     }
 
     const normalized: Partial<AuditResult> = {
-      transcript: groqResult.transcript,
+      transcript: result.transcript,
       total_calls: 1,
       incoming_count: 0,
       outgoing_count: 0,
@@ -177,24 +177,24 @@ async function auditCallWithGroq(input: AudioInput, extraRules = ''): Promise<Au
       unanswered_count: 0,
       bad_leads_count: 0,
       traffic_conversion: 0,
-      sales_conversion: groqResult.analysis.deal_closed ? 100 : 0,
+      sales_conversion: result.analysis.deal_closed ? 100 : 0,
       kpi_score: 0,
       penalty_amount: 0,
       bonus_amount: 0,
-      rop_comment: groqResult.analysis.operator_evaluation,
+      rop_comment: result.analysis.operator_evaluation,
       stage_1_to_2: 0,
       stage_2_to_3: 0,
       stage_3_to_4: 0,
       lost_reasons: [],
-      sentiment: groqResult.analysis.sentiment,
-      risk: groqResult.analysis.client_mood,
+      sentiment: result.analysis.sentiment,
+      risk: result.analysis.client_mood,
       criteria_scores: [],
       transcript_segments: [],
-      summary: groqResult.analysis.summary,
-      client_info: groqResult.analysis.client_mood,
-      final_agreement: groqResult.analysis.deal_closed
-        ? 'Mijoz bitimga rozilik bildirgan (Groq tahliliga ko\'ra).'
-        : 'Bitim yopilmagan (Groq tahliliga ko\'ra).',
+      summary: result.analysis.summary,
+      client_info: result.analysis.client_mood,
+      final_agreement: result.analysis.deal_closed
+        ? 'Mijoz bitimga rozilik bildirgan (AI tahliliga ko\'ra).'
+        : 'Bitim yopilmagan (AI tahliliga ko\'ra).',
       next_steps: [],
     };
 
@@ -484,7 +484,7 @@ const inFlightCalls = new Set<string>();
 async function processOneBatchCall(supabase: SupabaseClient, prep: PreparedCall, extraRules: string): Promise<void> {
   inFlightCalls.add(prep.callId);
   try {
-    const audit = await auditCallWithGroq({ audioUrl: prep.audioUrl }, extraRules);
+    const audit = await auditCall({ audioUrl: prep.audioUrl }, extraRules);
     const { error: upErr } = await supabase
       .from('calls')
       .update({ ...callRowFields(audit), status: 'done', error: null })
@@ -746,6 +746,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
     const hasSupabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
     const hasSupabaseKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
     const missingVars: string[] = [];
+    if (!process.env.API_KEY) missingVars.push('API_KEY');
     if (!process.env.GROQ_API_KEY) missingVars.push('GROQ_API_KEY');
     if (!hasSupabaseUrl) missingVars.push('SUPABASE_URL (yoki NEXT_PUBLIC_SUPABASE_URL)');
     if (!hasSupabaseKey) missingVars.push('SUPABASE_SECRET_KEY (yoki SUPABASE_SERVICE_ROLE_KEY)');
@@ -815,7 +816,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
     let audio_url = bodyAudioUrl;
     let audit: AuditResult;
     if (uploadedFile) {
-      audit = await auditCallWithGroq({ filePath: uploadedFile.path, mimeType: uploadedFile.mimetype }, extraRules);
+      audit = await auditCall({ filePath: uploadedFile.path, mimeType: uploadedFile.mimetype }, extraRules);
       // Faylni Storage'ga saqlab, qayta eshitish uchun public URL olamiz, so'ng tmp'ni tozalaymiz.
       try {
         const buf = await readFile(uploadedFile.path);
@@ -824,7 +825,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
         await unlink(uploadedFile.path).catch(() => {});
       }
     } else {
-      audit = await auditCallWithGroq({ audioUrl: bodyAudioUrl }, extraRules);
+      audit = await auditCall({ audioUrl: bodyAudioUrl }, extraRules);
     }
 
     const { data: callRow, error: callInsertError } = await supabase
@@ -937,12 +938,12 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
   } catch (err: any) {
     console.error('Audit handler error:', err);
     const message = String(err?.message || 'Unknown error');
-    const invalidGroqKey = /invalid api key|invalid_api_key/i.test(message);
-    if (invalidGroqKey) {
+    const invalidApiKey = /invalid api key|invalid_api_key|authentication_error/i.test(message);
+    if (invalidApiKey) {
       return res.status(503).json({
         success: false,
-        error: 'Server configuration error: invalid GROQ_API_KEY.',
-        missing: ['GROQ_API_KEY'],
+        error: 'Server configuration error: invalid API_KEY or GROQ_API_KEY.',
+        missing: ['API_KEY', 'GROQ_API_KEY'],
       });
     }
     const statusCode = typeof err?.statusCode === 'number' ? err.statusCode : 500;

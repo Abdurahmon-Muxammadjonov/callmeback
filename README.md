@@ -37,12 +37,13 @@ supabase/          # SQL migratsiyalar / schema
 ## Muhit o'zgaruvchilari
 
 `.env.local.template` dan nusxa olib `.env.local` yarating va to'ldiring
-(Supabase va Groq kalitlari).
+(Supabase, Muxlisa va Groq kalitlari).
 
 Minimal kerakli o'zgaruvchilar:
 
 - `SUPABASE_URL` (yoki `NEXT_PUBLIC_SUPABASE_URL`)
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `GROQ_API_KEY`
+- `API_KEY` (Muxlisa.uz nutqni matnga aylantirish)
+- `GROQ_API_KEY` (transkriptni tahlil qilish)
 
 Audio chunking uchun `ffmpeg` serverda o'rnatilgan bo'lishi shart (Railway image yoki Docker'da mavjudligini tekshiring).
