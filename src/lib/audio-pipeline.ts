@@ -47,16 +47,37 @@ function sortChunkFiles(files: string[]): string[] {
   });
 }
 
+// Axios xatosidan HTTP status + javob tanasini chiqarib, aniq xabar quradi
+// (aks holda faqat "Request failed with status code 400" kabi foydasiz matn qoladi).
+function describeAxiosError(error: unknown, context: string): Error {
+  if (axios.isAxiosError(error)) {
+    const status = error.response?.status;
+    const data = error.response?.data;
+    const bodyText = typeof data === 'string'
+      ? data.slice(0, 500)
+      : data
+        ? JSON.stringify(data).slice(0, 500)
+        : error.message;
+    return new Error(`${context}: HTTP ${status ?? '?'} — ${bodyText}`);
+  }
+  return error instanceof Error ? error : new Error(`${context}: ${String(error)}`);
+}
+
 async function downloadAudioToTmp(audioUrl: string, targetFilePath: string): Promise<void> {
-  const response = await axios.get(audioUrl, {
-    responseType: 'stream',
-    maxRedirects: 5,
-    timeout: 120000,
-    headers: {
-      'User-Agent': 'Procell-Audio/1.0',
-      Accept: 'audio/*,*/*',
-    },
-  });
+  let response;
+  try {
+    response = await axios.get(audioUrl, {
+      responseType: 'stream',
+      maxRedirects: 5,
+      timeout: 120000,
+      headers: {
+        'User-Agent': 'Procell-Audio/1.0',
+        Accept: 'audio/*,*/*',
+      },
+    });
+  } catch (error) {
+    throw describeAxiosError(error, `Audio yuklab olishda xato (${audioUrl})`);
+  }
 
   if (!response.data) {
     throw new Error('Audio stream bo\'sh qaytdi.');
@@ -115,14 +136,19 @@ async function transcribeChunkWithMuxlisa(chunkPath: string): Promise<string> {
   const form = new FormData();
   form.append('audio', fs.createReadStream(chunkPath));
 
-  const response = await axios.request({
-    method: 'POST',
-    maxBodyLength: Infinity,
-    url: MUXLISA_STT_URL,
-    headers: { 'x-api-key': apiKey, ...form.getHeaders() },
-    data: form,
-    timeout: 120000,
-  });
+  let response;
+  try {
+    response = await axios.request({
+      method: 'POST',
+      maxBodyLength: Infinity,
+      url: MUXLISA_STT_URL,
+      headers: { 'x-api-key': apiKey, ...form.getHeaders() },
+      data: form,
+      timeout: 120000,
+    });
+  } catch (error) {
+    throw describeAxiosError(error, `Muxlisa STT so'rovi xato qaytardi (${path.basename(chunkPath)})`);
+  }
 
   const text = response.data?.text;
   if (typeof text !== 'string') {
