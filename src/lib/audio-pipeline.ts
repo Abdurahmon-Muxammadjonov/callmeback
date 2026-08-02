@@ -2,11 +2,16 @@ import { GoogleGenAI, Type } from '@google/genai';
 import axios from 'axios';
 import FormData from 'form-data';
 import ffmpeg from 'fluent-ffmpeg';
+import ffmpegStatic from 'ffmpeg-static';
 import fs from 'node:fs';
 import { copyFile, readdir, mkdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
+
+if (ffmpegStatic) {
+  ffmpeg.setFfmpegPath(ffmpegStatic);
+}
 
 export interface CallAnalysis {
   sentiment: 'positive' | 'negative' | 'neutral';
@@ -22,7 +27,9 @@ export interface AudioProcessResult {
   chunks: number;
 }
 
-const SEGMENT_SECONDS = 600;
+// Muxlisa STT bir so'rovda maksimal 60 soniyalik audio qabul qiladi —
+// xavfsizlik zaxirasi uchun 50 soniyaga bo'lamiz.
+const SEGMENT_SECONDS = 50;
 const ANALYZE_MODEL = 'gemini-3.6-flash';
 const TMP_ROOT = path.join(os.tmpdir(), 'procell-audio');
 const MUXLISA_STT_URL = 'https://service.muxlisa.uz/api/v2/stt';
