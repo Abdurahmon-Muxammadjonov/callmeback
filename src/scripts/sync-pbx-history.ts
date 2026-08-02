@@ -1,7 +1,7 @@
 import '../env';
 
 import { randomUUID } from 'node:crypto';
-import { Agent, setGlobalDispatcher } from 'undici';
+import { Agent } from 'undici';
 import { supabase } from '../lib/supabase';
 
 type Direction = 'incoming' | 'outgoing' | 'unknown';
@@ -70,13 +70,17 @@ type RetryableContext = {
 
 type CallInsertRow = Record<string, any>;
 
+// MUHIM: bu global emas — faqat shu fayldagi PBX so'rovlariga (fetch chaqiruvlariga
+// `dispatcher: pbxAgent` orqali) qo'llanadi. Ilgari setGlobalDispatcher(pbxAgent)
+// butun jarayon (shu jumladan Supabase, Muxlisa, Gemini so'rovlari) uchun global
+// HTTP dispatcher'ni PBX ehtiyojlariga moslab tor qilib qo'ygan edi (bir vaqtda
+// faqat 20 ulanish) — bu boshqa xizmatlarda ECONNRESET'ga sabab bo'lishi mumkin edi.
 const pbxAgent = new Agent({
   keepAliveTimeout: Number(process.env.PBX_KEEP_ALIVE_TIMEOUT_MS || '30000'),
   keepAliveMaxTimeout: Number(process.env.PBX_KEEP_ALIVE_MAX_TIMEOUT_MS || '120000'),
   connections: Number(process.env.PBX_KEEP_ALIVE_CONNECTIONS || '20'),
   pipelining: Number(process.env.PBX_KEEP_ALIVE_PIPELINING || '1'),
 });
-setGlobalDispatcher(pbxAgent);
 
 function getRuntimeConfig(overrides: RunSyncOptions = {}): SyncRuntimeConfig {
   const historyApiUrl = (process.env.PBX_HISTORY_API_URL || '').trim();
@@ -352,6 +356,8 @@ async function fetchJsonWithRetry(
         Authorization: `Bearer ${apiKey}`,
       },
       signal: AbortSignal.timeout(options.timeoutMs),
+      // @ts-expect-error — undici-specific option, standard fetch types don't declare it
+      dispatcher: pbxAgent,
     });
 
     if (!res.ok) {
@@ -458,6 +464,8 @@ async function persistAudio(audioUrl: string, config: SyncRuntimeConfig): Promis
       'User-Agent': 'Mozilla/5.0 (compatible; ProcellPBXHistorySync/1.0)',
     },
     signal: AbortSignal.timeout(config.audioTimeoutMs),
+    // @ts-expect-error — undici-specific option, standard fetch types don't declare it
+    dispatcher: pbxAgent,
   }), {
     retries: config.retryCount,
     delayMs: config.retryDelayMs,
