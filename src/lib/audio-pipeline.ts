@@ -133,36 +133,79 @@ async function splitAudioToChunks(inputFilePath: string, chunksDir: string): Pro
   return sortChunkFiles(files);
 }
 
-// Muxlisa.uz — nutqni matnga aylantirish (STT).
+function isRetryableAxiosError(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) return false;
+  const status = error.response?.status;
+  if (status && [429, 500, 502, 503, 504].includes(status)) return true;
+  return !error.response; // tarmoq xatosi (timeout, connection reset va h.k.)
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Muxlisa.uz — nutqni matnga aylantirish (STT). Ko'p bo'lak parallel yuborilganda
+// ularning serveri vaqtinchalik 5xx berishi mumkin — shu uchun qayta uriniladi.
 async function transcribeChunkWithMuxlisa(chunkPath: string): Promise<string> {
   const apiKey = process.env.MUXLISA_API_KEY;
   if (!apiKey) {
     throw new Error('MUXLISA_API_KEY yo\'q.');
   }
 
-  const form = new FormData();
-  form.append('audio', fs.createReadStream(chunkPath));
+  const maxAttempts = 3;
+  let lastError: unknown;
 
-  let response;
-  try {
-    response = await axios.request({
-      method: 'POST',
-      maxBodyLength: Infinity,
-      url: MUXLISA_STT_URL,
-      headers: { 'x-api-key': apiKey, ...form.getHeaders() },
-      data: form,
-      timeout: 120000,
-    });
-  } catch (error) {
-    throw describeAxiosError(error, `Muxlisa STT so'rovi xato qaytardi (${path.basename(chunkPath)})`);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const form = new FormData();
+    form.append('audio', fs.createReadStream(chunkPath));
+
+    try {
+      const response = await axios.request({
+        method: 'POST',
+        maxBodyLength: Infinity,
+        url: MUXLISA_STT_URL,
+        headers: { 'x-api-key': apiKey, ...form.getHeaders() },
+        data: form,
+        timeout: 120000,
+      });
+
+      const text = response.data?.text;
+      if (typeof text !== 'string') {
+        throw new Error(`Muxlisa kutilmagan javob formati qaytardi: ${path.basename(chunkPath)}`);
+      }
+
+      return text.trim();
+    } catch (error) {
+      lastError = error;
+      if (isRetryableAxiosError(error) && attempt < maxAttempts) {
+        console.warn(`Muxlisa STT qayta urinish ${attempt}/${maxAttempts} (${path.basename(chunkPath)}):`, (error as any)?.message);
+        await sleep(1500 * attempt);
+        continue;
+      }
+      throw describeAxiosError(error, `Muxlisa STT so'rovi xato qaytardi (${path.basename(chunkPath)})`);
+    }
   }
 
-  const text = response.data?.text;
-  if (typeof text !== 'string') {
-    throw new Error(`Muxlisa kutilmagan javob formati qaytardi: ${path.basename(chunkPath)}`);
-  }
+  throw describeAxiosError(lastError, `Muxlisa STT so'rovi xato qaytardi (${path.basename(chunkPath)})`);
+}
 
-  return text.trim();
+// Cheklangan parallellik: bir vaqtda eng ko'pi bilan `limit` ta bo'lak yuboriladi
+// (Muxlisa serverini ortiqcha yuklab, 5xx xatolarga sabab bo'lmasligi uchun).
+async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  const poolSize = Math.max(1, Math.min(limit, items.length));
+
+  const runners = Array.from({ length: poolSize }, async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) break;
+      results[i] = await worker(items[i]);
+    }
+  });
+
+  await Promise.all(runners);
+  return results;
 }
 
 // Gemini — Muxlisa bergan transkriptni qo'ng'iroq tahlil skripti (mezonlari) bo'yicha baholaydi.
@@ -219,9 +262,13 @@ async function removePathSafe(targetPath: string): Promise<void> {
   }
 }
 
+const MUXLISA_CONCURRENCY = parseInt(process.env.MUXLISA_CONCURRENCY || '4', 10);
+
 async function transcribeAndAnalyze(chunkPaths: string[], extraRules: string): Promise<{ transcript: string; analysis: CallAnalysis }> {
-  const transcriptParts = await Promise.all(
-    chunkPaths.map((chunkPath) => transcribeChunkWithMuxlisa(chunkPath))
+  const transcriptParts = await mapWithConcurrency(
+    chunkPaths,
+    MUXLISA_CONCURRENCY,
+    (chunkPath) => transcribeChunkWithMuxlisa(chunkPath)
   );
 
   const transcript = transcriptParts
