@@ -178,24 +178,24 @@ async function auditCall(input: AudioInput, extraRules = ''): Promise<AuditResul
       bad_leads_count: 0,
       traffic_conversion: 0,
       sales_conversion: result.analysis.deal_closed ? 100 : 0,
-      kpi_score: 0,
+      kpi_score: result.analysis.kpi_score,
       penalty_amount: 0,
       bonus_amount: 0,
       rop_comment: result.analysis.operator_evaluation,
       stage_1_to_2: 0,
       stage_2_to_3: 0,
       stage_3_to_4: 0,
-      lost_reasons: [],
+      lost_reasons: result.analysis.lost_reasons.map((r) => ({ reason_text: r.reason_text, count: 1 })),
       sentiment: result.analysis.sentiment,
       risk: result.analysis.client_mood,
-      criteria_scores: [],
+      criteria_scores: result.analysis.criteria_scores,
       transcript_segments: [],
       summary: result.analysis.summary,
-      client_info: result.analysis.client_mood,
-      final_agreement: result.analysis.deal_closed
+      client_info: result.analysis.client_info || result.analysis.client_mood,
+      final_agreement: result.analysis.final_agreement || (result.analysis.deal_closed
         ? 'Mijoz bitimga rozilik bildirgan (AI tahliliga ko\'ra).'
-        : 'Bitim yopilmagan (AI tahliliga ko\'ra).',
-      next_steps: [],
+        : 'Bitim yopilmagan (AI tahliliga ko\'ra).'),
+      next_steps: result.analysis.next_steps,
     };
 
     return normalizeAuditResult(normalized);

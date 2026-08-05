@@ -13,12 +13,28 @@ if (ffmpegStatic) {
   ffmpeg.setFfmpegPath(ffmpegStatic);
 }
 
+export interface CriteriaScore {
+  title: string;
+  category: string | null;
+  score: number;
+}
+
+export interface LostReason {
+  reason_text: string;
+}
+
 export interface CallAnalysis {
   sentiment: 'positive' | 'negative' | 'neutral';
   client_mood: string;
   operator_evaluation: string;
   deal_closed: boolean;
   summary: string;
+  kpi_score: number;
+  client_info: string;
+  final_agreement: string;
+  next_steps: string[];
+  lost_reasons: LostReason[];
+  criteria_scores: CriteriaScore[];
 }
 
 export interface AudioProcessResult {
@@ -38,12 +54,45 @@ const CALL_ANALYSIS_SCHEMA = {
   type: Type.OBJECT,
   properties: {
     sentiment: { type: Type.STRING, format: 'enum', enum: ['positive', 'negative', 'neutral'] },
-    client_mood: { type: Type.STRING },
-    operator_evaluation: { type: Type.STRING },
+    client_mood: { type: Type.STRING, description: "Mijozning kayfiyati/holati haqida qisqa izoh" },
+    operator_evaluation: { type: Type.STRING, description: "Menejer/operatorning ishi, ohangi, professionalligi haqida tahlil" },
     deal_closed: { type: Type.BOOLEAN },
-    summary: { type: Type.STRING },
+    summary: { type: Type.STRING, description: "Suhbatning 3-4 jumlalik xulosasi" },
+    kpi_score: { type: Type.INTEGER, description: "Menejerning shu qo'ng'iroqdagi umumiy sifat bahosi, 0 dan 100 gacha" },
+    client_info: { type: Type.STRING, description: "Mijoz haqida transkriptdan aniqlangan ma'lumot (ism, ehtiyoj, kontekst)" },
+    final_agreement: { type: Type.STRING, description: "Suhbat oxiridagi kelishuv yoki natija" },
+    next_steps: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description: "Keyingi qadamlar/harakatlar ro'yxati (bo'lmasa bo'sh massiv)",
+    },
+    lost_reasons: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: { reason_text: { type: Type.STRING } },
+        required: ['reason_text'],
+      },
+      description: "Agar bitim yopilmagan bo'lsa, sabablari (bo'lsa bo'sh massiv)",
+    },
+    criteria_scores: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          title: { type: Type.STRING },
+          category: { type: Type.STRING, nullable: true },
+          score: { type: Type.INTEGER },
+        },
+        required: ['title', 'score'],
+      },
+      description: "Faqat quyida DINAMIK QOIDALAR berilgan bo'lsa to'ldiring — har bir qoida uchun title, category va 0-100 ball. Qoida berilmagan bo'lsa — bo'sh massiv.",
+    },
   },
-  required: ['sentiment', 'client_mood', 'operator_evaluation', 'deal_closed', 'summary'],
+  required: [
+    'sentiment', 'client_mood', 'operator_evaluation', 'deal_closed', 'summary',
+    'kpi_score', 'client_info', 'final_agreement', 'next_steps', 'lost_reasons', 'criteria_scores',
+  ],
 };
 
 function sortChunkFiles(files: string[]): string[] {
@@ -220,8 +269,11 @@ async function analyzeTranscript(transcript: string, extraRules = ''): Promise<C
   const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
   const systemPrompt = [
-    'Siz tajribali call-center QA analitikisiz. Berilgan qo\'ng\'iroq transkriptini diqqat bilan tahlil qiling.',
-    'client_mood, operator_evaluation va summary maydonlarini o\'zbek tilida yozing.',
+    'Siz tajribali call-center QA analitikisiz. Berilgan qo\'ng\'iroq transkriptini chuqur va diqqat bilan tahlil qiling.',
+    'Barcha matn maydonlarini (client_mood, operator_evaluation, summary, client_info, final_agreement, next_steps, lost_reasons) o\'zbek tilida yozing.',
+    'kpi_score — menejerning shu qo\'ng\'iroqdagi umumiy ish sifatini 0-100 oralig\'ida real baholang (faqat 0 yoki 100 emas, transkript mazmuniga qarab farqlansin).',
+    'criteria_scores massivini FAQAT quyida "QO\'SHIMCHA DINAMIK QOIDALAR" berilgan bo\'lsa to\'ldiring — har bir faol qoida uchun alohida ball bering. Qoidalar berilmagan bo\'lsa, criteria_scores bo\'sh massiv ([]) bo\'lsin.',
+    'Agar bitim yopilmagan bo\'lsa, lost_reasons massivida sababini yozing; yopilgan bo\'lsa — bo\'sh massiv.',
     extraRules,
   ]
     .filter(Boolean)
@@ -248,12 +300,34 @@ async function analyzeTranscript(transcript: string, extraRules = ''): Promise<C
     throw new Error('Gemini JSON sentiment maydoni noto\'g\'ri.');
   }
 
+  const clampScore = (v: unknown): number => Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
+
   return {
     sentiment,
     client_mood: typeof parsed.client_mood === 'string' ? parsed.client_mood : '',
     operator_evaluation: typeof parsed.operator_evaluation === 'string' ? parsed.operator_evaluation : '',
     deal_closed: Boolean(parsed.deal_closed),
     summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+    kpi_score: clampScore(parsed.kpi_score),
+    client_info: typeof parsed.client_info === 'string' ? parsed.client_info : '',
+    final_agreement: typeof parsed.final_agreement === 'string' ? parsed.final_agreement : '',
+    next_steps: Array.isArray(parsed.next_steps)
+      ? parsed.next_steps.filter((s): s is string => typeof s === 'string' && s.trim() !== '')
+      : [],
+    lost_reasons: Array.isArray(parsed.lost_reasons)
+      ? parsed.lost_reasons
+          .filter((r): r is LostReason => !!r && typeof r.reason_text === 'string' && r.reason_text.trim() !== '')
+          .map((r) => ({ reason_text: r.reason_text }))
+      : [],
+    criteria_scores: Array.isArray(parsed.criteria_scores)
+      ? parsed.criteria_scores
+          .filter((c): c is CriteriaScore => !!c && typeof c.title === 'string' && c.title.trim() !== '')
+          .map((c) => ({
+            title: c.title,
+            category: typeof c.category === 'string' ? c.category : null,
+            score: clampScore(c.score),
+          }))
+      : [],
   };
 }
 

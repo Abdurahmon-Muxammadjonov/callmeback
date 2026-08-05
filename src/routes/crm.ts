@@ -76,11 +76,38 @@ async function saveIntegrationTestResult(params: {
 }
 
 function getApiKeyFromRequest(req: Request): string {
-  const fromHeader = typeof req.headers['x-api-key'] === 'string' ? req.headers['x-api-key'].trim() : '';
-  if (fromHeader) return fromHeader;
+  // Different PBX panels expose different header names for a static "auth key" field —
+  // accept the common variants instead of forcing one specific header.
+  const headerCandidates = ['x-api-key', 'api-key', 'apikey', 'x-auth-token', 'x-webhook-key'];
+  for (const name of headerCandidates) {
+    const v = req.headers[name];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+
   const auth = typeof req.headers.authorization === 'string' ? req.headers.authorization.trim() : '';
   if (auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim();
-  return typeof req.body?.api_key === 'string' ? req.body.api_key.trim() : '';
+  if (auth.toLowerCase().startsWith('basic ')) {
+    try {
+      const decoded = Buffer.from(auth.slice(6).trim(), 'base64').toString('utf8');
+      const [user, pass] = decoded.split(':');
+      // PBX panels that only support "URL" fields sometimes stuff the key into the
+      // basic-auth username or password slot (with the other left empty) — accept either.
+      if (user) return user.trim();
+      if (pass) return pass.trim();
+    } catch {
+      // ignore malformed basic-auth header
+    }
+  }
+
+  const fromBody = typeof req.body?.api_key === 'string' ? req.body.api_key.trim() : '';
+  if (fromBody) return fromBody;
+
+  // Some PBX webhook configs only allow a single URL field, so the key gets appended
+  // as a query string (?api_key=... or ?key=...) instead of a header.
+  const fromQuery = typeof req.query?.api_key === 'string'
+    ? req.query.api_key.trim()
+    : (typeof req.query?.key === 'string' ? req.query.key.trim() : '');
+  return fromQuery;
 }
 
 function getAdminSyncTokenFromRequest(req: Request): string {
@@ -695,6 +722,19 @@ router.post('/webhook/pbx', async (req: Request, res: Response) => {
 
     const providedKey = getApiKeyFromRequest(req);
     if (!providedKey || providedKey !== expectedKey) {
+      // Diagnostic only — never log the expected/stored key, just enough about what
+      // arrived to figure out which transport (header/query/body) the caller actually used.
+      console.warn('PBX webhook: API key mos kelmadi.', {
+        hasHeaderXApiKey: typeof req.headers['x-api-key'] === 'string',
+        hasAuthorizationHeader: typeof req.headers.authorization === 'string',
+        authorizationScheme: typeof req.headers.authorization === 'string'
+          ? req.headers.authorization.split(' ')[0]
+          : null,
+        hasBodyApiKey: typeof req.body?.api_key === 'string',
+        queryKeys: Object.keys(req.query || {}),
+        providedKeyLength: providedKey.length,
+        expectedKeyLength: expectedKey.length,
+      });
       return res.status(401).json({ success: false, error: 'Noto\'g\'ri API key.' });
     }
 
