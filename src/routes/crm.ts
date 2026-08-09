@@ -721,7 +721,13 @@ router.post('/webhook/pbx', async (req: Request, res: Response) => {
       // Diagnostic only — never log the expected/stored key, just enough about what
       // arrived to figure out which transport (header/query/body) the caller actually used.
       console.warn('PBX webhook: API key mos kelmadi.', {
+        timestamp: new Date().toISOString(),
+        // Call/event identifiers aren't secret — worth logging so a rejected real event
+        // can be handed to the PBX side as concrete evidence (time + UUID + what we returned).
+        callUuid: pickString(req.body, ['uuid', 'call_id', 'callId', 'id']) || null,
+        callEvent: pickString(req.body, ['event', 'call_status', 'status']) || null,
         contentType: req.headers['content-type'] || null,
+        rawUrl: req.originalUrl,
         bodyType: Array.isArray(req.body) ? 'array' : typeof req.body,
         bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : null,
         hasHeaderXApiKey: typeof req.headers['x-api-key'] === 'string',
@@ -733,6 +739,7 @@ router.post('/webhook/pbx', async (req: Request, res: Response) => {
         queryKeys: Object.keys(req.query || {}),
         providedKeyLength: providedKey.length,
         expectedKeyLength: expectedKey.length,
+        respondingWith: 401,
       });
       return res.status(401).json({ success: false, error: 'Noto\'g\'ri API key.' });
     }
