@@ -40,7 +40,29 @@ app.use(cors({
   allowedHeaders: ['Accept', 'Content-Type', 'Authorization'],
   credentials: true,
 }));
-app.use(express.json({ limit: '25mb' }));
+// Some PBX/webhook senders post JSON with a wrong/missing Content-Type (e.g. text/plain,
+// or no header at all) or use classic form-encoding — accept all of these so req.body is
+// never silently empty just because the sender's HTTP client got a header wrong.
+app.use(express.json({
+  limit: '25mb',
+  type: (req) => {
+    const ct = req.headers['content-type'];
+    if (!ct) return true;
+    return /json|text\/plain/i.test(ct);
+  },
+}));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+
+// A malformed/non-JSON body (e.g. a PBX sending raw form data with no matching
+// Content-Type) would otherwise bubble up as Express's default HTML error page,
+// which hides what actually went wrong from both the caller and our own logs.
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err?.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    console.warn(`Body parse xatosi (${req.method} ${req.path}):`, err.message);
+    return res.status(400).json({ success: false, error: `So'rov tanasi (body) noto'g'ri formatda: ${err.message}` });
+  }
+  return next(err);
+});
 
 app.use('/users', usersRouter);
 app.use('/managers', managersRouter);

@@ -725,6 +725,9 @@ router.post('/webhook/pbx', async (req: Request, res: Response) => {
       // Diagnostic only — never log the expected/stored key, just enough about what
       // arrived to figure out which transport (header/query/body) the caller actually used.
       console.warn('PBX webhook: API key mos kelmadi.', {
+        contentType: req.headers['content-type'] || null,
+        bodyType: Array.isArray(req.body) ? 'array' : typeof req.body,
+        bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : null,
         hasHeaderXApiKey: typeof req.headers['x-api-key'] === 'string',
         hasAuthorizationHeader: typeof req.headers.authorization === 'string',
         authorizationScheme: typeof req.headers.authorization === 'string'
