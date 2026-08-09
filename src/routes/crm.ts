@@ -228,32 +228,28 @@ async function resolveAudioUrlByCallId(callId: string, webhookUrl: string, apiKe
 }
 
 function normalizeWebhookCall(item: any): BatchCallItem {
-  const phone = pickString(item, [
-    'phone',
-    'phone_number',
-    'phoneNumber',
-    'client_phone',
-    'clientPhone',
-    'contact_phone',
-    'contactPhone',
-    'caller_number',
-    'callerNumber',
-    'callee_number',
-    'calleeNumber',
-  ]);
   const directionRaw = pickString(item, ['direction', 'call_direction', 'callDirection', 'type', 'call_type']).toLowerCase();
   const direction: 'incoming' | 'outgoing' | 'unknown' =
-    directionRaw === 'incoming' || directionRaw === 'inbound' ? 'incoming'
-      : directionRaw === 'outgoing' || directionRaw === 'outbound' ? 'outgoing'
+    directionRaw === 'incoming' || directionRaw === 'inbound' || directionRaw === 'in' ? 'incoming'
+      : directionRaw === 'outgoing' || directionRaw === 'outbound' || directionRaw === 'out' ? 'outgoing'
       : 'unknown';
 
+  // OnlinePBX's real call-event webhook sends the two legs as "caller"/"callee" rather
+  // than a single "client phone" field — which one is the client depends on direction
+  // (inbound: client calls in as "caller"; outbound: agent dials out to "callee").
+  const caller = pickString(item, ['caller', 'caller_number', 'callerNumber']);
+  const callee = pickString(item, ['callee', 'callee_number', 'calleeNumber']);
+  const directPhone = pickString(item, ['phone', 'phone_number', 'phoneNumber', 'client_phone', 'clientPhone', 'contact_phone', 'contactPhone']);
+  const phone = directPhone
+    || (direction === 'incoming' ? (caller || callee) : (callee || caller));
+
   return {
-    audio_url: pickString(item, ['audio_url', 'audioUrl', 'record_url', 'recordUrl', 'audio', 'recording_url']),
+    audio_url: pickString(item, ['audio_url', 'audioUrl', 'record_url', 'recordUrl', 'audio', 'recording_url', 'download_url', 'downloadUrl']),
     manager_name: pickString(item, ['manager_name', 'managerName', 'operator_name', 'operatorName', 'employee_name', 'employeeName', 'user_name', 'userName']),
     manager_id: pickString(item, ['manager_id', 'managerId']),
     platform_id: pickString(item, ['platform_id', 'platformId']),
-    crm_id: pickString(item, ['crm_id', 'crmId', 'call_id', 'callId', 'id']),
-    pbx_call_id: pickString(item, ['pbx_call_id', 'pbxCallId', 'call_id', 'callId', 'id']),
+    crm_id: pickString(item, ['crm_id', 'crmId', 'call_id', 'callId', 'id', 'uuid']),
+    pbx_call_id: pickString(item, ['pbx_call_id', 'pbxCallId', 'call_id', 'callId', 'id', 'uuid']),
     direction,
     client_id: pickString(item, ['client_id', 'clientId', 'user_id', 'userId', 'contact_id', 'contactId']),
     client_phone: phone,
