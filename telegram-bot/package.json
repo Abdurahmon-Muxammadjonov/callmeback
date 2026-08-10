@@ -10,7 +10,7 @@
     "start": "node bot.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.115.0",
+    "@google/genai": "^2.15.0",
     "@supabase/supabase-js": "^2.111.0",
     "dotenv": "^17.4.2",
     "telegraf": "^4.16.3"

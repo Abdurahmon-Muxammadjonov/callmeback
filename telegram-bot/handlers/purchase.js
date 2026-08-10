@@ -222,26 +222,27 @@ async function finalizeLead(ctx) {
     MAIN_MENU,
   );
 
-  const adminChatId = process.env.ADMIN_CHAT_ID;
-  if (adminChatId) {
-    const summary = [
-      '🆕 *Yangi lid — SalesPulse boti*',
-      '',
-      `👤 Ism: ${lead.full_name}`,
-      `📱 Telefon: ${lead.phone}`,
-      `🏢 Kompaniya: ${lead.company_name}`,
-      `💬 Telegram: ${lead.telegram_username ? '@' + lead.telegram_username : "yo'q"} (id: ${lead.telegram_user_id})`,
-      `📦 Tarif: ${lead.tariff}`,
-      `👥 Xodimlar soni: ${lead.employee_count}`,
-      `📅 Muddat: ${lead.duration_months} oy`,
-      `💰 Narx: ${formatSum(lead.price_per_employee)} so'm/xodim/oy → ${formatSum(lead.monthly_total)} so'm/oy → jami ${formatSum(lead.period_total)} so'm`,
-      `🕐 Vaqt: ${new Date().toISOString()}`,
-    ].join('\n');
+  const summary = [
+    '🆕 *Yangi lid — SalesPulse boti*',
+    '',
+    `👤 Ism: ${lead.full_name}`,
+    `📱 Telefon: ${lead.phone}`,
+    `🏢 Kompaniya: ${lead.company_name}`,
+    `💬 Telegram: ${lead.telegram_username ? '@' + lead.telegram_username : "yo'q"} (id: ${lead.telegram_user_id})`,
+    `📦 Tarif: ${lead.tariff}`,
+    `👥 Xodimlar soni: ${lead.employee_count}`,
+    `📅 Muddat: ${lead.duration_months} oy`,
+    `💰 Narx: ${formatSum(lead.price_per_employee)} so'm/xodim/oy → ${formatSum(lead.monthly_total)} so'm/oy → jami ${formatSum(lead.period_total)} so'm`,
+    `🕐 Vaqt: ${new Date().toISOString()}`,
+  ].join('\n');
 
+  // Yangi lid: shaxsiy admin chatiga VA jamoaning umumiy guruhiga (bor bo'lsa) yuboriladi.
+  const destinations = [process.env.ADMIN_CHAT_ID, process.env.GROUP_CHAT_ID].filter(Boolean);
+  for (const chatId of destinations) {
     try {
-      await ctx.telegram.sendMessage(adminChatId, summary, { parse_mode: 'Markdown' });
+      await ctx.telegram.sendMessage(chatId, summary, { parse_mode: 'Markdown' });
     } catch (e) {
-      console.error("Adminga xabar yuborishda xato (ADMIN_CHAT_ID to'g'riligini tekshiring):", e.message);
+      console.error(`Lid xabarini yuborishda xato (chatId=${chatId}):`, e.message);
     }
   }
 }

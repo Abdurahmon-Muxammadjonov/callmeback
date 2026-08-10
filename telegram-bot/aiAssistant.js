@@ -1,17 +1,17 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenAI } from '@google/genai';
 import { TARIFFS, TARIFF_ORDER, DURATION_DISCOUNT_LABELS, FULL_FEATURE_CATEGORIES, formatSum } from './pricing.js';
 
-// Client faqat birinchi so'rov kelganda yaratiladi — ANTHROPIC_API_KEY hali
+// Client faqat birinchi so'rov kelganda yaratiladi — GEMINI_API_KEY hali
 // sozlanmagan bo'lsa ham, botning qolgan qismi (menyu, sotib olish oqimi,
 // Supabase'ga saqlash) ishlashda davom etadi; faqat FAQ savoliga xushmuomala
 // xato qaytadi.
 let client = null;
 function getClient() {
   if (!client) {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error('ANTHROPIC_API_KEY sozlanmagan.');
+    if (!process.env.GEMINI_API_KEY) {
+      throw new Error('GEMINI_API_KEY sozlanmagan.');
     }
-    client = new Anthropic();
+    client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   }
   return client;
 }
@@ -56,18 +56,16 @@ Qoidalar:
 - Agar savol platformaga aloqador bo'lmasa yoki ishonchli javob berolmasang, shuni ochiq ayt va taxmin qilish o'rniga "Admin bilan bog'lanish" tugmasini taklif qil.`;
 
 export async function askQuestion(question) {
-  const response = await getClient().messages.create({
-    model: 'claude-opus-5',
-    max_tokens: 1024,
-    system: SYSTEM_PROMPT,
-    output_config: { effort: 'low' },
-    messages: [{ role: 'user', content: question }],
+  const response = await getClient().models.generateContent({
+    model: 'gemini-3.6-flash',
+    contents: question,
+    config: {
+      systemInstruction: SYSTEM_PROMPT,
+    },
   });
 
-  if (response.stop_reason === 'refusal') {
-    return "Kechirasiz, bu savolga javob berolmayman. 👨‍💼 Admin bilan bog'lanish tugmasini bosing.";
-  }
-
-  const textBlock = response.content.find((b) => b.type === 'text');
-  return textBlock ? textBlock.text : "Kechirasiz, javob topilmadi. 👨‍💼 Admin bilan bog'laning.";
+  const text = response.text;
+  return text && text.trim()
+    ? text.trim()
+    : "Kechirasiz, javob topilmadi. 👨‍💼 Admin bilan bog'laning.";
 }
