@@ -106,26 +106,70 @@ const isValidHttpUrl = (v: string) => {
 
 // Bazadagi aktiv qoidalarni o'qib, AI tahlili uchun qo'shimcha ko'rsatma matnini quradi.
 // Admin yangi qoida qo'shsa, keyingi tahlilda darhol shu yerda paydo bo'ladi.
-async function buildDynamicRules(supabase: SupabaseClient): Promise<string> {
+interface ActiveCriterion {
+  title: string;
+  description: string;
+  penalty_amount: number;
+  category: string | null;
+  type: 'Majburiy' | 'Jarima' | 'Bonus';
+}
+
+// admin `/criteria` orqali kiritgan aktiv qoidalarni (masalan, sotuv skripti bosqichlarini)
+// bir marta o'qib, ham Gemini promptiga, ham jarima/bonus hisobiga ishlatiladi.
+async function fetchActiveCriteria(supabase: SupabaseClient): Promise<ActiveCriterion[]> {
   const { data, error } = await supabase
     .from('criteria')
     .select('title, description, penalty_amount, category, type')
     .eq('is_active', true);
-  if (error || !data || data.length === 0) return '';
+  if (error || !data) return [];
+  return data.map((c) => ({
+    title: String(c.title || ''),
+    description: String(c.description || ''),
+    penalty_amount: Number(c.penalty_amount) || 0,
+    category: c.category ?? null,
+    type: (c.type === 'Jarima' || c.type === 'Bonus') ? c.type : 'Majburiy',
+  }));
+}
 
-  const lines = data.map((c) => {
-    const penalty = Number(c.penalty_amount) || 0;
-    const penaltyTxt = penalty > 0 ? ` -> Buzilsa jarima: ${penalty} UZS` : '';
+function buildDynamicRules(criteria: ActiveCriterion[]): string {
+  if (criteria.length === 0) return '';
+
+  const lines = criteria.map((c) => {
+    const penaltyTxt = c.penalty_amount > 0 ? ` -> Buzilsa/bajarilmasa jarima: ${c.penalty_amount} UZS` : '';
     const cat = c.category ? ` [kategoriya: ${c.category}]` : '';
-    const typ = c.type ? ` (${c.type})` : '';
-    return `  - ${c.title}${typ}${cat}: ${c.description}${penaltyTxt}`;
+    return `  - ${c.title} (${c.type})${cat}: ${c.description}${penaltyTxt}`;
   });
 
   return (
-    `\n\nQO'SHIMCHA DINAMIK QOIDALAR (admin tomonidan belgilangan, qat'iy qo'llang):\n${lines.join('\n')}` +
-    `\n\nHar bir AKTIV dinamik qoidani criteria_scores massivida 0–100 ball bilan bahola; ` +
-    `har bir element uchun qoidaning title va category sini ham qaytar.`
+    `\n\nQO'SHIMCHA DINAMIK QOIDALAR (admin tomonidan belgilangan, qat'iy qo'llang — bu ko'pincha rasmiy sotuv skripti bosqichlari):\n${lines.join('\n')}` +
+    `\n\nHar bir AKTIV dinamik qoidani criteria_scores massivida 0–100 ball bilan bahola (title aynan yuqoridagidek bo'lsin, category ham qaytar). ` +
+    `Ball qoida qanchalik bajarilganini ko'rsatsin: to'liq bajarilgan/aytilgan bo'lsa yuqori (80-100), qisman bajarilgan bo'lsa o'rtacha (40-79), umuman bajarilmagan/aytilmagan bo'lsa past (0-39). ` +
+    `Faqat transkriptda haqiqatan bo'lgan gaplarga asoslan, taxmin qilib to'ldirma.`
   );
+}
+
+// Har bir dinamik qoida uchun AI qo'ygan ballni qoidaning turi (Jarima/Bonus/Majburiy) va
+// penalty_amount'iga solishtirib, qo'ng'iroqning pul ko'rinishidagi jarima/bonusini hisoblaydi.
+// Past ball (< 50) = qoida bajarilmadi = jarima; yuqori ball (>= 80) Bonus turidagi qoidada = bonus.
+const CRITERIA_PENALTY_THRESHOLD = 50;
+const CRITERIA_BONUS_THRESHOLD = 80;
+function computeCriteriaFinancials(
+  criteriaScores: CriteriaScore[],
+  activeCriteria: ActiveCriterion[],
+): { penalty_amount: number; bonus_amount: number } {
+  let penalty_amount = 0;
+  let bonus_amount = 0;
+  for (const cs of criteriaScores) {
+    const rule = activeCriteria.find((c) => c.title === cs.title);
+    if (!rule || rule.penalty_amount <= 0) continue;
+    const score = Number(cs.score) || 0;
+    if (rule.type === 'Bonus') {
+      if (score >= CRITERIA_BONUS_THRESHOLD) bonus_amount += rule.penalty_amount;
+    } else if (score < CRITERIA_PENALTY_THRESHOLD) {
+      penalty_amount += rule.penalty_amount;
+    }
+  }
+  return { penalty_amount, bonus_amount };
 }
 
 interface AudioInput {
@@ -506,10 +550,18 @@ const inFlightCalls = new Set<string>();
 
 // Bitta batch qo'ng'irog'ini tahlil qilib, oldindan yaratilgan qatorni yangilaydi.
 // Bittasi yiqilsa — faqat o'sha 'failed' bo'ladi, qolganlariga ta'sir qilmaydi.
-async function processOneBatchCall(supabase: SupabaseClient, prep: PreparedCall, extraRules: string): Promise<void> {
+async function processOneBatchCall(
+  supabase: SupabaseClient,
+  prep: PreparedCall,
+  extraRules: string,
+  activeCriteria: ActiveCriterion[],
+): Promise<void> {
   inFlightCalls.add(prep.callId);
   try {
     const audit = await auditCall({ audioUrl: prep.audioUrl }, extraRules);
+    const fin = computeCriteriaFinancials(audit.criteria_scores, activeCriteria);
+    audit.penalty_amount = fin.penalty_amount;
+    audit.bonus_amount = fin.bonus_amount;
     const { error: upErr } = await supabase
       .from('calls')
       .update({ ...callRowFields(audit), status: 'done', error: null })
@@ -535,8 +587,9 @@ async function processOneBatchCall(supabase: SupabaseClient, prep: PreparedCall,
 // Butun batch'ni fon rejimida, cheklangan parallellik bilan ishlaydi.
 async function processBatchInBackground(supabase: SupabaseClient, prepared: PreparedCall[]): Promise<void> {
   try {
-    const extraRules = await buildDynamicRules(supabase);
-    await runWithConcurrency(prepared, ANALYZE_CONCURRENCY, (p) => processOneBatchCall(supabase, p, extraRules));
+    const activeCriteria = await fetchActiveCriteria(supabase);
+    const extraRules = buildDynamicRules(activeCriteria);
+    await runWithConcurrency(prepared, ANALYZE_CONCURRENCY, (p) => processOneBatchCall(supabase, p, extraRules, activeCriteria));
     console.log(`Batch tugadi: ${prepared.length} ta qo'ng'iroq tahlil qilindi.`);
   } catch (e) {
     console.error('Batch background error:', (e as Error).message);
@@ -842,7 +895,8 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
       manager_id = manager.id;
     }
 
-    const extraRules = await buildDynamicRules(supabase);
+    const activeCriteria = await fetchActiveCriteria(supabase);
+    const extraRules = buildDynamicRules(activeCriteria);
 
     // Audit kirishi: fayl bo'lsa diskdagi fayldan, aks holda URL'dan.
     let audio_url = bodyAudioUrl;
@@ -858,6 +912,11 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
       }
     } else {
       audit = await auditCall({ audioUrl: bodyAudioUrl }, extraRules);
+    }
+    {
+      const fin = computeCriteriaFinancials(audit.criteria_scores, activeCriteria);
+      audit.penalty_amount = fin.penalty_amount;
+      audit.bonus_amount = fin.bonus_amount;
     }
 
     const { data: callRow, error: callInsertError } = await supabase
