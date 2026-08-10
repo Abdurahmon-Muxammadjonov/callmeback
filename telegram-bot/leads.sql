@@ -1,6 +1,8 @@
 -- Supabase SQL Editor'da bir marta ishga tushiring.
+-- Nom ataylab `bot_leads` (`leads` emas) — asosiy backend'da xuddi shu nom bilan,
+-- lekin butunlay boshqa sxemadagi jadval allaqachon mavjud, to'qnashmasin.
 
-create table if not exists leads (
+create table if not exists bot_leads (
   id uuid primary key default gen_random_uuid(),
   telegram_user_id bigint not null,
   telegram_username text,

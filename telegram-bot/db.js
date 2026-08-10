@@ -11,9 +11,11 @@ export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
-// leads.sql orqali yaratilgan `leads` jadvaliga yakunlangan lidni yozadi.
+// leads.sql orqali yaratilgan `bot_leads` jadvaliga yakunlangan lidni yozadi.
+// E'tibor: asosiy backend'da (boshqa sxema bilan) `leads` degan jadval ALLAQACHON
+// mavjud (sotuv bosqichlari uchun) — shu bilan to'qnashmasligi uchun alohida nom.
 export async function insertLead(lead) {
-  const { error } = await supabase.from('leads').insert(lead);
+  const { error } = await supabase.from('bot_leads').insert(lead);
   if (error) throw new Error(`Lead saqlanmadi: ${error.message}`);
 }
 
