@@ -348,6 +348,30 @@ async function getOrCreateManagerByName(
   return created;
 }
 
+// PBX ichki raqami (extension) bo'yicha menejerni topadi yoki avtomatik yaratadi.
+// Ism bilan emas, TURG'UN identifikator (pbx_id) bilan bog'laydi — shunda admin keyinchalik
+// menejer ismini "PBX 101" dan haqiqiy ismga o'zgartirsa ham, keyingi qo'ng'iroqlar
+// baribir to'g'ri menejerga (dublikat yaratmasdan) bog'lanaveradi.
+async function getOrCreateManagerByPbxId(
+  supabase: SupabaseClient,
+  pbxId: string,
+): Promise<{ id: string; name: string; status: string }> {
+  const clean = pbxId.trim();
+  const { data: existing } = await supabase
+    .from('managers').select('id, name, status').eq('pbx_id', clean).limit(1);
+  if (existing && existing.length > 0) return existing[0];
+
+  const { data: created, error } = await supabase
+    .from('managers')
+    .insert({ name: `PBX ${clean}`, status: 'active', pbx_id: clean, crm_id: makeAutoCrmId('auto-pbx') })
+    .select('id, name, status')
+    .single();
+  if (error || !created) {
+    throw new Error(`Manager (pbx_id) yaratib bo'lmadi: ${error?.message || 'unknown'}`);
+  }
+  return created;
+}
+
 // Yuklangan audio faylni Supabase Storage'ga saqlaydi va public URL qaytaradi
 // (keyin platformada qayta eshitish uchun). Muvaffaqiyatsiz bo'lsa null.
 const AUDIO_BUCKET = 'recordings';
@@ -457,6 +481,7 @@ export interface BatchCallItem {
   audio_url?: string;
   manager_id?: string;
   manager_name?: string;
+  manager_pbx_id?: string;
   platform_id?: string;
   crm_id?: string;
   pbx_call_id?: string;
@@ -595,8 +620,14 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
     nameMap.set(nm, m.id);
   }
 
+  const pbxIdMap = new Map<string, string>();
+  for (const pid of new Set(items.map((it) => (it?.manager_pbx_id || '').trim()).filter(Boolean))) {
+    const m = await getOrCreateManagerByPbxId(supabase, pid);
+    pbxIdMap.set(pid, m.id);
+  }
+
   let defaultManager: { id: string } | null = null;
-  if (items.some((it) => !it?.manager_id && !(it?.manager_name || '').trim())) {
+  if (items.some((it) => !it?.manager_id && !(it?.manager_name || '').trim() && !(it?.manager_pbx_id || '').trim())) {
     defaultManager = await getOrCreateDefaultManager(supabase);
   }
 
@@ -634,6 +665,7 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
     }
 
     if (!mid && (it.manager_name || '').trim()) mid = nameMap.get((it.manager_name as string).trim());
+    if (!mid && (it.manager_pbx_id || '').trim()) mid = pbxIdMap.get((it.manager_pbx_id as string).trim());
     if (!mid) mid = defaultManager!.id;
 
     const crmId = typeof it.crm_id === 'string' ? it.crm_id.trim() : '';

@@ -242,11 +242,15 @@ function normalizeWebhookCall(item: any): BatchCallItem {
   const directPhone = pickString(item, ['phone', 'phone_number', 'phoneNumber', 'client_phone', 'clientPhone', 'contact_phone', 'contactPhone']);
   const phone = directPhone
     || (direction === 'incoming' ? (caller || callee) : (callee || caller));
+  // The other leg (not the client) is the agent's own extension on the PBX — use it to
+  // auto-assign/auto-create the manager by a stable id instead of leaving calls unassigned.
+  const agentExtension = direction === 'incoming' ? callee : caller;
 
   return {
     audio_url: pickString(item, ['audio_url', 'audioUrl', 'record_url', 'recordUrl', 'audio', 'recording_url', 'download_url', 'downloadUrl']),
     manager_name: pickString(item, ['manager_name', 'managerName', 'operator_name', 'operatorName', 'employee_name', 'employeeName', 'user_name', 'userName']),
     manager_id: pickString(item, ['manager_id', 'managerId']),
+    manager_pbx_id: pickString(item, ['manager_pbx_id', 'extension', 'user_id', 'userId']) || agentExtension,
     platform_id: pickString(item, ['platform_id', 'platformId']),
     crm_id: pickString(item, ['crm_id', 'crmId', 'call_id', 'callId', 'id', 'uuid']),
     pbx_call_id: pickString(item, ['pbx_call_id', 'pbxCallId', 'call_id', 'callId', 'id', 'uuid']),
