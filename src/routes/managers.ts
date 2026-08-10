@@ -56,7 +56,7 @@ router.post('/:id/ping', async (req: Request, res: Response) => {
 
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { name, status, role, platform_id, daily_call_target } = req.body ?? {};
+    const { name, status, role, platform_id, daily_call_target, pbx_id } = req.body ?? {};
     if (!name || typeof name !== 'string') {
       return res.status(400).json({ success: false, error: '"name" majburiy.' });
     }
@@ -67,6 +67,7 @@ router.post('/', async (req: Request, res: Response) => {
     if (role !== undefined) insertData.role = role;
     if (platform_id !== undefined) insertData.platform_id = platform_id;
     if (daily_call_target !== undefined) insertData.daily_call_target = Math.max(0, Math.floor(Number(daily_call_target) || 0));
+    if (pbx_id !== undefined) insertData.pbx_id = typeof pbx_id === 'string' ? pbx_id.trim() || null : null;
     const { data, error } = await supabase
       .from('managers')
       .insert(insertData)
@@ -96,7 +97,7 @@ router.put('/:id', async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
     if (!UUID_REGEX.test(id)) return res.status(400).json({ success: false, error: "id yaroqli UUID bo'lishi kerak." });
-    const { name, status, role, platform_id, daily_call_target } = req.body ?? {};
+    const { name, status, role, platform_id, daily_call_target, pbx_id } = req.body ?? {};
     const update: Record<string, unknown> = {};
     if (name !== undefined) update.name = name;
     if (status !== undefined) {
@@ -108,6 +109,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     if (role !== undefined) update.role = role;
     if (platform_id !== undefined) update.platform_id = platform_id;
     if (daily_call_target !== undefined) update.daily_call_target = Math.max(0, Math.floor(Number(daily_call_target) || 0));
+    if (pbx_id !== undefined) update.pbx_id = typeof pbx_id === 'string' ? pbx_id.trim() || null : null;
     if (Object.keys(update).length === 0) {
       return res.status(400).json({ success: false, error: 'Yangilash uchun maydon berilmadi.' });
     }
