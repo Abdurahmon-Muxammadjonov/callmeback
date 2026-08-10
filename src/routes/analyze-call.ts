@@ -135,14 +135,15 @@ function buildDynamicRules(criteria: ActiveCriterion[]): string {
   if (criteria.length === 0) return '';
 
   const lines = criteria.map((c) => {
-    const penaltyTxt = c.penalty_amount > 0 ? ` -> Buzilsa/bajarilmasa jarima: ${c.penalty_amount} UZS` : '';
-    const cat = c.category ? ` [kategoriya: ${c.category}]` : '';
-    return `  - ${c.title} (${c.type})${cat}: ${c.description}${penaltyTxt}`;
+    const penaltyTxt = c.penalty_amount > 0 ? ` Buzilsa/bajarilmasa jarima: ${c.penalty_amount} UZS.` : '';
+    const cat = c.category ? c.category : '-';
+    return `  - QOIDA NOMI: "${c.title}" | Turi: ${c.type} | Kategoriya: ${cat} | Tavsif: ${c.description}${penaltyTxt}`;
   });
 
   return (
     `\n\nQO'SHIMCHA DINAMIK QOIDALAR (admin tomonidan belgilangan, qat'iy qo'llang — bu ko'pincha rasmiy sotuv skripti bosqichlari):\n${lines.join('\n')}` +
-    `\n\nHar bir AKTIV dinamik qoidani criteria_scores massivida 0–100 ball bilan bahola (title aynan yuqoridagidek bo'lsin, category ham qaytar). ` +
+    `\n\nHar bir AKTIV dinamik qoidani criteria_scores massivida 0–100 ball bilan bahola. ` +
+    `"title" maydoni AYNAN yuqoridagi "QOIDA NOMI" qatoridagi tirnoq ichidagi matn bilan HARFMA-HARF bir xil bo'lishi shart — turi, kategoriyasi yoki boshqa hech narsa qo'shmang, o'zgartirmang. "category" maydoniga esa qoidaning Kategoriya qiymatini qaytaring. ` +
     `Ball qoida qanchalik bajarilganini ko'rsatsin: to'liq bajarilgan/aytilgan bo'lsa yuqori (80-100), qisman bajarilgan bo'lsa o'rtacha (40-79), umuman bajarilmagan/aytilmagan bo'lsa past (0-39). ` +
     `Faqat transkriptda haqiqatan bo'lgan gaplarga asoslan, taxmin qilib to'ldirma.`
   );
@@ -153,6 +154,12 @@ function buildDynamicRules(criteria: ActiveCriterion[]): string {
 // Past ball (< 50) = qoida bajarilmadi = jarima; yuqori ball (>= 80) Bonus turidagi qoidada = bonus.
 const CRITERIA_PENALTY_THRESHOLD = 50;
 const CRITERIA_BONUS_THRESHOLD = 80;
+// Model ba'zan title'ga qo'shimcha so'z ("Tanishuv (Majburiy)") qo'shib qaytarishi mumkin —
+// solishtirishdan oldin normallashtiramiz (kichik harf, bo'sh joy va qavs ichidagi qo'shimchani olib tashlab).
+function normalizeCriteriaTitle(title: string): string {
+  return title.trim().replace(/\s*\([^)]*\)\s*$/, '').toLowerCase();
+}
+
 function computeCriteriaFinancials(
   criteriaScores: CriteriaScore[],
   activeCriteria: ActiveCriterion[],
@@ -160,7 +167,8 @@ function computeCriteriaFinancials(
   let penalty_amount = 0;
   let bonus_amount = 0;
   for (const cs of criteriaScores) {
-    const rule = activeCriteria.find((c) => c.title === cs.title);
+    const csKey = normalizeCriteriaTitle(cs.title);
+    const rule = activeCriteria.find((c) => normalizeCriteriaTitle(c.title) === csKey);
     if (!rule || rule.penalty_amount <= 0) continue;
     const score = Number(cs.score) || 0;
     if (rule.type === 'Bonus') {
