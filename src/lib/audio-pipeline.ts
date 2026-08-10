@@ -260,6 +260,28 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item
   return results;
 }
 
+// Gemini bepul tarifida daqiqalik so'rov limiti bor (masalan 20 RPM) — ko'p qo'ng'iroq
+// bir vaqtda tahlilga tushsa, "429 RESOURCE_EXHAUSTED" bilan vaqtincha rad etilishi mumkin.
+// Xabarda odatda "Please retry in Ns" ko'rsatiladi — shuni o'qib, aynan shuncha kutamiz.
+function isRetryableGeminiError(error: unknown): boolean {
+  const anyErr = error as any;
+  const status = anyErr?.status ?? anyErr?.code ?? anyErr?.response?.status;
+  if (status === 429 || status === 'RESOURCE_EXHAUSTED') return true;
+  if (typeof status === 'number' && status >= 500) return true;
+  const msg = String(anyErr?.message ?? anyErr ?? '');
+  return /RESOURCE_EXHAUSTED|"code"\s*:\s*429|"code"\s*:\s*5\d\d|rate limit/i.test(msg);
+}
+
+function extractGeminiRetryDelayMs(error: unknown, fallbackMs: number): number {
+  const msg = String((error as any)?.message ?? error ?? '');
+  const match = msg.match(/retry in ([\d.]+)s/i);
+  if (match) {
+    const seconds = parseFloat(match[1]);
+    if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds * 1000) + 1000;
+  }
+  return fallbackMs;
+}
+
 // Gemini — Muxlisa bergan transkriptni qo'ng'iroq tahlil skripti (mezonlari) bo'yicha baholaydi.
 async function analyzeTranscript(transcript: string, extraRules = ''): Promise<CallAnalysis> {
   if (!process.env.GEMINI_API_KEY) {
@@ -279,15 +301,33 @@ async function analyzeTranscript(transcript: string, extraRules = ''): Promise<C
     .filter(Boolean)
     .join('\n\n');
 
-  const response = await client.models.generateContent({
-    model: ANALYZE_MODEL,
-    contents: `Quyidagi qo'ng'iroq transkriptini tahlil qil:\n\n${transcript}`,
-    config: {
-      systemInstruction: systemPrompt,
-      responseMimeType: 'application/json',
-      responseSchema: CALL_ANALYSIS_SCHEMA,
-    },
-  });
+  const maxAttempts = 4;
+  let response: Awaited<ReturnType<typeof client.models.generateContent>> | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      response = await client.models.generateContent({
+        model: ANALYZE_MODEL,
+        contents: `Quyidagi qo'ng'iroq transkriptini tahlil qil:\n\n${transcript}`,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: CALL_ANALYSIS_SCHEMA,
+        },
+      });
+      break;
+    } catch (error) {
+      if (isRetryableGeminiError(error) && attempt < maxAttempts) {
+        const delay = extractGeminiRetryDelayMs(error, 15000 * attempt);
+        console.warn(`Gemini tahlil qayta urinish ${attempt}/${maxAttempts}, ${Math.round(delay / 1000)}s kutilmoqda:`, (error as any)?.message);
+        await sleep(delay);
+        continue;
+      }
+      throw error;
+    }
+  }
+  if (!response) {
+    throw new Error('Gemini javobi olinmadi (barcha urinishlar tugadi).');
+  }
 
   const text = response.text;
   if (!text) {
