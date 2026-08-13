@@ -5,6 +5,7 @@ import { unlink, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { processLocalAudio, processLongAudio } from '../lib/audio-pipeline';
+import { fetchAllRows } from '../lib/supabase';
 
 const router = Router();
 
@@ -1063,29 +1064,28 @@ router.get('/', async (_req: Request, res: Response) => {
 
     const supabase = getSupabaseAdmin();
 
-    const [callsRes, conversionsRes, lostReasonsRes] = await Promise.all([
-      supabase.from('calls').select('id, duration'),
-      supabase.from('conversions').select('traffic_conversion, sales_conversion'),
-      supabase.from('lost_reasons').select('reason_text')
+    const [callRows, convRows, lostReasonRows] = await Promise.all([
+      fetchAllRows<{ id: string; duration: number | null }>((from, to) =>
+        supabase.from('calls').select('id, duration').range(from, to)),
+      fetchAllRows<{ traffic_conversion: number | null; sales_conversion: number | null }>((from, to) =>
+        supabase.from('conversions').select('traffic_conversion, sales_conversion').range(from, to)),
+      fetchAllRows<{ reason_text: string }>((from, to) =>
+        supabase.from('lost_reasons').select('reason_text').range(from, to)),
     ]);
 
-    if (callsRes.error) throw callsRes.error;
-    if (conversionsRes.error) throw conversionsRes.error;
-    if (lostReasonsRes.error) throw lostReasonsRes.error;
-
-    const totalCalls = callsRes.data?.length || 0;
+    const totalCalls = callRows.length;
     const avgDuration = totalCalls > 0
-      ? (callsRes.data?.reduce((acc, c) => acc + (c.duration || 0), 0) || 0) / totalCalls
+      ? callRows.reduce((acc, c) => acc + (c.duration || 0), 0) / totalCalls
       : 0;
 
-    const totalConversions = conversionsRes.data?.length || 0;
+    const totalConversions = convRows.length;
     const averages = {
-      traffic_conversion: totalConversions > 0 ? (conversionsRes.data?.reduce((acc, s) => acc + Number(s.traffic_conversion), 0) || 0) / totalConversions : 0,
-      sales_conversion: totalConversions > 0 ? (conversionsRes.data?.reduce((acc, s) => acc + Number(s.sales_conversion), 0) || 0) / totalConversions : 0,
+      traffic_conversion: totalConversions > 0 ? convRows.reduce((acc, s) => acc + Number(s.traffic_conversion || 0), 0) / totalConversions : 0,
+      sales_conversion: totalConversions > 0 ? convRows.reduce((acc, s) => acc + Number(s.sales_conversion || 0), 0) / totalConversions : 0,
     };
 
     const lostReasonsSummary: Record<string, number> = {};
-    lostReasonsRes.data?.forEach((lr) => {
+    lostReasonRows.forEach((lr) => {
       lostReasonsSummary[lr.reason_text] = (lostReasonsSummary[lr.reason_text] || 0) + 1;
     });
 

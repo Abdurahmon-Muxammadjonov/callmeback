@@ -55,3 +55,25 @@ export async function withSchemaReloadRetry<T>(
   await reloadSchemaCache();
   return action();
 }
+
+// PostgREST har bir so'rovga 1000 qatorlik standart chegara qo'yadi — shu sababli
+// `.select(...)`ni to'g'ridan-to'g'ri `.length`/`.reduce()` bilan agregatsiya qilish
+// jadval 1000 qatordan oshgan zahoti (masalan "jami qo'ng'iroqlar soni") noto'g'ri,
+// muzlab qolgan natija berardi. Bu yerda sahifalab (`.range()`) HAMMA qatorni yig'ib
+// olamiz — dataset qancha o'ssa ham son to'g'ri chiqishi uchun.
+const PAGE_SIZE = 1000;
+export async function fetchAllRows<T>(
+  queryFactory: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>
+): Promise<T[]> {
+  const all: T[] = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await queryFactory(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(error.message);
+    const rows = data || [];
+    all.push(...rows);
+    if (rows.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return all;
+}

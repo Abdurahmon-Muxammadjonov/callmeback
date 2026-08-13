@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { supabase } from '../lib/supabase';
+import { supabase, fetchAllRows } from '../lib/supabase';
 
 const router = Router();
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -65,22 +65,20 @@ interface CallAgg {
 // Frontend root endpoint so'rovlarida umumiy metrikani frontend kutgan formatda qaytaradi.
 router.get('/', async (_req: Request, res: Response) => {
   try {
-    const [callsRes, conversionsRes, lostReasonsRes] = await Promise.all([
-      supabase.from('calls').select('id, duration'),
-      supabase.from('conversions').select('traffic_conversion, sales_conversion'),
-      supabase.from('lost_reasons').select('reason_text'),
+    const [callRows, convRows, lostReasonRows] = await Promise.all([
+      fetchAllRows<{ id: string; duration: number | null }>((from, to) =>
+        supabase.from('calls').select('id, duration').range(from, to)),
+      fetchAllRows<{ traffic_conversion: number | null; sales_conversion: number | null }>((from, to) =>
+        supabase.from('conversions').select('traffic_conversion, sales_conversion').range(from, to)),
+      fetchAllRows<{ reason_text: string }>((from, to) =>
+        supabase.from('lost_reasons').select('reason_text').range(from, to)),
     ]);
 
-    if (callsRes.error) throw new Error(callsRes.error.message);
-    if (conversionsRes.error) throw new Error(conversionsRes.error.message);
-    if (lostReasonsRes.error) throw new Error(lostReasonsRes.error.message);
-
-    const totalCalls = callsRes.data?.length || 0;
+    const totalCalls = callRows.length;
     const averageDurationSeconds = totalCalls > 0
-      ? Math.round((callsRes.data?.reduce((acc, row) => acc + (row.duration || 0), 0) || 0) / totalCalls)
+      ? Math.round(callRows.reduce((acc, row) => acc + (row.duration || 0), 0) / totalCalls)
       : 0;
 
-    const convRows = conversionsRes.data || [];
     const averages = {
       traffic_conversion: convRows.length > 0
         ? Number((convRows.reduce((acc, row) => acc + Number(row.traffic_conversion || 0), 0) / convRows.length).toFixed(2))
@@ -91,7 +89,7 @@ router.get('/', async (_req: Request, res: Response) => {
     };
 
     const lostReasonsSummary: Record<string, number> = {};
-    (lostReasonsRes.data || []).forEach((row) => {
+    lostReasonRows.forEach((row) => {
       lostReasonsSummary[row.reason_text] = (lostReasonsSummary[row.reason_text] || 0) + 1;
     });
 

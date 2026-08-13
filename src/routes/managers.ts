@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { supabase, withSchemaReloadRetry } from '../lib/supabase';
+import { supabase, withSchemaReloadRetry, fetchAllRows } from '../lib/supabase';
 
 const router = Router();
 
@@ -148,14 +148,21 @@ router.get('/:id/stats', async (req: Request, res: Response) => {
     const today = new Date();
     const todayStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())).toISOString();
 
-    const [{ data: calls, error: cErr }, { count: callsToday, error: tErr }] = await Promise.all([
-      supabase.from('calls').select('id, duration, kpi_score, penalty_amount, bonus_amount, created_at').eq('manager_id', id),
-      supabase.from('calls').select('id', { count: 'exact', head: true }).eq('manager_id', id).gte('created_at', todayStart),
-    ]);
-    if (cErr) return res.status(500).json({ success: false, error: `Database Error: ${cErr.message}` });
-    if (tErr) return res.status(500).json({ success: false, error: `Database Error: ${tErr.message}` });
+    let list: Array<{ duration: number | null; kpi_score: number | null; penalty_amount: number | null; bonus_amount: number | null }>;
+    let callsToday: number | null;
+    try {
+      const [rows, { count, error: tErr }] = await Promise.all([
+        fetchAllRows<{ duration: number | null; kpi_score: number | null; penalty_amount: number | null; bonus_amount: number | null }>((from, to) =>
+          supabase.from('calls').select('duration, kpi_score, penalty_amount, bonus_amount').eq('manager_id', id).range(from, to)),
+        supabase.from('calls').select('id', { count: 'exact', head: true }).eq('manager_id', id).gte('created_at', todayStart),
+      ]);
+      if (tErr) return res.status(500).json({ success: false, error: `Database Error: ${tErr.message}` });
+      list = rows;
+      callsToday = count;
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: `Database Error: ${e?.message || e}` });
+    }
 
-    const list = calls || [];
     const totalCalls = list.length;
     const sum = (f: (c: any) => number) => list.reduce((a, c) => a + f(c), 0);
     const avg = (f: (c: any) => number) => (totalCalls ? sum(f) / totalCalls : 0);
