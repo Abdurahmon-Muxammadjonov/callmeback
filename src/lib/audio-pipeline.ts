@@ -1,17 +1,11 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import axios from 'axios';
 import FormData from 'form-data';
-import ffmpeg from 'fluent-ffmpeg';
-import ffmpegStatic from 'ffmpeg-static';
 import fs from 'node:fs';
-import { copyFile, readdir, mkdir, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
-
-if (ffmpegStatic) {
-  ffmpeg.setFfmpegPath(ffmpegStatic);
-}
 
 export interface CriteriaScore {
   title: string;
@@ -43,12 +37,17 @@ export interface AudioProcessResult {
   chunks: number;
 }
 
-// Muxlisa STT bir so'rovda maksimal 60 soniyalik audio qabul qiladi —
-// xavfsizlik zaxirasi uchun 50 soniyaga bo'lamiz.
-const SEGMENT_SECONDS = 50;
 const ANALYZE_MODEL = 'gemini-3.6-flash';
 const TMP_ROOT = path.join(os.tmpdir(), 'procell-audio');
-const MUXLISA_STT_URL = 'https://service.muxlisa.uz/api/v2/stt';
+
+// Aisha (aisha.group) — o'zbekcha nutqni matnga aylantirish (STT). v2 endpoint
+// uzun audio faylni bitta so'rovda (chunking'siz) qabul qiladi va fon rejimida
+// ishlaydi — natija task_id orqali poll qilib olinadi.
+const AISHA_BASE_URL = 'https://back.aisha.group';
+const AISHA_STT_POST_URL = `${AISHA_BASE_URL}/api/v2/stt/post/`;
+const AISHA_STT_GET_URL = (id: number | string) => `${AISHA_BASE_URL}/api/v2/stt/get/${id}/`;
+const AISHA_POLL_INTERVAL_MS = 4000;
+const AISHA_MAX_WAIT_MS = 15 * 60 * 1000; // 15 daqiqa — juda uzun qo'ng'iroqlar uchun ham yetarli.
 
 const CALL_ANALYSIS_SCHEMA = {
   type: Type.OBJECT,
@@ -95,14 +94,6 @@ const CALL_ANALYSIS_SCHEMA = {
   ],
 };
 
-function sortChunkFiles(files: string[]): string[] {
-  return [...files].sort((left, right) => {
-    const leftNum = Number(path.basename(left).match(/(\d+)/)?.[1] || 0);
-    const rightNum = Number(path.basename(right).match(/(\d+)/)?.[1] || 0);
-    return leftNum - rightNum;
-  });
-}
-
 // Axios xatosidan HTTP status + javob tanasini chiqarib, aniq xabar quradi
 // (aks holda faqat "Request failed with status code 400" kabi foydasiz matn qoladi).
 function describeAxiosError(error: unknown, context: string): Error {
@@ -142,49 +133,6 @@ async function downloadAudioToTmp(audioUrl: string, targetFilePath: string): Pro
   await pipeline(response.data, fs.createWriteStream(targetFilePath));
 }
 
-async function splitAudioToChunks(inputFilePath: string, chunksDir: string): Promise<string[]> {
-  await mkdir(chunksDir, { recursive: true });
-  // WAV'ga qayta kodlaymiz (stream-copy emas) — shunda har bir bo'lak har doim
-  // to'liq to'g'ri sarlavha/format bilan chiqadi (kesish nuqtasida buzilgan MP3
-  // freym bo'lish ehtimoli yo'q). Muxlisa bilan WAV avval sinalgan va ishlaydi.
-  const outputPattern = path.join(chunksDir, 'chunk-%05d.wav');
-
-  try {
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg(inputFilePath)
-        .outputOptions([
-          '-f segment',
-          `-segment_time ${SEGMENT_SECONDS}`,
-          '-ar 16000',
-          '-ac 1',
-        ])
-        .output(outputPattern)
-        .on('end', () => resolve())
-        .on('error', (error: Error) => reject(error))
-        .run();
-    });
-  } catch (error: any) {
-    const msg = String(error?.message || error || '');
-    if (msg.toLowerCase().includes('cannot find ffmpeg') || msg.toLowerCase().includes('ffmpeg was not found')) {
-      console.warn('ffmpeg topilmadi, chunk qilish o\'rniga bitta fayl transkripsiya qilinadi.');
-      return [inputFilePath];
-    }
-    throw error;
-  }
-
-  const files = (await readdir(chunksDir))
-    .filter((name) => name.startsWith('chunk-'))
-    .map((name) => path.join(chunksDir, name));
-
-  if (files.length === 0) {
-    const inputStats = await stat(inputFilePath);
-    if (inputStats.size > 0) return [inputFilePath];
-    throw new Error('Chunk fayllar yaratilmadi. ffmpeg chiqishini tekshiring.');
-  }
-
-  return sortChunkFiles(files);
-}
-
 function isRetryableAxiosError(error: unknown): boolean {
   if (!axios.isAxiosError(error)) return false;
   const status = error.response?.status;
@@ -196,12 +144,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Muxlisa.uz — nutqni matnga aylantirish (STT). Ko'p bo'lak parallel yuborilganda
-// ularning serveri vaqtinchalik 5xx berishi mumkin — shu uchun qayta uriniladi.
-async function transcribeChunkWithMuxlisa(chunkPath: string): Promise<string> {
-  const apiKey = process.env.MUXLISA_API_KEY;
+interface AishaSttPostResponse {
+  id: number;
+  task_id: string;
+  status: string;
+}
+
+interface AishaSttGetResponse {
+  id: number;
+  status: string; // PENDING | SUCCESS | FAILED (yoki shunga o'xshash)
+  transcript?: string;
+}
+
+// Audio faylni Aisha'ga yuboradi (async job yaratadi). Tarmoq/5xx xatolarida qayta uriniladi.
+async function submitAishaSttJob(filePath: string): Promise<AishaSttPostResponse> {
+  const apiKey = process.env.AISHA_API_KEY;
   if (!apiKey) {
-    throw new Error('MUXLISA_API_KEY yo\'q.');
+    throw new Error('AISHA_API_KEY yo\'q.');
   }
 
   const maxAttempts = 3;
@@ -209,55 +168,82 @@ async function transcribeChunkWithMuxlisa(chunkPath: string): Promise<string> {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const form = new FormData();
-    form.append('audio', fs.createReadStream(chunkPath));
+    form.append('audio', fs.createReadStream(filePath));
+    form.append('language', 'uz');
+    form.append('has_diarization', 'false');
+    form.append('is_summary', 'false');
 
     try {
-      const response = await axios.request({
+      const response = await axios.request<AishaSttPostResponse>({
         method: 'POST',
         maxBodyLength: Infinity,
-        url: MUXLISA_STT_URL,
-        headers: { 'x-api-key': apiKey, ...form.getHeaders() },
+        url: AISHA_STT_POST_URL,
+        headers: { 'X-Api-Key': apiKey, ...form.getHeaders() },
         data: form,
         timeout: 120000,
       });
 
-      const text = response.data?.text;
-      if (typeof text !== 'string') {
-        throw new Error(`Muxlisa kutilmagan javob formati qaytardi: ${path.basename(chunkPath)}`);
+      if (typeof response.data?.id !== 'number') {
+        throw new Error(`Aisha kutilmagan javob formati qaytardi: ${JSON.stringify(response.data).slice(0, 300)}`);
       }
 
-      return text.trim();
+      return response.data;
     } catch (error) {
       lastError = error;
       if (isRetryableAxiosError(error) && attempt < maxAttempts) {
-        console.warn(`Muxlisa STT qayta urinish ${attempt}/${maxAttempts} (${path.basename(chunkPath)}):`, (error as any)?.message);
+        console.warn(`Aisha STT topshirish qayta urinish ${attempt}/${maxAttempts}:`, (error as any)?.message);
         await sleep(1500 * attempt);
         continue;
       }
-      throw describeAxiosError(error, `Muxlisa STT so'rovi xato qaytardi (${path.basename(chunkPath)})`);
+      throw describeAxiosError(error, 'Aisha STT so\'rovi xato qaytardi');
     }
   }
 
-  throw describeAxiosError(lastError, `Muxlisa STT so'rovi xato qaytardi (${path.basename(chunkPath)})`);
+  throw describeAxiosError(lastError, 'Aisha STT so\'rovi xato qaytardi');
 }
 
-// Cheklangan parallellik: bir vaqtda eng ko'pi bilan `limit` ta bo'lak yuboriladi
-// (Muxlisa serverini ortiqcha yuklab, 5xx xatolarga sabab bo'lmasligi uchun).
-async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let cursor = 0;
-  const poolSize = Math.max(1, Math.min(limit, items.length));
+// Job tugaguncha poll qiladi (X-Api-Key bilan — task-status/JWT endpoint'i emas,
+// hujjatlashtirilgan /api/v2/stt/get/{id}/ ishlatiladi, chunki u ham API key bilan ishlaydi).
+async function pollAishaSttResult(id: number): Promise<string> {
+  const apiKey = process.env.AISHA_API_KEY as string;
+  const deadline = Date.now() + AISHA_MAX_WAIT_MS;
 
-  const runners = Array.from({ length: poolSize }, async () => {
-    while (true) {
-      const i = cursor++;
-      if (i >= items.length) break;
-      results[i] = await worker(items[i]);
+  while (Date.now() < deadline) {
+    await sleep(AISHA_POLL_INTERVAL_MS);
+
+    let response;
+    try {
+      response = await axios.get<AishaSttGetResponse>(AISHA_STT_GET_URL(id), {
+        headers: { 'X-Api-Key': apiKey },
+        timeout: 30000,
+      });
+    } catch (error) {
+      // Poll paytidagi vaqtinchalik tarmoq xatosi — job'ni bekor qilmasdan keyingi
+      // urinishda davom etamiz (retryable bo'lmasa ham, chunki bu faqat status so'rovi).
+      console.warn('Aisha STT holatini so\'rashda vaqtinchalik xato:', (error as any)?.message);
+      continue;
     }
-  });
 
-  await Promise.all(runners);
-  return results;
+    const status = (response.data?.status || '').toUpperCase();
+    if (status === 'SUCCESS') {
+      const transcript = response.data?.transcript;
+      if (typeof transcript !== 'string') {
+        throw new Error('Aisha SUCCESS qaytardi, lekin transcript yo\'q.');
+      }
+      return transcript.trim();
+    }
+    if (status && status !== 'PENDING') {
+      throw new Error(`Aisha STT job muvaffaqiyatsiz tugadi (status: ${status}).`);
+    }
+    // PENDING — davom etamiz.
+  }
+
+  throw new Error(`Aisha STT javobi ${Math.round(AISHA_MAX_WAIT_MS / 60000)} daqiqada kelmadi (timeout).`);
+}
+
+async function transcribeWithAisha(filePath: string): Promise<string> {
+  const job = await submitAishaSttJob(filePath);
+  return pollAishaSttResult(job.id);
 }
 
 // Gemini bepul tarifida daqiqalik so'rov limiti bor (masalan 20 RPM) — ko'p qo'ng'iroq
@@ -282,7 +268,7 @@ function extractGeminiRetryDelayMs(error: unknown, fallbackMs: number): number {
   return fallbackMs;
 }
 
-// Gemini — Muxlisa bergan transkriptni qo'ng'iroq tahlil skripti (mezonlari) bo'yicha baholaydi.
+// Gemini — Aisha bergan transkriptni qo'ng'iroq tahlil skripti (mezonlari) bo'yicha baholaydi.
 async function analyzeTranscript(transcript: string, extraRules = ''): Promise<CallAnalysis> {
   if (!process.env.GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY yo\'q.');
@@ -379,20 +365,8 @@ async function removePathSafe(targetPath: string): Promise<void> {
   }
 }
 
-const MUXLISA_CONCURRENCY = parseInt(process.env.MUXLISA_CONCURRENCY || '4', 10);
-
-async function transcribeAndAnalyze(chunkPaths: string[], extraRules: string): Promise<{ transcript: string; analysis: CallAnalysis }> {
-  const transcriptParts = await mapWithConcurrency(
-    chunkPaths,
-    MUXLISA_CONCURRENCY,
-    (chunkPath) => transcribeChunkWithMuxlisa(chunkPath)
-  );
-
-  const transcript = transcriptParts
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .join('\n\n')
-    .trim();
+async function transcribeAndAnalyze(filePath: string, extraRules: string): Promise<{ transcript: string; analysis: CallAnalysis }> {
+  const transcript = await transcribeWithAisha(filePath);
 
   if (!transcript) {
     throw new Error('Transcription bo\'sh chiqdi.');
@@ -404,8 +378,8 @@ async function transcribeAndAnalyze(chunkPaths: string[], extraRules: string): P
 }
 
 export async function processLongAudio(audioUrl: string, extraRules = ''): Promise<AudioProcessResult> {
-  if (!process.env.MUXLISA_API_KEY) {
-    throw new Error('MUXLISA_API_KEY yo\'q.');
+  if (!process.env.AISHA_API_KEY) {
+    throw new Error('AISHA_API_KEY yo\'q.');
   }
   if (!process.env.GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY yo\'q.');
@@ -413,38 +387,28 @@ export async function processLongAudio(audioUrl: string, extraRules = ''): Promi
 
   const workspaceDir = path.join(TMP_ROOT, `${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const sourcePath = path.join(workspaceDir, 'source-audio.mp3');
-  const chunksDir = path.join(workspaceDir, 'chunks');
 
-  const createdFiles: string[] = [];
   console.time('audio-pipeline');
 
   try {
     await mkdir(workspaceDir, { recursive: true });
 
     await downloadAudioToTmp(audioUrl, sourcePath);
-    createdFiles.push(sourcePath);
 
-    const chunkPaths = await splitAudioToChunks(sourcePath, chunksDir);
-    createdFiles.push(...chunkPaths);
+    const { transcript, analysis } = await transcribeAndAnalyze(sourcePath, extraRules);
 
-    const { transcript, analysis } = await transcribeAndAnalyze(chunkPaths, extraRules);
-
-    return { transcript, analysis, chunks: chunkPaths.length };
+    return { transcript, analysis, chunks: 1 };
   } catch (error: any) {
     throw new Error(`Audio pipeline xatosi: ${error?.message || 'unknown'}`);
   } finally {
-    await removePathSafe(chunksDir);
-    for (const filePath of createdFiles) {
-      await removePathSafe(filePath);
-    }
     await removePathSafe(workspaceDir);
     console.timeEnd('audio-pipeline');
   }
 }
 
 export async function processLocalAudio(localAudioPath: string, extraRules = ''): Promise<AudioProcessResult> {
-  if (!process.env.MUXLISA_API_KEY) {
-    throw new Error('MUXLISA_API_KEY yo\'q.');
+  if (!process.env.AISHA_API_KEY) {
+    throw new Error('AISHA_API_KEY yo\'q.');
   }
   if (!process.env.GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY yo\'q.');
@@ -452,30 +416,20 @@ export async function processLocalAudio(localAudioPath: string, extraRules = '')
 
   const workspaceDir = path.join(TMP_ROOT, `${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const sourcePath = path.join(workspaceDir, `source-audio${path.extname(localAudioPath) || '.mp3'}`);
-  const chunksDir = path.join(workspaceDir, 'chunks');
 
-  const createdFiles: string[] = [];
   console.time('audio-pipeline');
 
   try {
     await mkdir(workspaceDir, { recursive: true });
 
     await copyFile(localAudioPath, sourcePath);
-    createdFiles.push(sourcePath);
 
-    const chunkPaths = await splitAudioToChunks(sourcePath, chunksDir);
-    createdFiles.push(...chunkPaths);
+    const { transcript, analysis } = await transcribeAndAnalyze(sourcePath, extraRules);
 
-    const { transcript, analysis } = await transcribeAndAnalyze(chunkPaths, extraRules);
-
-    return { transcript, analysis, chunks: chunkPaths.length };
+    return { transcript, analysis, chunks: 1 };
   } catch (error: any) {
     throw new Error(`Audio pipeline xatosi: ${error?.message || 'unknown'}`);
   } finally {
-    await removePathSafe(chunksDir);
-    for (const filePath of createdFiles) {
-      await removePathSafe(filePath);
-    }
     await removePathSafe(workspaceDir);
     console.timeEnd('audio-pipeline');
   }

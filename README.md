@@ -37,13 +37,11 @@ supabase/          # SQL migratsiyalar / schema
 ## Muhit o'zgaruvchilari
 
 `.env.local.template` dan nusxa olib `.env.local` yarating va to'ldiring
-(Supabase, Muxlisa va Gemini kalitlari).
+(Supabase, Aisha va Gemini kalitlari).
 
 Minimal kerakli o'zgaruvchilar:
 
 - `SUPABASE_URL` (yoki `NEXT_PUBLIC_SUPABASE_URL`)
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `MUXLISA_API_KEY` (Muxlisa.uz nutqni matnga aylantirish)
+- `AISHA_API_KEY` (Aisha.group nutqni matnga aylantirish)
 - `GEMINI_API_KEY` (Google Gemini — transkriptni tahlil qilish)
-
-Audio chunking uchun `ffmpeg` serverda o'rnatilgan bo'lishi shart (Railway image yoki Docker'da mavjudligini tekshiring).
