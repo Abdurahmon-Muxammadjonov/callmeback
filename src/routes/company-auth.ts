@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { supabase } from '../lib/supabase';
+import { signSessionToken } from '../lib/authToken';
 
 // Kompaniya asosidagi ro'yxatdan o'tish (PROMPT_BACKEND_COMPANY_AUTH.md
 // spetsifikatsiyasiga to'liq mos). Mavjud `users`/`companies` jadvallarini
@@ -80,9 +81,11 @@ router.post('/register-company', async (req: Request, res: Response) => {
       });
     }
 
+    const token = signSessionToken({ sub: user.id, company_id: company.id, role: user.role });
+
     return res.status(201).json({
       success: true,
-      data: { user, invite_code: company.invite_code },
+      data: { user, invite_code: company.invite_code, token },
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'register-company xatosi.' });
@@ -146,7 +149,9 @@ router.post('/register', async (req: Request, res: Response) => {
       });
     }
 
-    return res.status(201).json({ success: true, data: user });
+    const token = signSessionToken({ sub: user.id, company_id: company.id, role: user.role });
+
+    return res.status(201).json({ success: true, data: { ...user, token } });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'register xatosi.' });
   }

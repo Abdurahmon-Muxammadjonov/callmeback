@@ -3,6 +3,7 @@ import { scryptSync, timingSafeEqual } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { supabase } from '../lib/supabase';
 import { markOnline, markOffline, onlineIds } from '../lib/presence';
+import { signSessionToken } from '../lib/authToken';
 
 const router = Router();
 
@@ -41,7 +42,7 @@ router.post('/login', async (req: Request, res: Response) => {
 
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, name, email, phone, role, first_name, last_name, password_hash')
+      .select('id, name, email, phone, role, first_name, last_name, password_hash, company_id')
       .eq('email', String(email).trim().toLowerCase())
       .maybeSingle();
 
@@ -55,7 +56,10 @@ router.post('/login', async (req: Request, res: Response) => {
     markOnline(user.id); // login = onlayn
     const { password_hash, ...safe } = user; // hash'ni javobdan chiqarib tashlaymiz
     void password_hash;
-    return res.status(200).json({ success: true, data: safe });
+    // Kompaniyaga bog'liq endpoint'lar (/company/me, /dashboard/stats,
+    // /company/logo) shu tokenni Authorization: Bearer sifatida kutadi.
+    const token = signSessionToken({ sub: user.id, company_id: user.company_id ?? null, role: user.role });
+    return res.status(200).json({ success: true, data: { ...safe, token } });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Login failed.';
     return res.status(500).json({ success: false, error: message });
