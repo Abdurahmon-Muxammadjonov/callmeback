@@ -5,6 +5,7 @@ import cors from 'cors';
 import { execSync } from 'node:child_process';
 
 import usersRouter from './routes/users';
+import companyAuthRouter from './routes/company-auth';
 import analyzeCallRouter, { recoverStuckCalls } from './routes/analyze-call';
 import managersRouter from './routes/managers';
 import criteriaRouter from './routes/criteria';
@@ -65,6 +66,7 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 });
 
 app.use('/users', usersRouter);
+app.use('/auth', companyAuthRouter);
 app.use('/managers', managersRouter);
 app.use('/criteria', criteriaRouter);
 app.use('/api/analyze-call', analyzeCallRouter);
