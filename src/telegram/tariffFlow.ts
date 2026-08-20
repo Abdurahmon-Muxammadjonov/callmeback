@@ -63,6 +63,53 @@ async function getCompanyName(companyId: string): Promise<string> {
 }
 
 // ============================================================================
+// Telefon raqami orqali kompaniya topish — deep-link'siz (menyudan to'g'ridan
+// -to'g'ri kirilganda, Part 4.2.2'dagi bilan bir xil qidiruv, ikkala joyda
+// ham ishlatiladi: "Tarifni oshirish" va menyudagi "Kod olish").
+// ============================================================================
+async function findCompanyByPhone(phone: string): Promise<{ id: string; name: string; tariff_id: string | null } | null> {
+  const { data: user } = await supabase
+    .from('users')
+    .select('company_id')
+    .eq('phone', phone)
+    .eq('role', 'director')
+    .maybeSingle();
+  if (!user) return null;
+
+  const { data: company } = await supabase.from('companies').select('id, name, tariff_id').eq('id', user.company_id).maybeSingle();
+  return company || null;
+}
+
+// ============================================================================
+// Menyudan to'g'ridan-to'g'ri kirish (deep-link'siz) — MENU_GET_CODE /
+// MENU_UPGRADE tugmalari bosilganda. Ikkalasi ham avval telefon raqami
+// orqali kompaniyani aniqlaydi, keyin tegishli oqimga (Part 2 / Part 4.2)
+// o'tkazadi — saytdan kelgan deep-link bilan bir xil davom etadi.
+// ============================================================================
+export async function enterGetCodeFlowFromMenu(ctx: SessionContext): Promise<void> {
+  await resetSession(ctx);
+  ctx.session.step = 'menu_get_code_awaiting_phone';
+  await ctx.reply("Hisobingizni topish uchun telefon raqamingizni kiriting (masalan: +998901234567):");
+}
+
+export async function handleMenuGetCodePhoneText(ctx: SessionContext, text: string): Promise<void> {
+  const company = await findCompanyByPhone(text.trim());
+  if (!company) {
+    await ctx.reply("Bu raqam bilan hisob topilmadi. Iltimos, admin bilan bog'laning.");
+    await resetSession(ctx);
+    return;
+  }
+  await enterGetCodeFlow(ctx, company.id);
+}
+
+export async function enterUpgradeFlowFromMenu(ctx: SessionContext): Promise<void> {
+  // enterUpgradeFlow(companyId) qiymati baribir telefon kiritilgach
+  // handleUpgradePhoneText'da qayta aniqlanadi (2.3-band) — shu sabab
+  // deep-link'dan kelmagan holatda bo'sh qiymat bilan ham xavfsiz.
+  await enterUpgradeFlow(ctx, '');
+}
+
+// ============================================================================
 // PART 2 — "Get code" oqimi (in-plan, hali ochilmagan bo'lim)
 // ============================================================================
 export async function enterGetCodeFlow(ctx: SessionContext, companyId: string): Promise<void> {
@@ -150,22 +197,9 @@ export async function handleUpgradePhoneText(ctx: SessionContext, text: string):
   // uchun ishlaydi. Bu haqiqiy cheklov, spec'dagi "verified phone number"
   // talabini to'liq qondirish uchun ro'yxatdan o'tish/profil sahifasiga
   // telefon maydonini qo'shish alohida ish sifatida qoladi.
-  const { data: user } = await supabase
-    .from('users')
-    .select('company_id')
-    .eq('phone', phone)
-    .eq('role', 'director')
-    .maybeSingle();
-
-  if (!user) {
-    await ctx.reply("Bu raqam bilan hisob topilmadi. Iltimos, admin bilan bog'laning.");
-    await resetSession(ctx);
-    return;
-  }
-
-  const { data: company } = await supabase.from('companies').select('id, name, tariff_id').eq('id', user.company_id).maybeSingle();
+  const company = await findCompanyByPhone(phone);
   if (!company) {
-    await ctx.reply("Kompaniya topilmadi. Iltimos, admin bilan bog'laning.");
+    await ctx.reply("Bu raqam bilan hisob topilmadi. Iltimos, admin bilan bog'laning.");
     await resetSession(ctx);
     return;
   }

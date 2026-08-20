@@ -5,8 +5,20 @@ export const MENU_INFO = "ℹ️ Platforma haqida ma'lumot";
 export const MENU_PRICING = '📊 Tariflar bilan tanishish';
 export const MENU_BUY = '🛒 Sotib olmoqchiman';
 export const MENU_ADMIN = "👨‍💼 Admin bilan bog'lanish";
+// Mavjud mijozlar uchun — saytdagi "Kod olish"/"Tarifni yangilash" tugmasi
+// bosilib deep-link orqali kelmasdan, to'g'ridan-to'g'ri botga o'zi yozib
+// kirgan bo'lsa ham shu ikki oqim (Part 2 / Part 4.2) ishlashi uchun.
+// Telefon raqami orqali kompaniyasi aniqlanadi (tariffFlow.ts).
+export const MENU_GET_CODE = '🎟 Kod olish';
+export const MENU_UPGRADE = '⬆️ Tarifni oshirish';
 
-export const MAIN_MENU = Markup.keyboard([[MENU_INFO], [MENU_PRICING], [MENU_BUY], [MENU_ADMIN]])
+export const MAIN_MENU = Markup.keyboard([
+  [MENU_INFO],
+  [MENU_PRICING],
+  [MENU_BUY],
+  [MENU_GET_CODE, MENU_UPGRADE],
+  [MENU_ADMIN],
+])
   .resize()
   .persistent();
 
