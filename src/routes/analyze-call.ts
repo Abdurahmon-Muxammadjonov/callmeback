@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { processLocalAudio, processLongAudio } from '../lib/audio-pipeline';
 import { fetchAllRows } from '../lib/supabase';
+import { isSectionUnlocked } from '../lib/companySections';
 
 const router = Router();
 
@@ -536,6 +537,7 @@ export interface BatchCallItem {
   manager_name?: string;
   manager_pbx_id?: string;
   platform_id?: string;
+  company_id?: string; // faqat yangi ko'p-tenantli webhook'lardan keladi — eski PBX pipeline'ida yo'q (NULL qoladi)
   crm_id?: string;
   pbx_call_id?: string;
   direction?: 'incoming' | 'outgoing' | 'unknown';
@@ -551,6 +553,7 @@ interface PreparedCall {
   callId: string;
   audioUrl: string;
   managerId: string;
+  companyId?: string | null;
 }
 
 // Shu jarayonda HOZIR tahlil qilinayotgan qo'ng'iroq id'lari.
@@ -567,6 +570,21 @@ async function processOneBatchCall(
 ): Promise<void> {
   inFlightCalls.add(prep.callId);
   try {
+    // Bo'lim qulflash: FAQAT company_id borlar uchun tekshiriladi — eski
+    // (KIA/PBX) pipeline'idan kelgan qo'ng'iroqlar company_id=NULL bo'lgani
+    // uchun bu shart hech qachon true bo'lmaydi, ular avvalgidek ishlaydi.
+    // Yangi ko'p-tenantli kompaniya uchun esa: bo'lim qulf bo'lsa audio
+    // SAQLANGAN holda qoladi (allaqachon insert qilingan), lekin AI
+    // (Aisha+Gemini) chaqirilmaydi — pul sarflanmaydi, bo'lim ochilgach
+    // backfillPendingUnlockCalls() shu yozuvni qayta navbatga qo'yadi.
+    if (prep.companyId) {
+      const unlocked = await isSectionUnlocked(supabase, prep.companyId, 'call_analytics');
+      if (!unlocked) {
+        await supabase.from('calls').update({ status: 'pending_unlock', error: null }).eq('id', prep.callId);
+        return; // finally bloki inFlightCalls'dan tozalaydi
+      }
+    }
+
     const audit = await auditCall({ audioUrl: prep.audioUrl }, extraRules);
     const fin = computeCriteriaFinancials(audit.criteria_scores, activeCriteria);
     audit.penalty_amount = fin.penalty_amount;
@@ -666,6 +684,36 @@ export async function recoverStuckCalls(opts: { includeFailed?: boolean } = {}):
   }
 }
 
+// Bo'lim ochilganda (POST /company/sections/unlock) chaqiriladi: shu
+// kompaniyaning 'pending_unlock' statusidagi (audio saqlangan, lekin AI
+// ishlamagan) qo'ng'iroqlarini qayta navbatga qo'yadi — "allaqachon kelgan
+// ma'lumotni tashlab yubormaslik" talabi (backfill, variant (a)).
+export async function backfillPendingUnlockCalls(supabase: SupabaseClient, companyId: string): Promise<{ recovered: number; ids: string[] }> {
+  const { data, error } = await supabase
+    .from('calls')
+    .select('id, audio_url, manager_id')
+    .eq('company_id', companyId)
+    .eq('status', 'pending_unlock')
+    .not('audio_url', 'is', null)
+    .limit(200);
+  if (error) {
+    console.error('backfillPendingUnlockCalls query failed:', error.message);
+    return { recovered: 0, ids: [] };
+  }
+
+  const prepared: PreparedCall[] = (data || [])
+    .filter((r: any) => typeof r.audio_url === 'string' && isValidHttpUrl(r.audio_url) && r.manager_id && !inFlightCalls.has(r.id))
+    .map((r: any) => ({ callId: r.id, audioUrl: r.audio_url, managerId: r.manager_id, companyId }));
+
+  if (prepared.length === 0) return { recovered: 0, ids: [] };
+
+  const ids = prepared.map((p) => p.callId);
+  await supabase.from('calls').update({ status: 'processing', error: null }).in('id', ids);
+
+  void processBatchInBackground(supabase, prepared);
+  return { recovered: prepared.length, ids };
+}
+
 // Batch payload'ni validatsiya qilib, qatorlarni 'processing' bilan yaratadi va
 // 202 javob uchun ma'lumot qaytaradi. Tahlil fon rejimida davom etadi.
 export async function enqueueBatchCalls(items: BatchCallItem[], supabase: SupabaseClient): Promise<{ status: number; body: any }> {
@@ -700,6 +748,7 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
       audio_url: string;
       status: string;
       platform_id?: string;
+      company_id?: string;
       crm_id?: string;
       pbx_call_id?: string;
       direction?: 'incoming' | 'outgoing' | 'unknown';
@@ -710,7 +759,7 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
       audio_storage_url?: string;
       audio_storage_path?: string;
     };
-    meta: { audioUrl: string; managerId: string };
+    meta: { audioUrl: string; managerId: string; companyId?: string };
   }> = [];
   const skipped: Array<{ index: number; error: string }> = [];
 
@@ -741,6 +790,7 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
       audio_url: string;
       status: string;
       platform_id?: string;
+      company_id?: string;
       crm_id?: string;
       pbx_call_id?: string;
       direction?: 'incoming' | 'outgoing' | 'unknown';
@@ -756,6 +806,7 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
       status: 'processing',
     };
     if (it.platform_id) row.platform_id = it.platform_id;
+    if (it.company_id) row.company_id = it.company_id;
     if (crmId) row.crm_id = crmId;
     if (it.pbx_call_id) row.pbx_call_id = it.pbx_call_id;
     row.direction = it.direction || 'unknown';
@@ -766,7 +817,7 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
     if (it.audio_storage_url) row.audio_storage_url = it.audio_storage_url;
     if (it.audio_storage_path) row.audio_storage_path = it.audio_storage_path;
 
-    candidates.push({ index: i, row, meta: { audioUrl: it.audio_url, managerId: mid } });
+    candidates.push({ index: i, row, meta: { audioUrl: it.audio_url, managerId: mid, companyId: it.company_id } });
   });
 
   const crmIds = candidates
@@ -807,6 +858,7 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
     callId: r.id,
     audioUrl: meta[k].audioUrl,
     managerId: meta[k].managerId,
+    companyId: meta[k].companyId ?? null,
   }));
 
   void processBatchInBackground(supabase, prepared);

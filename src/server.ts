@@ -7,6 +7,8 @@ import { execSync } from 'node:child_process';
 import usersRouter from './routes/users';
 import companyAuthRouter from './routes/company-auth';
 import companyRouter from './routes/company';
+import companySectionsRouter from './routes/company-sections';
+import companyWebhooksRouter, { incomingRouter as webhooksIncomingRouter } from './routes/company-webhooks';
 import dashboardRouter from './routes/dashboard';
 import analyzeCallRouter, { recoverStuckCalls } from './routes/analyze-call';
 import managersRouter from './routes/managers';
@@ -70,6 +72,9 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 app.use('/users', usersRouter);
 app.use('/auth', companyAuthRouter);
 app.use('/company', companyRouter);
+app.use('/company', companySectionsRouter);
+app.use('/company', companyWebhooksRouter);
+app.use('/webhooks', webhooksIncomingRouter);
 app.use('/dashboard', dashboardRouter);
 app.use('/managers', managersRouter);
 app.use('/criteria', criteriaRouter);
