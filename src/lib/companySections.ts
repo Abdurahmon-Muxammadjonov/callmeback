@@ -13,6 +13,14 @@ export function isLockableSection(key: string): key is LockableSection {
   return (LOCKABLE_SECTIONS as readonly string[]).includes(key);
 }
 
+// Telegram bot xabarlarida (kod har bir bo'lim nomi bilan yuboriladi — tarif
+// prompt 3-band) va boshqa foydalanuvchiga ko'rinadigan joylarda ishlatiladi.
+export const SECTION_LABELS: Record<LockableSection, string> = {
+  call_analytics: "Qo'ng'iroqlar tahlili",
+  reports: 'Hisobotlar',
+  campaigns: 'Kampaniyalar',
+};
+
 /**
  * Bitta bo'lim ochiqmi (AI-gating va boshqa joylarda ishlatish uchun).
  * `company_sections`da qator yo'qligi = qulflangan (default TRUE) — shu

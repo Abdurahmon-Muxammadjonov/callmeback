@@ -5,7 +5,9 @@ export type AuditAction =
   | 'register_company'
   | 'invite_code_regenerated'
   | 'crm_credentials_updated'
-  | 'role_changed';
+  | 'role_changed'
+  | 'tariff_request_approved'
+  | 'tariff_request_rejected';
 
 interface LogAuditParams {
   companyId: string;
