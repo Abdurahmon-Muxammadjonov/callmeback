@@ -26,14 +26,18 @@ router.get('/me', requireAuth, async (req: CompanyAuthedRequest, res: Response) 
   // kompaniyaning ma'lumotini ko'rishi mumkin bo'lardi.
   const { data, error } = await supabase
     .from('companies')
-    .select('id, name, logo_url, plan, created_at')
+    .select('id, name, logo_url, plan, created_at, tariff_id, tariffs(key, name, included_sections)')
     .eq('id', req.auth!.companyId as string)
     .maybeSingle();
 
   if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
   if (!data) return res.status(404).json({ success: false, error: 'Kompaniya topilmadi.' });
 
-  return res.status(200).json({ success: true, data });
+  // `tariffs` — Supabase'ning FK-orqali join qilingan ustuni, tariff_id
+  // NULL bo'lsa ham xato bermaydi (hali hech qanday tarif olinmagan bo'lishi
+  // mumkin — frontend buni "Get code" oqimi hali boshlanmagan deb talqin qiladi).
+  const { tariffs: tariff, ...company } = data as typeof data & { tariffs: any };
+  return res.status(200).json({ success: true, data: { ...company, tariff: tariff ?? null } });
 });
 
 // ============================================================================

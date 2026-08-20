@@ -20,14 +20,41 @@ router.get('/sections', requireAuth, async (req: CompanyAuthedRequest, res: Resp
 
   if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
 
+  // Tarif prompt Part 4.1: frontend "kod kiritish" va "tarifni yangilash"
+  // modallarini ajratishi uchun HAR BIR qulflangan bo'lim kompaniyaning
+  // joriy tarifiga kiradimi (in_plan) yoki yo'qligini bilishi kerak —
+  // shu sabab shu yerda companies.tariff_id -> tariffs.included_sections
+  // ham o'qib qo'shiladi.
+  const { data: company } = await supabase
+    .from('companies')
+    .select('tariff_id')
+    .eq('id', companyId)
+    .maybeSingle();
+
+  let includedSections: string[] = [];
+  if (company?.tariff_id) {
+    const { data: tariff } = await supabase
+      .from('tariffs')
+      .select('included_sections')
+      .eq('id', company.tariff_id)
+      .maybeSingle();
+    includedSections = tariff?.included_sections || [];
+  }
+
   const rowsByKey = new Map((data || []).map((r) => [r.section_key, r.is_locked]));
 
   const sections = [
-    ...ALWAYS_UNLOCKED_SECTIONS.map((key) => ({ section_key: key, is_locked: false })),
+    ...ALWAYS_UNLOCKED_SECTIONS.map((key) => ({ section_key: key, is_locked: false, in_plan: true })),
     // Qator yo'q bo'lgan bo'lim uchun ham default (is_locked=true) qaytariladi —
     // register-company'da alohida "seed" qadami yo'qligining sababi shu
     // (supabase/company_sections_webhooks.sql'dagi izohga qarang).
-    ...LOCKABLE_SECTIONS.map((key) => ({ section_key: key, is_locked: rowsByKey.has(key) ? rowsByKey.get(key) : true })),
+    ...LOCKABLE_SECTIONS.map((key) => ({
+      section_key: key,
+      is_locked: rowsByKey.has(key) ? rowsByKey.get(key) : true,
+      // tarifi hali yo'q (tariff_id=null) kompaniya uchun hech narsa
+      // "planda" hisoblanmaydi — bot Part 2'dagi "hali to'lamagan" holatiga mos.
+      in_plan: includedSections.includes(key),
+    })),
   ];
 
   return res.status(200).json({ success: true, data: sections });
