@@ -2,7 +2,14 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 // Bo'lim kalitlari — kelajakda yangi bo'lim qo'shilsa shu ro'yxatga bitta
 // qator qo'shish kifoya, boshqa hech narsa o'zgarmaydi.
-export const LOCKABLE_SECTIONS = ['call_analytics', 'reports', 'campaigns'] as const;
+export const LOCKABLE_SECTIONS = [
+  'call_analytics',
+  'reports',
+  'campaigns',
+  'managers',
+  'criteria_categories',
+  'criteria',
+] as const;
 export type LockableSection = typeof LOCKABLE_SECTIONS[number];
 
 // dashboard va webhook_integration company_sections'da UMUMAN saqlanmaydi —
@@ -19,6 +26,9 @@ export const SECTION_LABELS: Record<LockableSection, string> = {
   call_analytics: "Qo'ng'iroqlar tahlili",
   reports: 'Hisobotlar',
   campaigns: 'Kampaniyalar',
+  managers: 'Xodimlarni boshqarish',
+  criteria_categories: 'Mezon kategoriyalari',
+  criteria: 'Baholash mezonlari',
 };
 
 /**

@@ -154,7 +154,10 @@ insert into public.company_sections (company_id, section_key, is_locked, unlocke
 values
   ('9410e3fc-54fb-4758-ac30-719471c7a41e', 'call_analytics', false, now(), 'b5f78196-2f4e-4b83-8831-3b27f0ffb03c'),
   ('9410e3fc-54fb-4758-ac30-719471c7a41e', 'reports', false, now(), 'b5f78196-2f4e-4b83-8831-3b27f0ffb03c'),
-  ('9410e3fc-54fb-4758-ac30-719471c7a41e', 'campaigns', false, now(), 'b5f78196-2f4e-4b83-8831-3b27f0ffb03c')
+  ('9410e3fc-54fb-4758-ac30-719471c7a41e', 'campaigns', false, now(), 'b5f78196-2f4e-4b83-8831-3b27f0ffb03c'),
+  ('9410e3fc-54fb-4758-ac30-719471c7a41e', 'managers', false, now(), 'b5f78196-2f4e-4b83-8831-3b27f0ffb03c'),
+  ('9410e3fc-54fb-4758-ac30-719471c7a41e', 'criteria_categories', false, now(), 'b5f78196-2f4e-4b83-8831-3b27f0ffb03c'),
+  ('9410e3fc-54fb-4758-ac30-719471c7a41e', 'criteria', false, now(), 'b5f78196-2f4e-4b83-8831-3b27f0ffb03c')
 on conflict (company_id, section_key) do update set
   is_locked = excluded.is_locked,
   unlocked_at = excluded.unlocked_at,
