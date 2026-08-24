@@ -37,15 +37,24 @@ router.get('/relationship-dynamics', async (req: Request, res: Response) => {
     const todayStart = startOfTodayUTC();
     const windowStart = daysAgo(todayStart, 13); // 14 kun (spark + lastWeek uchun yetarli)
 
-    let q = supabase
-      .from('calls')
-      .select('created_at, unanswered_count, bad_leads_count')
-      .gte('created_at', windowStart.toISOString());
-    if (platformId) q = q.eq('platform_id', platformId);
-    const { data, error } = await q;
-    if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
+    // fetchAllRows bilan sahifalab olinadi — PostgREST'ning standart 1000
+    // qatorlik javob chegarasidan oshsa ham (faol platformada 14 kunda 1000dan
+    // ko'p qo'ng'iroq bo'lishi mumkin) hammasi hisobga kirishi uchun.
+    let rows: Array<{ created_at: string; unanswered_count: number | null; bad_leads_count: number | null }>;
+    try {
+      rows = await fetchAllRows<{ created_at: string; unanswered_count: number | null; bad_leads_count: number | null }>((from, to) => {
+        let q = supabase
+          .from('calls')
+          .select('created_at, unanswered_count, bad_leads_count')
+          .gte('created_at', windowStart.toISOString())
+          .range(from, to);
+        if (platformId) q = q.eq('platform_id', platformId);
+        return q;
+      });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: `Database Error: ${e?.message || e}` });
+    }
 
-    const rows = data || [];
     const inRange = (r: any, from: Date, to: Date) => {
       const t = new Date(r.created_at).getTime();
       return t >= from.getTime() && t < to.getTime();

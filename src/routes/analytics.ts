@@ -113,20 +113,26 @@ router.get('/', async (_req: Request, res: Response) => {
 });
 
 // Bitta davr uchun qo'ng'iroq-asosli metrikalar.
+// PostgREST'ning standart 1000-qatorlik javob chegarasidan oshsa ham (masalan
+// oylik davrda 1000dan ko'p qo'ng'iroq bo'lsa) hammasi hisoblanishi uchun
+// fetchAllRows bilan sahifalab yig'ib olinadi (avvalgi kod bitta so'rov bilan
+// cheklanib, "maksimum 1000 ta" ko'rinishida noto'g'ri chiqarardi).
 async function aggregateCalls(start: Date, end: Date, managerIds: string[] | null): Promise<CallAgg> {
-  let q = supabase
-    .from('calls')
-    .select('kpi_score, duration, penalty_amount, bonus_amount')
-    .gte('created_at', start.toISOString())
-    .lt('created_at', end.toISOString());
-  if (managerIds) {
-    if (managerIds.length === 0) return { total_calls: 0, avg_kpi_score: 0, avg_duration_sec: 0, total_duration_sec: 0, total_penalty: 0, total_bonus: 0 };
-    q = q.in('manager_id', managerIds);
+  if (managerIds && managerIds.length === 0) {
+    return { total_calls: 0, avg_kpi_score: 0, avg_duration_sec: 0, total_duration_sec: 0, total_penalty: 0, total_bonus: 0 };
   }
-  const { data, error } = await q;
-  if (error) throw new Error(error.message);
 
-  const rows = data || [];
+  const rows = await fetchAllRows<{ kpi_score: number | null; duration: number | null; penalty_amount: number | null; bonus_amount: number | null }>((from, to) => {
+    let q = supabase
+      .from('calls')
+      .select('kpi_score, duration, penalty_amount, bonus_amount')
+      .gte('created_at', start.toISOString())
+      .lt('created_at', end.toISOString())
+      .range(from, to);
+    if (managerIds) q = q.in('manager_id', managerIds);
+    return q;
+  });
+
   const n = rows.length;
   const sum = (f: (r: any) => number) => rows.reduce((a, r) => a + (Number(f(r)) || 0), 0);
   const totalDurationSec = Math.round(sum((r) => r.duration));
