@@ -29,6 +29,17 @@ export interface CallAnalysis {
   next_steps: string[];
   lost_reasons: LostReason[];
   criteria_scores: CriteriaScore[];
+  // Sessiya-darajasidagi sub-metrikalar — audio yozuv bitta suhbatdan tashkil
+  // topgan bo'lsa ham, ba'zan bir nechta qo'ng'iroq/lid ketma-ket ovoz
+  // yozuvida bo'lishi mumkin, shu sabab Gemini transkriptdan sanab beradi.
+  total_calls: number;
+  incoming_count: number;
+  outgoing_count: number;
+  unanswered_count: number;
+  bad_leads_count: number;
+  new_leads_count: number;
+  sent_to_dealer_count: number;
+  closed_deals_count: number;
 }
 
 export interface AudioProcessResult {
@@ -87,10 +98,20 @@ const CALL_ANALYSIS_SCHEMA = {
       },
       description: "Faqat quyida DINAMIK QOIDALAR berilgan bo'lsa to'ldiring — har bir qoida uchun title, category va 0-100 ball. Qoida berilmagan bo'lsa — bo'sh massiv.",
     },
+    total_calls: { type: Type.INTEGER, description: "Ushbu audio yozuvda jami nechta alohida qo'ng'iroq/suhbat bor (odatda 1, lekin ketma-ket bir nechta qo'ng'iroq yozib olingan bo'lsa — nechtasi)" },
+    incoming_count: { type: Type.INTEGER, description: "Shulardan nechtasi kiruvchi (mijoz tomonidan qilingan) qo'ng'iroq" },
+    outgoing_count: { type: Type.INTEGER, description: "Shulardan nechtasi chiquvchi (menejer tomonidan qilingan) qo'ng'iroq" },
+    unanswered_count: { type: Type.INTEGER, description: "Shulardan nechtasi javobsiz qoldi (qo'ng'iroq ko'tarilmadi/javob berilmadi)" },
+    bad_leads_count: { type: Type.INTEGER, description: "Shulardan nechtasi sifatsiz lid (qiziqishsiz, xato raqam, spam va h.k.)" },
+    new_leads_count: { type: Type.INTEGER, description: "Ushbu sessiyada nechta YANGI lid bilan gaplashildi" },
+    sent_to_dealer_count: { type: Type.INTEGER, description: "Nechta lid avtosalonga/do'konga yuborildi" },
+    closed_deals_count: { type: Type.INTEGER, description: "Nechta bitim ushbu sessiyada yopildi (sotuv)" },
   },
   required: [
     'sentiment', 'client_mood', 'operator_evaluation', 'deal_closed', 'summary',
     'kpi_score', 'client_info', 'final_agreement', 'next_steps', 'lost_reasons', 'criteria_scores',
+    'total_calls', 'incoming_count', 'outgoing_count', 'unanswered_count', 'bad_leads_count',
+    'new_leads_count', 'sent_to_dealer_count', 'closed_deals_count',
   ],
 };
 
@@ -282,6 +303,7 @@ async function analyzeTranscript(transcript: string, extraRules = ''): Promise<C
     'kpi_score — menejerning shu qo\'ng\'iroqdagi umumiy ish sifatini 0-100 oralig\'ida real baholang (faqat 0 yoki 100 emas, transkript mazmuniga qarab farqlansin).',
     'criteria_scores massivini FAQAT quyida "QO\'SHIMCHA DINAMIK QOIDALAR" berilgan bo\'lsa to\'ldiring — har bir faol qoida uchun alohida ball bering. Qoidalar berilmagan bo\'lsa, criteria_scores bo\'sh massiv ([]) bo\'lsin.',
     'Agar bitim yopilmagan bo\'lsa, lost_reasons massivida sababini yozing; yopilgan bo\'lsa — bo\'sh massiv.',
+    'total_calls, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count — transkriptni diqqat bilan o\'qib, ULARNI HAQIQIY sanoqqa asoslab to\'ldiring (taxmin qilib to\'ldirmang). Odatda bitta audio = bitta qo\'ng\'iroq (total_calls=1), lekin transkriptda bir nechta alohida suhbat/qo\'ng\'iroq ketma-ket ketgan bo\'lsa, shularning barchasini sanang. incoming_count + outgoing_count yig\'indisi total_calls\'ga teng bo\'lishi kerak.',
     extraRules,
   ]
     .filter(Boolean)
@@ -327,6 +349,7 @@ async function analyzeTranscript(transcript: string, extraRules = ''): Promise<C
   }
 
   const clampScore = (v: unknown): number => Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
+  const intMin0 = (v: unknown): number => Math.max(0, Math.round(Number(v) || 0));
 
   return {
     sentiment,
@@ -354,6 +377,16 @@ async function analyzeTranscript(transcript: string, extraRules = ''): Promise<C
             score: clampScore(c.score),
           }))
       : [],
+    // Har doim kamida 1 ta qo'ng'iroq deb hisoblanadi — audit qilinayotgan
+    // audioning o'zi allaqachon bitta suhbatning dalili.
+    total_calls: Math.max(1, intMin0(parsed.total_calls)),
+    incoming_count: intMin0(parsed.incoming_count),
+    outgoing_count: intMin0(parsed.outgoing_count),
+    unanswered_count: intMin0(parsed.unanswered_count),
+    bad_leads_count: intMin0(parsed.bad_leads_count),
+    new_leads_count: intMin0(parsed.new_leads_count),
+    sent_to_dealer_count: intMin0(parsed.sent_to_dealer_count),
+    closed_deals_count: intMin0(parsed.closed_deals_count),
   };
 }
 

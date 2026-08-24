@@ -45,6 +45,9 @@ interface AuditResult {
   duration: number;
   unanswered_count: number;
   bad_leads_count: number;
+  new_leads_count: number;
+  sent_to_dealer_count: number;
+  closed_deals_count: number;
   traffic_conversion: number;
   sales_conversion: number;
   kpi_score: number;
@@ -224,12 +227,15 @@ async function auditCall(input: AudioInput, extraRules = ''): Promise<AuditResul
 
     const normalized: Partial<AuditResult> = {
       transcript: result.transcript,
-      total_calls: 1,
-      incoming_count: 0,
-      outgoing_count: 0,
+      total_calls: result.analysis.total_calls,
+      incoming_count: result.analysis.incoming_count,
+      outgoing_count: result.analysis.outgoing_count,
       duration: 0,
-      unanswered_count: 0,
-      bad_leads_count: 0,
+      unanswered_count: result.analysis.unanswered_count,
+      bad_leads_count: result.analysis.bad_leads_count,
+      new_leads_count: result.analysis.new_leads_count,
+      sent_to_dealer_count: result.analysis.sent_to_dealer_count,
+      closed_deals_count: result.analysis.closed_deals_count,
       traffic_conversion: 0,
       sales_conversion: result.analysis.deal_closed ? 100 : 0,
       kpi_score: result.analysis.kpi_score,
@@ -273,6 +279,9 @@ function normalizeAuditResult(r: Partial<AuditResult>): AuditResult {
     duration: intMin0(r.duration),
     unanswered_count: intMin0(r.unanswered_count),
     bad_leads_count: intMin0(r.bad_leads_count),
+    new_leads_count: intMin0(r.new_leads_count),
+    sent_to_dealer_count: intMin0(r.sent_to_dealer_count),
+    closed_deals_count: intMin0(r.closed_deals_count),
     traffic_conversion: Number(clamp(r.traffic_conversion, 0, 100).toFixed(2)),
     sales_conversion: Number(clamp(r.sales_conversion, 0, 100).toFixed(2)),
     kpi_score: Number(clamp(r.kpi_score, 0, 100).toFixed(2)),
@@ -462,6 +471,9 @@ function callRowFields(audit: AuditResult) {
     duration: audit.duration,
     unanswered_count: audit.unanswered_count,
     bad_leads_count: audit.bad_leads_count,
+    new_leads_count: audit.new_leads_count,
+    sent_to_dealer_count: audit.sent_to_dealer_count,
+    closed_deals_count: audit.closed_deals_count,
     kpi_score: audit.kpi_score,
     penalty_amount: audit.penalty_amount,
     bonus_amount: audit.bonus_amount,
@@ -1064,6 +1076,9 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
           duration: audit.duration,
           unanswered_count: audit.unanswered_count,
           bad_leads_count: audit.bad_leads_count,
+          new_leads_count: audit.new_leads_count,
+          sent_to_dealer_count: audit.sent_to_dealer_count,
+          closed_deals_count: audit.closed_deals_count,
         },
         conversions: {
           traffic_conversion: audit.traffic_conversion,

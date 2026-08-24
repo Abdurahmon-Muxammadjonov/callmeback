@@ -16,7 +16,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     let query = supabase
       .from('calls')
-      .select('id, manager_id, platform_id, audio_url, duration, kpi_score, penalty_amount, bonus_amount, rop_comment, status, created_at')
+      .select('id, manager_id, platform_id, audio_url, duration, kpi_score, penalty_amount, bonus_amount, rop_comment, status, created_at, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count')
       .order('created_at', { ascending: false })
       .limit(limit);
     if (managerId) query = query.eq('manager_id', managerId);

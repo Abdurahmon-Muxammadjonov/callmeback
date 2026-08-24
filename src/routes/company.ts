@@ -41,6 +41,69 @@ router.get('/me', requireAuth, async (req: CompanyAuthedRequest, res: Response) 
 });
 
 // ============================================================================
+// GET /company/settings — "Analitika" sahifasi KPI norma chegaralari
+// ============================================================================
+// Frontend'dagi DEFAULT_NORMS (app/lib/analytics.ts) bilan bir xil qiymatlar —
+// yozuv hali bo'lmasa ham backend shu standartlarni qaytaradi (insert shart emas).
+const DEFAULT_COMPANY_SETTINGS = {
+  qualified_call_seconds: 60,
+  min_qualified_calls_day: 40,
+  min_qualified_calls_week: 160,
+  min_qualified_calls_month: 640,
+  min_efficiency_score: 50,
+};
+const COMPANY_SETTINGS_COLUMNS = Object.keys(DEFAULT_COMPANY_SETTINGS) as Array<keyof typeof DEFAULT_COMPANY_SETTINGS>;
+
+router.get('/settings', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
+  const companyId = req.auth!.companyId as string;
+
+  const { data, error } = await supabase
+    .from('company_settings')
+    .select(COMPANY_SETTINGS_COLUMNS.join(', '))
+    .eq('company_id', companyId)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
+
+  return res.status(200).json({ success: true, data: data ?? DEFAULT_COMPANY_SETTINGS });
+});
+
+// ============================================================================
+// PATCH /company/settings — norma chegaralarini o'zgartirish, faqat director/admin
+// ============================================================================
+router.patch('/settings', requireAuth, requireCompanyRole(['director', 'admin']), async (req: CompanyAuthedRequest, res: Response) => {
+  const companyId = req.auth!.companyId as string;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+
+  const update: Record<string, number> = {};
+  for (const key of COMPANY_SETTINGS_COLUMNS) {
+    if (body[key] === undefined) continue;
+    const n = Number(body[key]);
+    if (!Number.isFinite(n) || n < 0) {
+      return res.status(400).json({ success: false, error: `"${key}" manfiy bo'lmagan son bo'lishi kerak.` });
+    }
+    if (key === 'min_efficiency_score' && n > 100) {
+      return res.status(400).json({ success: false, error: '"min_efficiency_score" 0 dan 100 gacha bo\'lishi kerak.' });
+    }
+    update[key] = Math.floor(n);
+  }
+
+  if (Object.keys(update).length === 0) {
+    return res.status(400).json({ success: false, error: `Kamida bitta maydon berilishi kerak: ${COMPANY_SETTINGS_COLUMNS.join(', ')}` });
+  }
+
+  const { data, error } = await supabase
+    .from('company_settings')
+    .upsert({ company_id: companyId, ...update }, { onConflict: 'company_id' })
+    .select(COMPANY_SETTINGS_COLUMNS.join(', '))
+    .single();
+
+  if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
+
+  return res.status(200).json({ success: true, data });
+});
+
+// ============================================================================
 // POST /company/logo — logotip yuklash, faqat director/admin
 // ============================================================================
 router.post('/logo', requireAuth, requireCompanyRole(['director', 'admin']), upload.single('logo'), async (req: CompanyAuthedRequest, res: Response) => {
