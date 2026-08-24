@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import multer from 'multer';
 import { supabase } from '../lib/supabase';
 import { requireAuth, requireCompanyRole, type CompanyAuthedRequest } from '../middleware/companyAuth';
+import { COMPANY_SETTINGS_COLUMNS, getCompanySettings } from '../lib/companySettings';
 
 const router = Router();
 
@@ -45,27 +46,13 @@ router.get('/me', requireAuth, async (req: CompanyAuthedRequest, res: Response) 
 // ============================================================================
 // Frontend'dagi DEFAULT_NORMS (app/lib/analytics.ts) bilan bir xil qiymatlar —
 // yozuv hali bo'lmasa ham backend shu standartlarni qaytaradi (insert shart emas).
-const DEFAULT_COMPANY_SETTINGS = {
-  qualified_call_seconds: 60,
-  min_qualified_calls_day: 40,
-  min_qualified_calls_week: 160,
-  min_qualified_calls_month: 640,
-  min_efficiency_score: 50,
-};
-const COMPANY_SETTINGS_COLUMNS = Object.keys(DEFAULT_COMPANY_SETTINGS) as Array<keyof typeof DEFAULT_COMPANY_SETTINGS>;
-
+// Shu qiymatlar backendning o'z tomonida ham (analyze-call.ts'dagi
+// evaluateManagerKpi — menejer flag/ogohlantirish mantig'i) DINAMIK ravishda
+// ishlatiladi, shu sabab bitta manba (../lib/companySettings) ikkalasiga ham xizmat qiladi.
 router.get('/settings', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   const companyId = req.auth!.companyId as string;
-
-  const { data, error } = await supabase
-    .from('company_settings')
-    .select(COMPANY_SETTINGS_COLUMNS.join(', '))
-    .eq('company_id', companyId)
-    .maybeSingle();
-
-  if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
-
-  return res.status(200).json({ success: true, data: data ?? DEFAULT_COMPANY_SETTINGS });
+  const settings = await getCompanySettings(supabase, companyId);
+  return res.status(200).json({ success: true, data: settings });
 });
 
 // ============================================================================

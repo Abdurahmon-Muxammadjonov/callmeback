@@ -7,6 +7,7 @@ import path from 'node:path';
 import { processLocalAudio, processLongAudio } from '../lib/audio-pipeline';
 import { fetchAllRows } from '../lib/supabase';
 import { isSectionUnlocked } from '../lib/companySections';
+import { getCompanySettings } from '../lib/companySettings';
 
 const router = Router();
 
@@ -77,9 +78,6 @@ interface CriticalAlert {
   threshold: number;
   timestamp: string;
 }
-
-const KPI_THRESHOLD = 40;
-const KPI_MIN_DURATION_SEC = 60;
 
 let cachedMetrics: any = null;
 let lastCacheTime = 0;
@@ -328,10 +326,18 @@ function normalizeAuditResult(r: Partial<AuditResult>): AuditResult {
   };
 }
 
+// Chegaralar (nechchi soniyadan uzun qo'ng'iroq "sifatli" hisoblanadi, kunlik
+// minimal soni qancha) endi qattiq kodlanmagan — har kompaniya o'zi
+// company_settings orqali sozlaydi (GET/PATCH /company/settings). companyId
+// yo'q (hali kompaniyaga bog'lanmagan menejer/eski PBX pipeline) bo'lsa
+// standart qiymatlar (DEFAULT_COMPANY_SETTINGS) ishlatiladi — avvalgi qattiq
+// kodlangan 40 / 60s bilan bir xil, xulq buzilmaydi.
 async function evaluateManagerKpi(
   supabase: SupabaseClient,
-  managerId: string
-): Promise<{ qualified_calls_today: number; alert: CriticalAlert | null }> {
+  managerId: string,
+  companyId: string | null,
+): Promise<{ qualified_calls_today: number; threshold: number; alert: CriticalAlert | null }> {
+  const settings = await getCompanySettings(supabase, companyId);
   const todayStart = new Date();
   todayStart.setUTCHours(0, 0, 0, 0);
 
@@ -339,7 +345,7 @@ async function evaluateManagerKpi(
     .from('calls')
     .select('id', { count: 'exact', head: true })
     .eq('manager_id', managerId)
-    .gt('duration', KPI_MIN_DURATION_SEC)
+    .gt('duration', settings.qualified_call_seconds)
     .gte('created_at', todayStart.toISOString());
 
   if (error) {
@@ -347,18 +353,20 @@ async function evaluateManagerKpi(
   }
 
   const qualified = count ?? 0;
-  const isCritical = qualified < KPI_THRESHOLD;
+  const threshold = settings.min_qualified_calls_day;
+  const isCritical = qualified < threshold;
 
   return {
     qualified_calls_today: qualified,
+    threshold,
     alert: isCritical
       ? {
           severity: 'critical',
           code: 'LOW_QUALIFIED_CALL_VOLUME',
-          message: `Manager has only ${qualified}/${KPI_THRESHOLD} qualified calls (>${KPI_MIN_DURATION_SEC}s) today`,
+          message: `Manager has only ${qualified}/${threshold} qualified calls (>${settings.qualified_call_seconds}s) today`,
           manager_id: managerId,
           qualified_calls_today: qualified,
-          threshold: KPI_THRESHOLD,
+          threshold,
           timestamp: new Date().toISOString(),
         }
       : null,
@@ -373,10 +381,10 @@ function makeAutoCrmId(prefix: string): string {
 
 async function getOrCreateDefaultManager(
   supabase: SupabaseClient
-): Promise<{ id: string; name: string; status: string }> {
+): Promise<{ id: string; name: string; status: string; company_id: string | null }> {
   const { data: existing } = await supabase
     .from('managers')
-    .select('id, name, status')
+    .select('id, name, status, company_id')
     .eq('name', DEFAULT_MANAGER_NAME)
     .limit(1);
   if (existing && existing.length > 0) return existing[0];
@@ -384,7 +392,7 @@ async function getOrCreateDefaultManager(
   const { data: created, error } = await supabase
     .from('managers')
     .insert({ name: DEFAULT_MANAGER_NAME, status: 'active', crm_id: makeAutoCrmId('auto-default') })
-    .select('id, name, status')
+    .select('id, name, status, company_id')
     .single();
   if (error || !created) {
     throw new Error(`Default manager yaratib bo'lmadi: ${error?.message || 'unknown'}`);
@@ -397,14 +405,14 @@ async function getOrCreateDefaultManager(
 async function getOrCreateManagerByName(
   supabase: SupabaseClient,
   name: string,
-): Promise<{ id: string; name: string; status: string }> {
+): Promise<{ id: string; name: string; status: string; company_id: string | null }> {
   const clean = name.trim();
   const { data: existing } = await supabase
-    .from('managers').select('id, name, status').eq('name', clean).limit(1);
+    .from('managers').select('id, name, status, company_id').eq('name', clean).limit(1);
   if (existing && existing.length > 0) return existing[0];
 
   const { data: created, error } = await supabase
-    .from('managers').insert({ name: clean, status: 'active', crm_id: makeAutoCrmId('auto-manager') }).select('id, name, status').single();
+    .from('managers').insert({ name: clean, status: 'active', crm_id: makeAutoCrmId('auto-manager') }).select('id, name, status, company_id').single();
   if (error || !created) {
     throw new Error(`Manager yaratib bo'lmadi: ${error?.message || 'unknown'}`);
   }
@@ -418,16 +426,16 @@ async function getOrCreateManagerByName(
 async function getOrCreateManagerByPbxId(
   supabase: SupabaseClient,
   pbxId: string,
-): Promise<{ id: string; name: string; status: string }> {
+): Promise<{ id: string; name: string; status: string; company_id: string | null }> {
   const clean = pbxId.trim();
   const { data: existing } = await supabase
-    .from('managers').select('id, name, status').eq('pbx_id', clean).limit(1);
+    .from('managers').select('id, name, status, company_id').eq('pbx_id', clean).limit(1);
   if (existing && existing.length > 0) return existing[0];
 
   const { data: created, error } = await supabase
     .from('managers')
     .insert({ name: `PBX ${clean}`, status: 'active', pbx_id: clean, crm_id: makeAutoCrmId('auto-pbx') })
-    .select('id, name, status')
+    .select('id, name, status, company_id')
     .single();
   if (error || !created) {
     throw new Error(`Manager (pbx_id) yaratib bo'lmadi: ${error?.message || 'unknown'}`);
@@ -946,14 +954,14 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
     //  - hech biri yo'q → "Tayinlanmagan" menejer
     const managerName = (req.body && typeof req.body.manager_name === 'string' && req.body.manager_name.trim())
       ? req.body.manager_name.trim() : '';
-    let manager: { id: string; name: string; status: string };
+    let manager: { id: string; name: string; status: string; company_id: string | null };
     if (manager_id !== undefined && manager_id !== null && manager_id !== '') {
       if (typeof manager_id !== 'string' || !isValidUUID(manager_id)) {
         return res.status(400).json({ success: false, error: 'manager_id berilsa, yaroqli UUID bo\'lishi kerak.' });
       }
       const { data, error: managerLookupError } = await supabase
         .from('managers')
-        .select('id, name, status')
+        .select('id, name, status, company_id')
         .eq('id', manager_id)
         .single();
       if (managerLookupError || !data) {
@@ -1012,7 +1020,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
       }
     });
 
-    const kpi = await evaluateManagerKpi(supabase, manager_id);
+    const kpi = await evaluateManagerKpi(supabase, manager_id, manager.company_id);
 
     if (kpi.alert && manager.status !== 'flagged') {
       const { error: flagError } = await supabase
@@ -1091,7 +1099,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
       },
       kpi: {
         qualified_calls_today: kpi.qualified_calls_today,
-        threshold: KPI_THRESHOLD,
+        threshold: kpi.threshold,
         is_critical: !!kpi.alert,
         alert: kpi.alert,
       },
