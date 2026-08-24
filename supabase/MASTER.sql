@@ -147,6 +147,19 @@ alter table public.users add column if not exists credentials_changed_at timesta
 -- XAVFSIZLIK: ochiq parol saqlanmaydi — agar bo'lsa, butunlay o'chiramiz.
 alter table public.users drop column if exists password_plain;
 
+-- HOTFIX: salespulse@gmail.com bog'langan kompaniya uchun barcha
+-- lockable bo'limlarni ochiq holatda saqlaymiz. Bu idempotent: qator mavjud
+-- bo'lsa yangilanadi, bo'lmasa yaratiladi.
+insert into public.company_sections (company_id, section_key, is_locked, unlocked_at, unlocked_by)
+values
+  ('9410e3fc-54fb-4758-ac30-719471c7a41e', 'call_analytics', false, now(), 'b5f78196-2f4e-4b83-8831-3b27f0ffb03c'),
+  ('9410e3fc-54fb-4758-ac30-719471c7a41e', 'reports', false, now(), 'b5f78196-2f4e-4b83-8831-3b27f0ffb03c'),
+  ('9410e3fc-54fb-4758-ac30-719471c7a41e', 'campaigns', false, now(), 'b5f78196-2f4e-4b83-8831-3b27f0ffb03c')
+on conflict (company_id, section_key) do update set
+  is_locked = excluded.is_locked,
+  unlocked_at = excluded.unlocked_at,
+  unlocked_by = excluded.unlocked_by;
+
 -- calls -> users bog'lanishi (mijoz o'chirilsa ham qo'ng'iroq tarixi saqlanadi)
 alter table public.calls add column if not exists client_id uuid references public.users(id) on delete set null;
 
