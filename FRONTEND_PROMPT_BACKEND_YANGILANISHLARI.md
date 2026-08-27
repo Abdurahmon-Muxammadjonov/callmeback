@@ -88,7 +88,7 @@ body: { "code": "AB3XK9QZ1M4P7" }
 ← 200 { success: true, data: { unlocked_sections: ["call_analytics", "reports", ...] } }
 ← 400 { success: false, error: "Noto'g'ri kod." }
 ← 400 { success: false, error: "Bu kod allaqachon ishlatilgan." }
-← 400 { success: false, error: "Kod muddati tugagan (30 daqiqa) — botdan yangi kod so'rang." }
+← 400 { success: false, error: "Kod muddati tugagan (1 soat) — botdan yangi kod so'rang." }
 ← 403 { success: false, error: "Bu kod boshqa kompaniyaga tegishli." }
 ```
 
@@ -109,6 +109,21 @@ Muvaffaqiyatli javobdan keyin: `unlocked_sections` massividagi
 bo'limlarni state'da darhol qulfdan ochib qo'ying (reload shart emas) —
 xuddi eski `/sections/unlock` javobidan keyin qilingandek.
 
+**Kod muddati endi 1 SOAT** (avval 30 daqiqa deb hujjatlashtirilgan edi —
+bot foydalanuvchiga ham shunday deydi). Agar sizda kod kiritish modalida
+"XX daqiqa qoldi" kabi hisoblagich bo'lsa, 60 daqiqaga moslang.
+
+**Animatsiya (ixtiyoriy, lekin so'ralgan):** kod muvaffaqiyatli
+kiritilib, `unlocked_sections` qaytganda, sidebar'dagi endi ochilgan
+bo'lim(lar) uchun bir martalik "ochilish" animatsiyasi (masalan qulf
+ikonkasi yo'qolib, bo'lim porlab/fade-in bo'lib ochilishi) ko'rsatilishi
+kerak — oddiy, animatsiyasiz holat almashinuvi emas.
+
+**Eslatma:** kod muvaffaqiyatli ishlatilganda `companies.tariff_id` ham
+yangilanadi (kompaniya endi yangi tarifga o'tadi) — agar UI'da joriy
+tarif nomi/logotipi ko'rsatilsa (masalan sozlamalar sahifasida), `GET
+/company/me`ni ham qayta chaqiring, faqat `company_sections`ni emas.
+
 ---
 
 ## §5. Eslatma — o'zgarmagan narsalar
@@ -116,6 +131,13 @@ xuddi eski `/sections/unlock` javobidan keyin qilingandek.
 - `GET /company/sections` — shakli o'zgarmagan: `[{section_key, is_locked, in_plan}]`
 - `GET /company/me` — shakli o'zgarmagan: `tariff_id`/`tariff:{key,name,included_sections}` allaqachon bor edi
 - `POST /internal/telegram/deeplink` — shakli o'zgarmagan: `{purpose}` → `{url}`, "Kod yo'qmi?"/"Upgrade" tugmalari shu bilan ishlayveradi
+
+**Kontekst uchun (frontend'da hech narsa o'zgartirish shart emas):**
+"Kod yo'qmi?"/"Upgrade" tugmalari orqali ochiladigan bot oqimida endi
+narx **xodimlar soniga ko'paytiriladi** (tarif narxi = bitta xodimga
+narx) va to'lov/chek/tasdiqlash butunlay Telegram ichida bo'ladi — sayt
+faqat deep-link URL yaratadi va oxirida 13 belgili kodni qabul qiladi
+(yuqoridagi §4). Bu tafsilotlar API kontraktiga ta'sir qilmaydi.
 
 ---
 
