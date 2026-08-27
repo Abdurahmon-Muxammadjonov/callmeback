@@ -4,61 +4,12 @@ import { supabase, fetchAllRows } from '../lib/supabase';
 const router = Router();
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-type Period = 'day' | 'week' | 'month';
-
-interface Range {
-  curStart: Date;
-  curEnd: Date;
-  prevStart: Date;
-  prevEnd: Date;
-}
-
-// Joriy va oldingi davr chegaralari (UTC): bugun↔kecha, shu hafta↔o'tgan hafta, shu oy↔o'tgan oy.
-function periodRanges(period: Period): Range {
-  const now = new Date();
-  const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-
-  if (period === 'week') {
-    const isoDow = (startOfToday.getUTCDay() + 6) % 7; // 0 = Dushanba
-    const curStart = new Date(startOfToday);
-    curStart.setUTCDate(curStart.getUTCDate() - isoDow);
-    const prevStart = new Date(curStart);
-    prevStart.setUTCDate(prevStart.getUTCDate() - 7);
-    return { curStart, curEnd: now, prevStart, prevEnd: curStart };
-  }
-  if (period === 'month') {
-    const curStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    const prevStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-    return { curStart, curEnd: now, prevStart, prevEnd: curStart };
-  }
-  // day
-  const curStart = startOfToday;
-  const prevStart = new Date(curStart);
-  prevStart.setUTCDate(prevStart.getUTCDate() - 1);
-  return { curStart, curEnd: now, prevStart, prevEnd: curStart };
-}
-
-// Period-over-period o'zgarish foizi (oldingi 0 bo'lsa xavfsiz).
-function pctChange(current: number, previous: number): number {
-  if (previous === 0) return current > 0 ? 100 : 0;
-  return Number((((current - previous) / previous) * 100).toFixed(1));
-}
-
 // Berilgan tenant'dagi menejer id'lari (tenant filtri uchun). null = filtr yo'q.
 async function managerIdsForTenant(tenantId: string | null): Promise<string[] | null> {
   if (!tenantId) return null;
   const { data, error } = await supabase.from('managers').select('id').eq('tenant_id', tenantId);
   if (error) throw new Error(error.message);
   return (data || []).map((m) => m.id);
-}
-
-interface CallAgg {
-  total_calls: number;
-  avg_kpi_score: number;
-  avg_duration_sec: number;
-  total_duration_sec: number;
-  total_penalty: number;
-  total_bonus: number;
 }
 
 // GET /analytics
@@ -112,42 +63,12 @@ router.get('/', async (_req: Request, res: Response) => {
   }
 });
 
-// Bitta davr uchun qo'ng'iroq-asosli metrikalar.
-// PostgREST'ning standart 1000-qatorlik javob chegarasidan oshsa ham (masalan
-// oylik davrda 1000dan ko'p qo'ng'iroq bo'lsa) hammasi hisoblanishi uchun
-// fetchAllRows bilan sahifalab yig'ib olinadi (avvalgi kod bitta so'rov bilan
-// cheklanib, "maksimum 1000 ta" ko'rinishida noto'g'ri chiqarardi).
-async function aggregateCalls(start: Date, end: Date, managerIds: string[] | null): Promise<CallAgg> {
-  if (managerIds && managerIds.length === 0) {
-    return { total_calls: 0, avg_kpi_score: 0, avg_duration_sec: 0, total_duration_sec: 0, total_penalty: 0, total_bonus: 0 };
-  }
-
-  const rows = await fetchAllRows<{ kpi_score: number | null; duration: number | null; penalty_amount: number | null; bonus_amount: number | null }>((from, to) => {
-    let q = supabase
-      .from('calls')
-      .select('kpi_score, duration, penalty_amount, bonus_amount')
-      .gte('created_at', start.toISOString())
-      .lt('created_at', end.toISOString())
-      .range(from, to);
-    if (managerIds) q = q.in('manager_id', managerIds);
-    return q;
-  });
-
-  const n = rows.length;
-  const sum = (f: (r: any) => number) => rows.reduce((a, r) => a + (Number(f(r)) || 0), 0);
-  const totalDurationSec = Math.round(sum((r) => r.duration));
-  return {
-    total_calls: n,
-    avg_kpi_score: n ? Number((sum((r) => r.kpi_score) / n).toFixed(2)) : 0,
-    avg_duration_sec: n ? Math.round(sum((r) => r.duration) / n) : 0,
-    total_duration_sec: totalDurationSec,
-    total_penalty: Number(sum((r) => r.penalty_amount).toFixed(2)),
-    total_bonus: Number(sum((r) => r.bonus_amount).toFixed(2)),
-  };
-}
-
 // GET /analytics/overview?period=day|week|month&tenant_id=
 // Frontend kutgan ko'rinishda day/week/month PoP statistikani bitta javobda qaytaradi.
+// Hisob-kitobning o'zi DB tomonida (supabase/optimize_analytics_aggregates.sql'dagi
+// calls_overview_stats, calls_pop_stats bilan bir xil naqsh) — har bir mos qo'ng'iroq
+// qatorini Node'ga tortib sum/avg qilish o'rniga bitta so'rovda hisoblanadi, shu sabab
+// katta davrlarda (ko'p qo'ng'iroqli oy) ham sekinlashmaydi.
 router.get('/overview', async (req: Request, res: Response) => {
   try {
     const tenantId = typeof req.query.tenant_id === 'string' && req.query.tenant_id ? req.query.tenant_id : null;
@@ -157,50 +78,10 @@ router.get('/overview', async (req: Request, res: Response) => {
 
     const managerIds = await managerIdsForTenant(tenantId);
 
-    const summarizePeriod = async (period: Period) => {
-      const { curStart, curEnd, prevStart, prevEnd } = periodRanges(period);
-      const [current, previous] = await Promise.all([
-        aggregateCalls(curStart, curEnd, managerIds),
-        aggregateCalls(prevStart, prevEnd, managerIds),
-      ]);
+    const { data, error } = await supabase.rpc('calls_overview_stats', { p_manager_ids: managerIds });
+    if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
 
-      const currentDurationMinutes = Number((current.total_duration_sec / 60).toFixed(1));
-      const previousDurationMinutes = Number((previous.total_duration_sec / 60).toFixed(1));
-
-      return {
-        calls: {
-          current: current.total_calls,
-          previous: previous.total_calls,
-          change_pct: pctChange(current.total_calls, previous.total_calls),
-        },
-        duration_minutes: {
-          current: currentDurationMinutes,
-          previous: previousDurationMinutes,
-          change_pct: pctChange(currentDurationMinutes, previousDurationMinutes),
-        },
-        avg_kpi: {
-          current: current.avg_kpi_score,
-          previous: previous.avg_kpi_score,
-          change_pct: pctChange(current.avg_kpi_score, previous.avg_kpi_score),
-        },
-      };
-    };
-
-    const [daily, weekly, monthly] = await Promise.all([
-      summarizePeriod('day'),
-      summarizePeriod('week'),
-      summarizePeriod('month'),
-    ]);
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        daily,
-        weekly,
-        monthly,
-        generated_at: new Date().toISOString(),
-      },
-    });
+    return res.status(200).json({ success: true, data });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Overview hisoblashda xatolik.' });
   }

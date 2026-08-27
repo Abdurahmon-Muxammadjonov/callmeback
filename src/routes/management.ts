@@ -31,66 +31,18 @@ router.get('/platforms', async (_req: Request, res: Response) => {
 
 // GET /api/management/relationship-dynamics?platform_id=
 // "Sabablarsiz munosabatlar" — javobsiz va bad-lead metrikalarining vaqt dinamikasi.
+// Hisob-kitob DB tomonida (supabase/optimize_analytics_aggregates.sql'dagi
+// calls_relationship_dynamics) — 14 kunlik oynadagi har bir qo'ng'iroq qatorini
+// Node'ga tortib JS'da kun bo'yicha filtrlash o'rniga, bitta so'rovda kunlik
+// jamlangan holda qaytadi (faol platformada bu son katta bo'lsa ham sekinlashmaydi).
 router.get('/relationship-dynamics', async (req: Request, res: Response) => {
   try {
     const platformId = typeof req.query.platform_id === 'string' && req.query.platform_id ? req.query.platform_id : null;
-    const todayStart = startOfTodayUTC();
-    const windowStart = daysAgo(todayStart, 13); // 14 kun (spark + lastWeek uchun yetarli)
 
-    // fetchAllRows bilan sahifalab olinadi — PostgREST'ning standart 1000
-    // qatorlik javob chegarasidan oshsa ham (faol platformada 14 kunda 1000dan
-    // ko'p qo'ng'iroq bo'lishi mumkin) hammasi hisobga kirishi uchun.
-    let rows: Array<{ created_at: string; unanswered_count: number | null; bad_leads_count: number | null }>;
-    try {
-      rows = await fetchAllRows<{ created_at: string; unanswered_count: number | null; bad_leads_count: number | null }>((from, to) => {
-        let q = supabase
-          .from('calls')
-          .select('created_at, unanswered_count, bad_leads_count')
-          .gte('created_at', windowStart.toISOString())
-          .range(from, to);
-        if (platformId) q = q.eq('platform_id', platformId);
-        return q;
-      });
-    } catch (e: any) {
-      return res.status(500).json({ success: false, error: `Database Error: ${e?.message || e}` });
-    }
+    const { data, error } = await supabase.rpc('calls_relationship_dynamics', { p_platform_id: platformId });
+    if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
 
-    const inRange = (r: any, from: Date, to: Date) => {
-      const t = new Date(r.created_at).getTime();
-      return t >= from.getTime() && t < to.getTime();
-    };
-    const sumField = (rs: any[], f: string) => rs.reduce((a, r) => a + (Number(r[f]) || 0), 0);
-
-    const yStart = daysAgo(todayStart, 1);
-    const weekStart = daysAgo(todayStart, 6); // so'nggi 7 kun (bugun ham)
-    const lastWeekStart = daysAgo(todayStart, 13);
-    const now = new Date();
-
-    const buildSpark = (field: string): number[] =>
-      Array.from({ length: 7 }, (_, i) => {
-        const from = daysAgo(todayStart, 6 - i);
-        const to = daysAgo(todayStart, 5 - i);
-        return sumField(rows.filter((r) => inRange(r, from, to)), field);
-      });
-
-    const metric = (key: string, label: string, field: string) => ({
-      key,
-      label,
-      today: sumField(rows.filter((r) => inRange(r, todayStart, now)), field),
-      yesterday: sumField(rows.filter((r) => inRange(r, yStart, todayStart)), field),
-      week: sumField(rows.filter((r) => inRange(r, weekStart, now)), field),
-      lastWeek: sumField(rows.filter((r) => inRange(r, lastWeekStart, weekStart)), field),
-      spark: buildSpark(field),
-      lowerIsBetter: true,
-    });
-
-    return res.status(200).json({
-      success: true,
-      data: [
-        metric('unanswered', 'Javobsiz qoldirilgan', 'unanswered_count'),
-        metric('bad_leads', 'Sifatsiz lidlar', 'bad_leads_count'),
-      ],
-    });
+    return res.status(200).json({ success: true, data });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Relationship dynamics xatolik.' });
   }
