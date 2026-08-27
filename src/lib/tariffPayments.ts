@@ -12,11 +12,15 @@ import { logAudit } from '../multi-tenant/lib/auditLog';
 // so'rov, `for update` bilan qulflangan, ikki marta bosilsa ikkinchisi
 // aniq xato bilan rad etiladi, oraliqda xato bo'lsa hammasi orqaga qaytadi.
 
+// DIQQAT (Reviziya 3): `price` endi BITTA XODIMGA narx sifatida talqin
+// qilinadi — umumiy narx = price * employee_count. "Kalit olish"da xodimlar
+// soni so'raladi va saqlanadi; "Tarifni o'zgartirish"da qayta so'RALMAYDI —
+// oxirgi subscriptions qatoridan meros olinadi (foydalanuvchi shunday so'radi).
 export interface TariffRow {
   id: string;
   key: string;
   name: string;
-  price: number;
+  price: number; // bitta xodimga narx
   included_sections: string[];
   order: number;
 }
@@ -53,6 +57,7 @@ export interface LatestSubscription {
   paid_amount: number;
   paid_at: string;
   expires_at: string;
+  employee_count: number;
 }
 
 export async function findLatestSubscriptionByPhone(phone: string): Promise<LatestSubscription | null> {
@@ -61,7 +66,7 @@ export async function findLatestSubscriptionByPhone(phone: string): Promise<Late
 
   const { data, error } = await supabase
     .from('subscriptions')
-    .select('id, company_id, tariff_id, paid_amount, paid_at, expires_at')
+    .select('id, company_id, tariff_id, paid_amount, paid_at, expires_at, employee_count')
     .eq('phone', normalized)
     .order('paid_at', { ascending: false })
     .limit(1)
@@ -74,10 +79,12 @@ export function isSubscriptionActive(sub: LatestSubscription): boolean {
   return new Date(sub.expires_at).getTime() > Date.now();
 }
 
-export function computeProratedPrice(newTariffPrice: number, sub: LatestSubscription | null): { discount: number; finalPrice: number } {
+// newTariffTotalPrice — chaqiruvchi tomonidan ALLAQACHON xodimlar soniga
+// ko'paytirilgan holda uzatiladi (tariff.price * employee_count).
+export function computeProratedPrice(newTariffTotalPrice: number, sub: LatestSubscription | null): { discount: number; finalPrice: number } {
   const active = sub ? isSubscriptionActive(sub) : false;
   const discount = active ? Number(sub!.paid_amount) : 0;
-  const finalPrice = Math.max(0, newTariffPrice - discount);
+  const finalPrice = Math.max(0, newTariffTotalPrice - discount);
   return { discount, finalPrice };
 }
 
@@ -97,6 +104,7 @@ export interface CreateKeyRequestInput {
   phone: string;
   telegramId: string;
   receiptFileId: string;
+  employeeCount: number;
 }
 
 export async function createKeyRequest(input: CreateKeyRequestInput): Promise<{ id: string }> {
@@ -112,7 +120,10 @@ export async function createKeyRequest(input: CreateKeyRequestInput): Promise<{ 
       phone: input.phone,
       telegram_id: input.telegramId,
       receipt_file_id: input.receiptFileId,
-      quoted_price: tariff.price, // so'rov yaratilgan paytdagi narx "muzlatiladi" (Reviziya 2, band 7)
+      employee_count: input.employeeCount,
+      // so'rov yaratilgan paytdagi narx "muzlatiladi" (Reviziya 2, band 7) —
+      // endi xodimlar soniga ko'paytirilgan holda (Reviziya 3, band 1).
+      quoted_price: tariff.price * input.employeeCount,
       paid_amount: 0,
       status: 'pending',
     })
@@ -180,6 +191,7 @@ export interface CreateTariffChangeRequestInput {
   discountApplied: number;
   finalPrice: number;
   receiptFileId: string | null; // null — finalPrice=0 bo'lsa (chek shart emas)
+  employeeCount: number; // oxirgi subscriptions'dan meros olingan, qayta so'ralmaydi
 }
 
 export async function createTariffChangeRequest(input: CreateTariffChangeRequestInput): Promise<{ id: string }> {
@@ -195,6 +207,7 @@ export async function createTariffChangeRequest(input: CreateTariffChangeRequest
       discount_applied: input.discountApplied,
       final_price: input.finalPrice,
       receipt_file_id: input.receiptFileId,
+      employee_count: input.employeeCount,
       status: 'pending',
     })
     .select('id')

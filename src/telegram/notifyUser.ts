@@ -13,7 +13,7 @@ export async function notifyUserApproved(telegramId: string, tariffName: string,
         '',
         `Kalitingiz: \`${code}\``,
         '',
-        '30 daqiqa amal qiladi, faqat 1 marta ishlaydi. Saytda tegishli joyga kiritib, tarifingizni faollashtiring.',
+        '1 soat amal qiladi, faqat 1 marta ishlaydi. Saytda tegishli joyga kiritib, tarifingizni faollashtiring.',
       ].join('\n'),
       { parse_mode: 'Markdown' },
     );

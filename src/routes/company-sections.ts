@@ -129,7 +129,7 @@ router.post('/sections/unlock', requireAuth, requireCompanyRole(['director', 'ad
 // yo'la ochadigan kod (yuqoridagi /sections/unlock'dan farqli — u bitta
 // bo'lim uchun, bcrypt-hash'langan, SalesPulse admin qo'lda beradigan kod;
 // bu esa Bot 2 to'lovni tasdiqlaganda avtomatik generatsiya qilingan,
-// ochiq-matn, 30 daqiqa muddatli, butun tarifni ochadigan kod).
+// ochiq-matn, 1 soat muddatli, butun tarifni ochadigan kod).
 // Butun amal supabase/tariff_payments_v2.sql'dagi redeem_unlock_code()
 // funksiyasida BITTA tranzaksiyada bajariladi.
 // ============================================================================
@@ -155,7 +155,7 @@ router.post('/tariff/unlock', requireAuth, requireCompanyRole(['director', 'admi
     const msg = error.message || '';
     if (msg.includes('UNLOCK_CODE_NOT_FOUND')) return res.status(400).json({ success: false, error: "Noto'g'ri kod." });
     if (msg.includes('UNLOCK_CODE_USED')) return res.status(400).json({ success: false, error: 'Bu kod allaqachon ishlatilgan.' });
-    if (msg.includes('UNLOCK_CODE_EXPIRED')) return res.status(400).json({ success: false, error: "Kod muddati tugagan (30 daqiqa) — botdan yangi kod so'rang." });
+    if (msg.includes('UNLOCK_CODE_EXPIRED')) return res.status(400).json({ success: false, error: "Kod muddati tugagan (1 soat) — botdan yangi kod so'rang." });
     if (msg.includes('UNLOCK_CODE_WRONG_COMPANY')) return res.status(403).json({ success: false, error: 'Bu kod boshqa kompaniyaga tegishli.' });
     return res.status(500).json({ success: false, error: `Database Error: ${msg}` });
   }

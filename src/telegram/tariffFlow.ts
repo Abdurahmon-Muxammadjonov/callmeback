@@ -19,7 +19,9 @@ import {
 // Part D qayta qurilishi: "Kalit olish" (D.3) va "Tarifni o'zgartirish"
 // (D.4) — to'liq spec bo'yicha, chek surati + proratsiya bilan.
 
-const PAYMENT_CARD_TEXT = "💳 Karta: 5614 6865 0400 6860 (A.L)";
+// Reviziya 3: ikki oqim ikki XIL kartadan foydalanadi.
+const PAYMENT_CARD_TEXT_GETCODE = "💳 Karta: 5614 6865 0400 6860 (A.L)";
+const PAYMENT_CARD_TEXT_UPGRADE = "💳 Karta: 8600 1404 7274 5281 (A.X.M)";
 
 // Telegram'ning (legacy) 'Markdown' parse_mode'i 4 ta belgini maxsus
 // deb hisoblaydi: _ * ` [ — foydalanuvchi matnida (ism, familiya, Telegram
@@ -69,9 +71,10 @@ async function forwardToBot2(params: {
   }
 }
 
+// Reviziya 3: tariffs.price endi BITTA XODIMGA narx — tugmada shunday ko'rsatiladi.
 function tariffSelectKeyboard(tariffs: TariffRow[], prefix: string) {
   return Markup.inlineKeyboard(
-    tariffs.map((t) => [Markup.button.callback(`${t.name} — ${formatSum(t.price)} so'm`, `${prefix}:${t.id}`)]),
+    tariffs.map((t) => [Markup.button.callback(`${t.name} — ${formatSum(t.price)} so'm/xodim`, `${prefix}:${t.id}`)]),
   );
 }
 
@@ -168,7 +171,8 @@ export async function handleGetCodeNameText(ctx: SessionContext, text: string): 
   ctx.session.fullName = name;
 
   if (ctx.session.phone) {
-    await showGetCodePaymentInfo(ctx);
+    ctx.session.step = 'getcode_awaiting_employee_count';
+    await ctx.reply("Nechta xodimingiz bor?");
     return;
   }
   ctx.session.step = 'getcode_awaiting_phone';
@@ -178,19 +182,33 @@ export async function handleGetCodeNameText(ctx: SessionContext, text: string): 
 export async function handleGetCodePhoneText(ctx: SessionContext, text: string): Promise<void> {
   const phone = text.trim();
   ctx.session.phone = phone;
+  ctx.session.step = 'getcode_awaiting_employee_count';
+  await ctx.reply("Nechta xodimingiz bor?");
+}
+
+export async function handleGetCodeEmployeeCountText(ctx: SessionContext, text: string): Promise<void> {
+  const n = Number.parseInt(text.replace(/\D/g, ''), 10);
+  if (!Number.isFinite(n) || n < 1) {
+    await ctx.reply('Iltimos, ijobiy butun son kiriting (masalan: 5).');
+    return;
+  }
+  ctx.session.employeeCount = n;
   await showGetCodePaymentInfo(ctx);
 }
 
 async function showGetCodePaymentInfo(ctx: SessionContext): Promise<void> {
   const tariff = await getTariff(ctx.session.selectedTariffId as string);
-  if (!tariff) { await ctx.reply("Sessiya eskirgan. Qaytadan boshlang: /start"); await resetSession(ctx); return; }
+  const employeeCount = ctx.session.employeeCount;
+  if (!tariff || !employeeCount) { await ctx.reply("Sessiya eskirgan. Qaytadan boshlang: /start"); await resetSession(ctx); return; }
 
+  const total = tariff.price * employeeCount;
   ctx.session.step = 'getcode_awaiting_receipt';
   await ctx.reply(
     [
-      `Tanlagan tarifingiz: *${tariff.name}* — *${formatSum(tariff.price)} so'm*`,
+      `Tanlagan tarifingiz: *${tariff.name}*`,
+      `${formatSum(tariff.price)} so'm/xodim × ${employeeCount} xodim = *${formatSum(total)} so'm*`,
       '',
-      PAYMENT_CARD_TEXT,
+      PAYMENT_CARD_TEXT_GETCODE,
       '',
       "To'lov qilgach, chek rasmini (screenshot/rasm) yuboring.",
     ].join('\n'),
@@ -203,7 +221,8 @@ export async function handleGetCodeReceiptPhoto(ctx: SessionContext): Promise<vo
   const tariffId = ctx.session.selectedTariffId;
   const fullName = ctx.session.fullName;
   const phone = ctx.session.phone;
-  if (!companyId || !tariffId || !fullName || !phone) {
+  const employeeCount = ctx.session.employeeCount;
+  if (!companyId || !tariffId || !fullName || !phone || !employeeCount) {
     await ctx.reply('Sessiya eskirgan. Qaytadan boshlang: /start');
     await resetSession(ctx);
     return;
@@ -228,11 +247,13 @@ export async function handleGetCodeReceiptPhoto(ctx: SessionContext): Promise<vo
     phone,
     telegramId: String(ctx.from!.id),
     receiptFileId: receiptUrl,
+    employeeCount,
   });
 
   await ctx.reply("So'rovingiz tasdiqlash uchun yuborildi. Tez orada xabar beramiz.");
   await resetSession(ctx);
 
+  const total = tariff.price * employeeCount;
   const caption = [
     "🆕 *Yangi to'lov tasdiqlash so'rovi (Kalit olish)*",
     '',
@@ -240,7 +261,7 @@ export async function handleGetCodeReceiptPhoto(ctx: SessionContext): Promise<vo
     `👤 Ism: ${escapeMarkdown(fullName)}`,
     `📱 Telefon: ${escapeMarkdown(phone)}`,
     `💬 Telegram: ${ctx.from!.username ? '@' + escapeMarkdown(ctx.from!.username) : "username yo'q"} (id: ${ctx.from!.id})`,
-    `📦 Tarif: ${tariff.name} — ${formatSum(tariff.price)} so'm`,
+    `📦 Tarif: ${tariff.name} — ${formatSum(tariff.price)} so'm/xodim × ${employeeCount} xodim = ${formatSum(total)} so'm`,
     `🕐 Vaqt: ${new Date().toISOString()}`,
   ].join('\n');
 
@@ -298,11 +319,35 @@ export async function handleUpgradePhoneText(ctx: SessionContext, text: string):
   ctx.session.subOldTariffId = sub.tariff_id;
   ctx.session.subPaidAmount = Number(sub.paid_amount);
   ctx.session.subExpiresAt = sub.expires_at;
+  // Reviziya 3, band 1: xodimlar soni oxirgi obunadan MEROS olinadi, qayta so'ralmaydi.
+  ctx.session.employeeCount = sub.employee_count;
 
   const currentTariff = await getTariff(sub.tariff_id);
   const active = isSubscriptionActive(sub);
+
+  // Reviziya 3: yangi tarif tanlashdan oldin, joriy tarifni ko'rsatib
+  // "shumi?" deb tasdiqlatiladi (foydalanuvchi shunday so'radi).
+  ctx.session.step = 'upgrade_confirm_current';
+  await ctx.reply(
+    [
+      `Joriy tarifingiz: *${currentTariff?.name || "belgilanmagan"}*, ${sub.employee_count} xodim.`,
+      `To'langan: *${formatSum(sub.paid_amount)} so'm* (${new Date(sub.paid_at).toLocaleDateString('uz-UZ')})`,
+      `Amal qilish muddati: ${new Date(sub.expires_at).toLocaleDateString('uz-UZ')}${active ? '' : ' (tugagan)'}`,
+      '',
+      'Shumi?',
+    ].join('\n'),
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Ha', 'upgrade_current:yes'), Markup.button.callback("❌ Yo'q", 'upgrade_current:no')],
+      ]),
+    },
+  );
+}
+
+async function showUpgradeTariffOptions(ctx: SessionContext): Promise<void> {
   const allTariffs = await listTariffs();
-  const otherTariffs = allTariffs.filter((t) => t.id !== sub!.tariff_id);
+  const otherTariffs = allTariffs.filter((t) => t.id !== ctx.session.subOldTariffId);
 
   if (otherTariffs.length === 0) {
     await ctx.reply("Boshqa tarif mavjud emas.");
@@ -311,16 +356,21 @@ export async function handleUpgradePhoneText(ctx: SessionContext, text: string):
   }
 
   ctx.session.step = 'upgrade_selecting_tariff';
-  await ctx.reply(
-    [
-      `Joriy tarifingiz: *${currentTariff?.name || "belgilanmagan"}*`,
-      `To'langan: *${formatSum(sub.paid_amount)} so'm* (${new Date(sub.paid_at).toLocaleDateString('uz-UZ')})`,
-      `Amal qilish muddati: ${new Date(sub.expires_at).toLocaleDateString('uz-UZ')}${active ? '' : ' (tugagan)'}`,
-      '',
-      "Qaysi tarifga o'zgartirmoqchisiz?",
-    ].join('\n'),
-    { parse_mode: 'Markdown', ...tariffSelectKeyboard(otherTariffs, 'upgrade_tariff') },
-  );
+  await ctx.reply("Qaysi tarifga o'tasiz?", tariffSelectKeyboard(otherTariffs, 'upgrade_tariff'));
+}
+
+export async function handleUpgradeConfirmCurrent(ctx: SessionContext & { match: RegExpExecArray }): Promise<void> {
+  const choice = ctx.match[1];
+  await ctx.answerCbQuery();
+
+  if (choice === 'no') {
+    await ctx.editMessageText('Bekor qilindi. Qaytadan boshlash uchun: /start');
+    await resetSession(ctx);
+    return;
+  }
+
+  await ctx.deleteMessage().catch(() => {});
+  await showUpgradeTariffOptions(ctx);
 }
 
 export async function handleUpgradeTariffSelected(ctx: SessionContext & { match: RegExpExecArray }): Promise<void> {
@@ -328,15 +378,17 @@ export async function handleUpgradeTariffSelected(ctx: SessionContext & { match:
   await ctx.answerCbQuery();
 
   const tariff = await getTariff(tariffId);
-  if (!tariff) { await ctx.editMessageText("Noma'lum tarif."); return; }
+  const employeeCount = ctx.session.employeeCount;
+  if (!tariff || !employeeCount) { await ctx.editMessageText("Sessiya eskirgan. Qaytadan boshlang: /start"); return; }
 
   const sub: LatestSubscription | null = ctx.session.subPaidAmount !== undefined && ctx.session.subExpiresAt
     ? {
         id: '', company_id: ctx.session.companyId as string, tariff_id: ctx.session.subOldTariffId as string,
-        paid_amount: ctx.session.subPaidAmount, paid_at: '', expires_at: ctx.session.subExpiresAt,
+        paid_amount: ctx.session.subPaidAmount, paid_at: '', expires_at: ctx.session.subExpiresAt, employee_count: employeeCount,
       }
     : null;
-  const { discount, finalPrice } = computeProratedPrice(tariff.price, sub);
+  const total = tariff.price * employeeCount;
+  const { discount, finalPrice } = computeProratedPrice(total, sub);
 
   ctx.session.selectedTariffId = tariffId;
   ctx.session.discount = discount;
@@ -345,11 +397,11 @@ export async function handleUpgradeTariffSelected(ctx: SessionContext & { match:
 
   const lines = discount > 0
     ? [
-        `Yangi tarif narxi: *${formatSum(tariff.price)} so'm*`,
+        `Yangi tarif narxi: ${formatSum(tariff.price)} so'm/xodim × ${employeeCount} xodim = *${formatSum(total)} so'm*`,
         `Chegirma (oldin to'langan): *-${formatSum(discount)} so'm*`,
         `To'lash kerak: *${formatSum(finalPrice)} so'm*`,
       ]
-    : [`Yangi tarif narxi: *${formatSum(finalPrice)} so'm*`];
+    : [`Yangi tarif narxi: ${formatSum(tariff.price)} so'm/xodim × ${employeeCount} xodim = *${formatSum(finalPrice)} so'm*`];
 
   await ctx.editMessageText(
     [...lines, '', "To'lov qilamanmi?"].join('\n'),
@@ -367,10 +419,8 @@ export async function handleUpgradeConfirmPay(ctx: SessionContext & { match: Reg
   await ctx.answerCbQuery();
 
   if (choice === 'no') {
-    const allTariffs = await listTariffs();
-    const otherTariffs = allTariffs.filter((t) => t.id !== ctx.session.subOldTariffId);
-    ctx.session.step = 'upgrade_selecting_tariff';
-    await ctx.editMessageText("Qaysi tarifga o'zgartirmoqchisiz?", tariffSelectKeyboard(otherTariffs, 'upgrade_tariff'));
+    await ctx.deleteMessage().catch(() => {});
+    await showUpgradeTariffOptions(ctx);
     return;
   }
 
@@ -384,7 +434,7 @@ export async function handleUpgradeConfirmPay(ctx: SessionContext & { match: Reg
   }
 
   ctx.session.step = 'upgrade_awaiting_receipt';
-  await ctx.editMessageText([PAYMENT_CARD_TEXT, '', "To'lov qilgach, chek rasmini (screenshot/rasm) yuboring."].join('\n'), {
+  await ctx.editMessageText([PAYMENT_CARD_TEXT_UPGRADE, '', "To'lov qilgach, chek rasmini (screenshot/rasm) yuboring."].join('\n'), {
     parse_mode: 'Markdown',
   });
 }
@@ -411,8 +461,9 @@ async function finalizeTariffChangeRequest(ctx: SessionContext, receiptUrl: stri
   const discount = ctx.session.discount ?? 0;
   const finalPrice = ctx.session.finalPrice;
   const oldTariffId = ctx.session.subOldTariffId ?? null;
+  const employeeCount = ctx.session.employeeCount;
 
-  if (!companyId || !newTariffId || !fullName || !phone || finalPrice === undefined) {
+  if (!companyId || !newTariffId || !fullName || !phone || finalPrice === undefined || !employeeCount) {
     await ctx.reply('Sessiya eskirgan. Qaytadan boshlang: /start');
     await resetSession(ctx);
     return;
@@ -431,6 +482,7 @@ async function finalizeTariffChangeRequest(ctx: SessionContext, receiptUrl: stri
     discountApplied: discount,
     finalPrice,
     receiptFileId: receiptUrl,
+    employeeCount,
   });
 
   await ctx.reply("So'rovingiz tasdiqlash uchun yuborildi. Tez orada xabar beramiz.");
@@ -443,7 +495,7 @@ async function finalizeTariffChangeRequest(ctx: SessionContext, receiptUrl: stri
     `👤 Ism: ${escapeMarkdown(fullName)}`,
     `📱 Telefon: ${escapeMarkdown(phone)}`,
     `💬 Telegram: ${ctx.from!.username ? '@' + escapeMarkdown(ctx.from!.username) : "username yo'q"} (id: ${ctx.from!.id})`,
-    `📦 Yangi tarif: ${newTariff.name} — ${formatSum(finalPrice)} so'm${discount > 0 ? ` (chegirma: -${formatSum(discount)} so'm)` : ''}`,
+    `📦 Yangi tarif: ${newTariff.name}, ${employeeCount} xodim — ${formatSum(finalPrice)} so'm${discount > 0 ? ` (chegirma: -${formatSum(discount)} so'm)` : ''}`,
     `🕐 Vaqt: ${new Date().toISOString()}`,
   ].join('\n');
 
