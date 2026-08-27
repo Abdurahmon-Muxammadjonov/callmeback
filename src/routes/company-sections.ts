@@ -4,6 +4,7 @@ import { requireAuth, requireCompanyRole, type CompanyAuthedRequest } from '../m
 import { ALWAYS_UNLOCKED_SECTIONS, LOCKABLE_SECTIONS, isLockableSection } from '../lib/companySections';
 import { generateUnlockCode, hashUnlockCode, verifyUnlockCode } from '../lib/sectionUnlockCode';
 import { backfillPendingUnlockCalls } from './analyze-call';
+import { logAudit } from '../multi-tenant/lib/auditLog';
 
 const router = Router();
 
@@ -121,6 +122,60 @@ router.post('/sections/unlock', requireAuth, requireCompanyRole(['director', 'ad
   }
 
   return res.status(200).json({ success: true, data: { section_key, is_locked: false } });
+});
+
+// ============================================================================
+// POST /company/tariff/unlock — D.6: bot orqali to'langan, BUTUN tarifni bir
+// yo'la ochadigan kod (yuqoridagi /sections/unlock'dan farqli — u bitta
+// bo'lim uchun, bcrypt-hash'langan, SalesPulse admin qo'lda beradigan kod;
+// bu esa Bot 2 to'lovni tasdiqlaganda avtomatik generatsiya qilingan,
+// ochiq-matn, 30 daqiqa muddatli, butun tarifni ochadigan kod).
+// Butun amal supabase/tariff_payments_v2.sql'dagi redeem_unlock_code()
+// funksiyasida BITTA tranzaksiyada bajariladi.
+// ============================================================================
+router.post('/tariff/unlock', requireAuth, requireCompanyRole(['director', 'admin']), async (req: CompanyAuthedRequest, res: Response) => {
+  const { code } = req.body ?? {};
+  if (typeof code !== 'string' || !code.trim()) {
+    return res.status(400).json({ success: false, error: 'code majburiy.' });
+  }
+
+  // p_company_id — req.auth'dan olinadi, HECH QACHON body'dan emas: bu
+  // kodning FAQAT shu (chaqiruvchi) kompaniyaga tegishli ekanini kafolatlaydi
+  // (RPC ichida ham tekshiriladi — ikkala tomondan himoya). Muhim xato
+  // tuzatildi (adversarial review): avval bu tekshiruv umuman yo'q edi —
+  // istalgan kompaniyaning direktori boshqa kompaniyaning kodini
+  // ishlatishi mumkin edi.
+  const { data, error } = await supabase.rpc('redeem_unlock_code', {
+    p_code: code.trim().toUpperCase(),
+    p_company_id: req.auth!.companyId as string,
+    p_user_id: req.auth!.userId,
+  });
+
+  if (error) {
+    const msg = error.message || '';
+    if (msg.includes('UNLOCK_CODE_NOT_FOUND')) return res.status(400).json({ success: false, error: "Noto'g'ri kod." });
+    if (msg.includes('UNLOCK_CODE_USED')) return res.status(400).json({ success: false, error: 'Bu kod allaqachon ishlatilgan.' });
+    if (msg.includes('UNLOCK_CODE_EXPIRED')) return res.status(400).json({ success: false, error: "Kod muddati tugagan (30 daqiqa) — botdan yangi kod so'rang." });
+    if (msg.includes('UNLOCK_CODE_WRONG_COMPANY')) return res.status(403).json({ success: false, error: 'Bu kod boshqa kompaniyaga tegishli.' });
+    return res.status(500).json({ success: false, error: `Database Error: ${msg}` });
+  }
+
+  const result = data as { company_id: string; tariff_id: string; tariff_key: string; unlocked_sections: string[] };
+
+  // call_analytics shu safar ochilgan bo'lsa — kutib turgan (pending_unlock)
+  // qo'ng'iroqlarni qayta navbatga qo'yamiz (xuddi /sections/unlock kabi).
+  if (result.unlocked_sections.includes('call_analytics')) {
+    void backfillPendingUnlockCalls(supabase, result.company_id);
+  }
+
+  await logAudit({
+    companyId: result.company_id,
+    userId: req.auth!.userId,
+    action: 'unlock_code_redeemed',
+    metadata: { tariff_key: result.tariff_key, unlocked_sections: result.unlocked_sections },
+  });
+
+  return res.status(200).json({ success: true, data: { unlocked_sections: result.unlocked_sections } });
 });
 
 // ============================================================================

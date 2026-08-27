@@ -7,7 +7,12 @@ export type AuditAction =
   | 'crm_credentials_updated'
   | 'role_changed'
   | 'tariff_request_approved'
-  | 'tariff_request_rejected';
+  | 'tariff_request_rejected'
+  | 'key_request_approved'
+  | 'key_request_rejected'
+  | 'tariff_change_request_approved'
+  | 'tariff_change_request_rejected'
+  | 'unlock_code_redeemed';
 
 interface LogAuditParams {
   companyId: string;

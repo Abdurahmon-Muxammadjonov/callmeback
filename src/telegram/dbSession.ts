@@ -23,6 +23,12 @@ export interface BotSession {
   selectedTariffId?: string;
   pendingRequestId?: string;
   rejectingRequestId?: string; // Bot 2: "sababni yozing" kutilayotgan so'rov id'si
+  // --- to'lov/proratsiya (Part D qayta qurilishi) — fullName/phone yuqorida bor ---
+  subOldTariffId?: string | null;
+  subPaidAmount?: number;
+  subExpiresAt?: string;
+  discount?: number;
+  finalPrice?: number;
   [key: string]: unknown;
 }
 

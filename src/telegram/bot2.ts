@@ -1,7 +1,11 @@
 import { Telegraf } from 'telegraf';
 import { dbSession, type SessionContext } from './dbSession';
-import { approveTariffRequest, rejectTariffRequest } from '../lib/tariffRequests';
-import { SECTION_LABELS, type LockableSection } from '../lib/companySections';
+import {
+  approveKeyRequest,
+  rejectKeyRequest,
+  approveTariffChangeRequest,
+  rejectTariffChangeRequest,
+} from '../lib/tariffPayments';
 import { notifyUserApproved, notifyUserRejected } from './notifyUser';
 
 const token = process.env.TELEGRAM_BOT2_TOKEN;
@@ -23,7 +27,7 @@ bot2.use(dbSession(2));
 
 // Har bir yangilanishda: whitelist'da yo'q foydalanuvchidan kelgan
 // HAR QANDAY narsa (matn ham, callback ham) e'tiborsiz qoldiriladi —
-// spec 6-band: "reject/ignore any callback from other users."
+// spec D.7 band 8: "Non-whitelisted Telegram ID cannot trigger Bot 2 actions."
 bot2.use(async (ctx, next) => {
   const id = ctx.from?.id;
   if (!id || !isWhitelistedAdmin(id)) {
@@ -34,51 +38,94 @@ bot2.use(async (ctx, next) => {
 });
 
 bot2.command('start', async (ctx) => {
-  await ctx.reply("SalesPulse admin tasdiqlash boti. Yangi to'lov so'rovlari shu yerga tushadi.");
+  await ctx.reply("SalesPulse admin tasdiqlash boti. Yangi to'lov so'rovlari (chek surati bilan) shu yerga tushadi.");
 });
 
-bot2.action(/^tariff_approve:(.+)$/, async (ctx) => {
+// Rad etish sababi kutilayotganda emas — tasdiqlash tugmasi bosilganda,
+// chek surati ostidagi caption'ni "TASDIQLANDI" deb belgilab qo'yamiz.
+async function markCaptionResolved(ctx: any, verdict: string): Promise<void> {
+  try {
+    const original = (ctx.callbackQuery?.message as any)?.caption || '';
+    await ctx.editMessageCaption(`${original}\n\n${verdict} (${new Date().toLocaleString('uz-UZ')})`, { parse_mode: 'Markdown' });
+  } catch {
+    // caption o'zgartirib bo'lmasa ham (masalan 48 soatdan eski xabar) — asosiy amal davom etadi
+  }
+}
+
+// ============================================================================
+// "Kalit olish" (key_requests) — D.5
+// ============================================================================
+bot2.action(/^key_approve:(.+)$/, async (ctx) => {
   const requestId = ctx.match[1];
   await ctx.answerCbQuery();
   try {
-    const result = await approveTariffRequest(requestId, String(ctx.from!.id));
-    const codesText = result.issuedCodes.length > 0
-      ? result.issuedCodes.map((c) => `• *${SECTION_LABELS[c.sectionKey as LockableSection]}*: \`${c.code}\``).join('\n')
-      : '(barcha kiritilgan bo\'limlar allaqachon ochilgan — yangi kod kerak emas)';
-    await ctx.editMessageText(
-      `${(ctx.callbackQuery.message as any)?.text || ''}\n\n✅ *TASDIQLANDI* (${new Date().toLocaleString('uz-UZ')})`,
-      { parse_mode: 'Markdown' },
-    ).catch(() => {});
-    await ctx.reply(`Tasdiqlandi. Foydalanuvchiga yuborilgan kodlar:\n${codesText}`, { parse_mode: 'Markdown' });
-    await notifyUserApproved(result.telegramId, result.tariffName, result.issuedCodes);
+    const result = await approveKeyRequest(requestId, String(ctx.from!.id));
+    await markCaptionResolved(ctx, '✅ *TASDIQLANDI*');
+    await ctx.reply(`Tasdiqlandi. Foydalanuvchiga yuborilgan kalit: \`${result.code}\``, { parse_mode: 'Markdown' });
+    await notifyUserApproved(result.telegramId, result.tariffName, result.code, false);
   } catch (e: any) {
     await ctx.reply(`Xato: ${e?.message || 'tasdiqlab bo\'lmadi'}`);
   }
 });
 
-bot2.action(/^tariff_reject:(.+)$/, async (ctx) => {
+bot2.action(/^key_reject:(.+)$/, async (ctx) => {
   const requestId = ctx.match[1];
   await ctx.answerCbQuery();
   ctx.session.rejectingRequestId = requestId;
-  ctx.session.step = 'awaiting_rejection_reason';
+  ctx.session.step = 'awaiting_key_rejection_reason';
   await ctx.reply("Rad etish sababini yozing:");
 });
 
+// ============================================================================
+// "Tarifni o'zgartirish" (tariff_change_requests) — D.5
+// ============================================================================
+bot2.action(/^tariffchange_approve:(.+)$/, async (ctx) => {
+  const requestId = ctx.match[1];
+  await ctx.answerCbQuery();
+  try {
+    const result = await approveTariffChangeRequest(requestId, String(ctx.from!.id));
+    await markCaptionResolved(ctx, '✅ *TASDIQLANDI*');
+    await ctx.reply(`Tasdiqlandi. Foydalanuvchiga yuborilgan kalit: \`${result.code}\``, { parse_mode: 'Markdown' });
+    await notifyUserApproved(result.telegramId, result.tariffName, result.code, true);
+  } catch (e: any) {
+    await ctx.reply(`Xato: ${e?.message || 'tasdiqlab bo\'lmadi'}`);
+  }
+});
+
+bot2.action(/^tariffchange_reject:(.+)$/, async (ctx) => {
+  const requestId = ctx.match[1];
+  await ctx.answerCbQuery();
+  ctx.session.rejectingRequestId = requestId;
+  ctx.session.step = 'awaiting_tariffchange_rejection_reason';
+  await ctx.reply("Rad etish sababini yozing:");
+});
+
+// ============================================================================
+// Rad etish sababi — matn xabari orqali (har ikkala oqim uchun umumiy)
+// ============================================================================
 bot2.on('text', async (ctx) => {
-  if (ctx.session.step !== 'awaiting_rejection_reason' || !ctx.session.rejectingRequestId) {
+  const step = ctx.session.step;
+  const requestId = ctx.session.rejectingRequestId as string | undefined;
+
+  if ((step !== 'awaiting_key_rejection_reason' && step !== 'awaiting_tariffchange_rejection_reason') || !requestId) {
     await ctx.reply("Hozircha kutilayotgan amal yo'q. Yangi so'rovlar avtomatik shu yerga tushadi.");
     return;
   }
 
   const reason = (ctx.message as any).text.trim();
-  const requestId = ctx.session.rejectingRequestId as string;
   ctx.session.rejectingRequestId = undefined;
   ctx.session.step = undefined;
 
   try {
-    const result = await rejectTariffRequest(requestId, String(ctx.from!.id), reason);
-    await ctx.reply(`Rad etildi. Sabab foydalanuvchiga yuborildi: "${reason}"`);
-    await notifyUserRejected(result.telegramId, reason);
+    if (step === 'awaiting_key_rejection_reason') {
+      const result = await rejectKeyRequest(requestId, String(ctx.from!.id), reason);
+      await ctx.reply(`Rad etildi. Sabab foydalanuvchiga yuborildi: "${reason}"`);
+      await notifyUserRejected(result.telegramId, reason);
+    } else {
+      const result = await rejectTariffChangeRequest(requestId, String(ctx.from!.id), reason);
+      await ctx.reply(`Rad etildi. Sabab foydalanuvchiga yuborildi: "${reason}"`);
+      await notifyUserRejected(result.telegramId, reason);
+    }
   } catch (e: any) {
     await ctx.reply(`Xato: ${e?.message || 'rad etib bo\'lmadi'}`);
   }

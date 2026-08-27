@@ -28,12 +28,15 @@ import {
   enterGetCodeFlowFromMenu,
   enterUpgradeFlowFromMenu,
   handleMenuGetCodePhoneText,
-  handlePaidNo,
-  handlePaidYes,
   handleGetCodeTariffSelected,
+  handleGetCodeNameText,
+  handleGetCodePhoneText,
+  handleGetCodeReceiptPhoto,
+  handleUpgradeNameText,
   handleUpgradePhoneText,
   handleUpgradeTariffSelected,
-  handleUpgradeConfirm,
+  handleUpgradeConfirmPay,
+  handleUpgradeReceiptPhoto,
 } from './tariffFlow';
 
 bot1.use(dbSession(1));
@@ -60,14 +63,21 @@ bot1.action(/^tariff_confirm:(yes|no)$/, (ctx) => onTariffConfirm(ctx as any));
 bot1.action(/^duration:(\d+)$/, (ctx) => onDurationSelected(ctx as any));
 bot1.action(/^final_confirm:(yes|no)$/, (ctx) => onFinalConfirm(ctx as any));
 
-// --- Yangi tarif-ochish oqimi (callback tugmalari) ---
-bot1.action('paid:no', (ctx) => handlePaidNo(ctx as SessionContext));
-bot1.action('paid:yes', (ctx) => handlePaidYes(ctx as SessionContext));
-bot1.action(/^get_code_tariff:(.+)$/, (ctx) => handleGetCodeTariffSelected(ctx as any));
+// --- Yangi tarif-ochish oqimi (callback tugmalari) — Part D qayta qurilishi ---
+bot1.action(/^getcode_tariff:(.+)$/, (ctx) => handleGetCodeTariffSelected(ctx as any));
 bot1.action(/^upgrade_tariff:(.+)$/, (ctx) => handleUpgradeTariffSelected(ctx as any));
-bot1.action(/^upgrade_confirm:(yes|no)$/, (ctx) => handleUpgradeConfirm(ctx as any));
+bot1.action(/^upgrade_pay:(yes|no)$/, (ctx) => handleUpgradeConfirmPay(ctx as any));
 
 bot1.on('contact', (ctx) => handlePhoneContact(ctx as SessionContext));
+
+// Chek surati — faqat tegishli bosqichda kutilmoqda bo'lsa ishlaydi (D.3/D.4).
+bot1.on('photo', async (ctx) => {
+  const sctx = ctx as SessionContext;
+  const step = sctx.session.step;
+  if (step === 'getcode_awaiting_receipt') return handleGetCodeReceiptPhoto(sctx);
+  if (step === 'upgrade_awaiting_receipt') return handleUpgradeReceiptPhoto(sctx);
+  // Kutilmagan rasm — e'tiborsiz qoldiriladi (masalan tasodifiy yuborilgan bo'lsa).
+});
 
 bot1.on('text', async (ctx) => {
   const sctx = ctx as SessionContext;
@@ -76,6 +86,9 @@ bot1.on('text', async (ctx) => {
   const state = sctx.session.state;
 
   // Yangi oqim matn-kutish bosqichlari — eng avval tekshiriladi.
+  if (step === 'getcode_awaiting_name') return handleGetCodeNameText(sctx, text);
+  if (step === 'getcode_awaiting_phone') return handleGetCodePhoneText(sctx, text);
+  if (step === 'upgrade_awaiting_name') return handleUpgradeNameText(sctx, text);
   if (step === 'upgrade_awaiting_phone') return handleUpgradePhoneText(sctx, text);
   if (step === 'menu_get_code_awaiting_phone') return handleMenuGetCodePhoneText(sctx, text);
 
