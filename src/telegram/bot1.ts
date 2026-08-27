@@ -6,6 +6,8 @@ import {
   sendPlatformInfo,
   sendPricingBrowse,
   sendAdminContactInfo,
+  enterFeedbackFlow,
+  handleFeedbackText,
   cancelFlow,
 } from './handlers/menu';
 import {
@@ -21,7 +23,7 @@ import {
   handleCompany,
 } from './handlers/purchase';
 import { handleFreeformQuestion } from './handlers/faq';
-import { MENU_INFO, MENU_PRICING, MENU_BUY, MENU_ADMIN, MENU_GET_CODE, MENU_UPGRADE } from './keyboards';
+import { MENU_INFO, MENU_PRICING, MENU_BUY, MENU_ADMIN, MENU_GET_CODE, MENU_UPGRADE, MENU_FEEDBACK } from './keyboards';
 import {
   enterGetCodeFlow,
   enterUpgradeFlow,
@@ -95,6 +97,7 @@ bot1.on('text', async (ctx) => {
   if (step === 'upgrade_awaiting_name') return handleUpgradeNameText(sctx, text);
   if (step === 'upgrade_awaiting_phone') return handleUpgradePhoneText(sctx, text);
   if (step === 'menu_get_code_awaiting_phone') return handleMenuGetCodePhoneText(sctx, text);
+  if (step === 'feedback_awaiting_text') return handleFeedbackText(sctx, text);
 
   // Eski marketing oqimi bosqichlari.
   if (state === 'awaiting_employee_count') return handleEmployeeCount(sctx, text);
@@ -108,6 +111,7 @@ bot1.on('text', async (ctx) => {
   if (text === MENU_GET_CODE) return enterGetCodeFlowFromMenu(sctx);
   if (text === MENU_UPGRADE) return enterUpgradeFlowFromMenu(sctx);
   if (text === MENU_ADMIN) return sendAdminContactInfo(sctx);
+  if (text === MENU_FEEDBACK) return enterFeedbackFlow(sctx);
   if (text === '❌ Bekor qilish') return cancelFlow(sctx);
 
   return handleFreeformQuestion(sctx, text);

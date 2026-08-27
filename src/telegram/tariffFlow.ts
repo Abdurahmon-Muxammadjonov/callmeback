@@ -31,7 +31,7 @@ const PAYMENT_CARD_TEXT_UPGRADE = "💳 Karta: 8600 1404 7274 5281 (A.X.M)";
 // console.error'ga yoziladi, hech kimga ko'rinmaydi) — adversarial review'da
 // topilgan CRITICAL xato, shu sabab har bir interpolatsiya qilingan
 // foydalanuvchi matni shu funksiya orqali o'tishi SHART.
-function escapeMarkdown(text: string): string {
+export function escapeMarkdown(text: string): string {
   return text.replace(/([_*`[])/g, '\\$1');
 }
 
