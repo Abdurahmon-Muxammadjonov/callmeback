@@ -17,12 +17,13 @@ export const MENU_UPGRADE = '⬆️ Tarifni oshirish';
 export const MENU_FEEDBACK = '📝 Etiroz/Tavsiya';
 
 // Joylashuv: 1-tugma (kompaniya/platforma haqida) TO'LIQ qatorni egallaydi,
-// qolgan 6 tasi 3+3 qilib yonma-yon joylashadi (chiroyli, ixcham ko'rinish
-// uchun — foydalanuvchi shunday so'radi).
+// qolgan 6 tasi 2 USTUN qilib (chapda 3, o'ngda 3 — har qatorda bittadan
+// juft) joylashadi (foydalanuvchi shunday so'radi).
 export const MAIN_MENU = Markup.keyboard([
   [MENU_INFO],
-  [MENU_PRICING, MENU_BUY, MENU_GET_CODE],
-  [MENU_UPGRADE, MENU_ADMIN, MENU_FEEDBACK],
+  [MENU_PRICING, MENU_UPGRADE],
+  [MENU_BUY, MENU_ADMIN],
+  [MENU_GET_CODE, MENU_FEEDBACK],
 ])
   .resize()
   .persistent();
