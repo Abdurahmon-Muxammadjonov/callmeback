@@ -12,12 +12,13 @@ export const MENU_ADMIN = "👨‍💼 Admin bilan bog'lanish";
 export const MENU_GET_CODE = '🎟 Kod olish';
 export const MENU_UPGRADE = '⬆️ Tarifni oshirish';
 
+// Joylashuv: 1-tugma (kompaniya/platforma haqida) TO'LIQ qatorni egallaydi,
+// qolgan 5 tasi 3+2 qilib yonma-yon joylashadi (chiroyli, ixcham ko'rinish
+// uchun — foydalanuvchi shunday so'radi).
 export const MAIN_MENU = Markup.keyboard([
   [MENU_INFO],
-  [MENU_PRICING],
-  [MENU_BUY],
-  [MENU_GET_CODE, MENU_UPGRADE],
-  [MENU_ADMIN],
+  [MENU_PRICING, MENU_BUY, MENU_GET_CODE],
+  [MENU_UPGRADE, MENU_ADMIN],
 ])
   .resize()
   .persistent();
