@@ -12,6 +12,7 @@ import {
   findLatestSubscriptionByPhone,
   computeProratedPrice,
   isSubscriptionActive,
+  normalizePhone,
   type TariffRow,
   type LatestSubscription,
 } from '../lib/tariffPayments';
@@ -96,17 +97,32 @@ async function extractReceiptUrl(ctx: SessionContext): Promise<string> {
 // ============================================================================
 // Telefon raqami orqali kompaniya topish — deep-link'siz (menyudan to'g'ridan
 // -to'g'ri kirilganda).
+//
+// DIQQAT: `users.phone` ro'yxatdan o'tish/profil tahrirlashda ANIQ QANDAY
+// yozilgan bo'lsa shundayligicha saqlanadi (hech qanday normalizatsiyasiz —
+// src/routes/users.ts) — "+998901234567" va "+998 90 123 45 67" boshqa-
+// boshqa satr hisoblanadi. Oldin `.eq('phone', phone)` bilan ANIQ mos
+// kelishi kerak edi, shu sabab foydalanuvchi bo'sh joy/format bilan biroz
+// boshqacha yozsa "topilmadi" bo'lardi. Endi src/routes/crm.ts'dagi
+// findClientByPhone() bilan bir xil naqsh: nomzodlarni olib, normalize_phone
+// (oxirgi 9 raqam) bo'yicha JS'da solishtiramiz.
 // ============================================================================
 async function findCompanyByPhone(phone: string): Promise<{ id: string; name: string } | null> {
-  const { data: user } = await supabase
-    .from('users')
-    .select('company_id')
-    .eq('phone', phone)
-    .eq('role', 'director')
-    .maybeSingle();
-  if (!user) return null;
+  const normalized = normalizePhone(phone);
+  if (!normalized) return null;
 
-  const { data: company } = await supabase.from('companies').select('id, name').eq('id', user.company_id).maybeSingle();
+  const { data: candidates } = await supabase
+    .from('users')
+    .select('phone, company_id')
+    .eq('role', 'director')
+    .not('phone', 'is', null)
+    .limit(500);
+  if (!candidates) return null;
+
+  const match = candidates.find((u) => normalizePhone(String(u.phone || '')) === normalized);
+  if (!match) return null;
+
+  const { data: company } = await supabase.from('companies').select('id, name').eq('id', match.company_id).maybeSingle();
   return company || null;
 }
 

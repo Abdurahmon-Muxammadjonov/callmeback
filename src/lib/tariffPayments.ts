@@ -40,7 +40,7 @@ export async function getTariff(id: string): Promise<TariffRow | null> {
 // tomonidagi normalize_phone() bilan bir xil qoida (src/routes/crm.ts'dagi
 // normalizePhone() ham xuddi shu qoida, mustaqil nusxa — u yerdan import
 // qilish route->lib bog'liqligini teskari aylantirar edi).
-function normalizePhone(raw: string): string {
+export function normalizePhone(raw: string): string {
   const digits = (raw || '').replace(/\D+/g, '');
   if (!digits) return '';
   return digits.length <= 9 ? digits : digits.slice(-9);
