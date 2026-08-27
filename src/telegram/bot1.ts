@@ -29,18 +29,16 @@ import {
   enterUpgradeFlow,
   enterGetCodeFlowFromMenu,
   enterUpgradeFlowFromMenu,
-  handleMenuGetCodePhoneText,
-  handleMenuGetCodeCompanyNameText,
   handleGetCodeTariffSelected,
+  handleGetCodeEmployeeCountText,
   handleGetCodeNameText,
   handleGetCodePhoneText,
-  handleGetCodeEmployeeCountText,
+  handleGetCodeCompanyNameText,
   handleGetCodeReceiptPhoto,
+  handleUpgradeEmployeeCountText,
   handleUpgradeNameText,
   handleUpgradePhoneText,
-  handleUpgradeCompanyNameFallbackText,
-  handleUpgradeEmployeeCountFallbackText,
-  handleUpgradeConfirmCurrent,
+  handleUpgradeCompanyNameText,
   handleUpgradeTariffSelected,
   handleUpgradeConfirmPay,
   handleUpgradeReceiptPhoto,
@@ -72,7 +70,6 @@ bot1.action(/^final_confirm:(yes|no)$/, (ctx) => onFinalConfirm(ctx as any));
 
 // --- Yangi tarif-ochish oqimi (callback tugmalari) — Part D qayta qurilishi ---
 bot1.action(/^getcode_tariff:(.+)$/, (ctx) => handleGetCodeTariffSelected(ctx as any));
-bot1.action(/^upgrade_current:(yes|no)$/, (ctx) => handleUpgradeConfirmCurrent(ctx as any));
 bot1.action(/^upgrade_tariff:(.+)$/, (ctx) => handleUpgradeTariffSelected(ctx as any));
 bot1.action(/^upgrade_pay:(yes|no)$/, (ctx) => handleUpgradeConfirmPay(ctx as any));
 
@@ -94,15 +91,14 @@ bot1.on('text', async (ctx) => {
   const state = sctx.session.state;
 
   // Yangi oqim matn-kutish bosqichlari — eng avval tekshiriladi.
+  if (step === 'getcode_awaiting_employee_count') return handleGetCodeEmployeeCountText(sctx, text);
   if (step === 'getcode_awaiting_name') return handleGetCodeNameText(sctx, text);
   if (step === 'getcode_awaiting_phone') return handleGetCodePhoneText(sctx, text);
-  if (step === 'getcode_awaiting_employee_count') return handleGetCodeEmployeeCountText(sctx, text);
+  if (step === 'getcode_awaiting_company_name') return handleGetCodeCompanyNameText(sctx, text);
+  if (step === 'upgrade_awaiting_employee_count') return handleUpgradeEmployeeCountText(sctx, text);
   if (step === 'upgrade_awaiting_name') return handleUpgradeNameText(sctx, text);
   if (step === 'upgrade_awaiting_phone') return handleUpgradePhoneText(sctx, text);
-  if (step === 'upgrade_awaiting_company_name_fallback') return handleUpgradeCompanyNameFallbackText(sctx, text);
-  if (step === 'upgrade_awaiting_employee_count_fallback') return handleUpgradeEmployeeCountFallbackText(sctx, text);
-  if (step === 'menu_get_code_awaiting_phone') return handleMenuGetCodePhoneText(sctx, text);
-  if (step === 'menu_get_code_awaiting_company_name') return handleMenuGetCodeCompanyNameText(sctx, text);
+  if (step === 'upgrade_awaiting_company_name') return handleUpgradeCompanyNameText(sctx, text);
   if (step === 'feedback_awaiting_text') return handleFeedbackText(sctx, text);
 
   // Eski marketing oqimi bosqichlari.

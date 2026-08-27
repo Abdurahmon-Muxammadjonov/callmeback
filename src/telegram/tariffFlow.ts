@@ -9,20 +9,30 @@ import {
   getTariff,
   createKeyRequest,
   createTariffChangeRequest,
-  findLatestSubscriptionByPhone,
   computeProratedPrice,
-  isSubscriptionActive,
-  normalizePhone,
   type TariffRow,
   type LatestSubscription,
 } from '../lib/tariffPayments';
 
-// Part D qayta qurilishi: "Kalit olish" (D.3) va "Tarifni o'zgartirish"
-// (D.4) — to'liq spec bo'yicha, chek surati + proratsiya bilan.
+// Part D qayta qurilishi: "Kalit olish" va "Tarifni o'zgartirish" — ikkalasi
+// ham BIR XIL bosqich tartibida (foydalanuvchi shunday so'radi, Reviziya 4):
+//   1. Xodimlar soni
+//   2. Ism va familiya
+//   3. Telefon raqam
+//   4. Kompaniya nomi (companies.name bo'yicha qidiriladi — kompaniya SAYTDA
+//      allaqachon ro'yxatdan o'tgan bo'lishi SHART, chunki kodni faqat
+//      shu kompaniyaning saytga KIRGAN foydalanuvchisi ishlata oladi)
+//   5. To'lov: narx + karta (bitta, ikkala oqim uchun umumiy)
+//   6. Chek rasmi -> "So'rovingiz qabul qilindi" -> Bot 2'ga forward
+//
+// "Tarifni o'zgartirish"da bundan tashqari: kompaniya nomi topilgach, o'sha
+// kompaniyaning oxirgi obunasi (agar bo'lsa) company_id bo'yicha qidiriladi
+// va proratsiya (chegirma) shunga qarab hisoblanadi — lekin xodimlar soni
+// endi HAR DOIM 1-bosqichda so'raladi (avvalgi versiyada obunadan meros
+// olinardi — foydalanuvchi ikkala oqim bir xil bo'lishini so'ragач bu
+// farq olib tashlandi).
 
-// Reviziya 3: ikki oqim ikki XIL kartadan foydalanadi.
-const PAYMENT_CARD_TEXT_GETCODE = "💳 Karta: 5614 6865 0400 6860 (A.L)";
-const PAYMENT_CARD_TEXT_UPGRADE = "💳 Karta: 8600 1404 7274 5281 (A.X.M)";
+const PAYMENT_CARD_TEXT = "💳 Karta: 8600 1404 7274 5281 (A.X.M)";
 
 // Telegram'ning (legacy) 'Markdown' parse_mode'i 4 ta belgini maxsus
 // deb hisoblaydi: _ * ` [ — foydalanuvchi matnida (ism, familiya, Telegram
@@ -72,7 +82,7 @@ async function forwardToBot2(params: {
   }
 }
 
-// Reviziya 3: tariffs.price endi BITTA XODIMGA narx — tugmada shunday ko'rsatiladi.
+// tariffs.price — bitta xodimga narx — tugmada shunday ko'rsatiladi.
 function tariffSelectKeyboard(tariffs: TariffRow[], prefix: string) {
   return Markup.inlineKeyboard(
     tariffs.map((t) => [Markup.button.callback(`${t.name} — ${formatSum(t.price)} so'm/xodim`, `${prefix}:${t.id}`)]),
@@ -82,6 +92,22 @@ function tariffSelectKeyboard(tariffs: TariffRow[], prefix: string) {
 async function getCompanyName(companyId: string): Promise<string> {
   const { data } = await supabase.from('companies').select('name').eq('id', companyId).maybeSingle();
   return data?.name || "Noma'lum kompaniya";
+}
+
+// Kompaniya NOMI bo'yicha qidiradi (avval aniq — katta-kichik harfsiz mos
+// kelish, topilmasa qisman mos kelish). Faqat MAVJUD companies qatorini
+// topadi, yangisini yaratmaydi — kod faqat saytga KIRGAN (parolli hisobga
+// ega) foydalanuvchi tomonidan ishlatilishi mumkin, bot orqali yangi hisob
+// yaratilmaydi.
+async function findCompanyByName(name: string): Promise<{ id: string; name: string } | null> {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+
+  const { data: exact } = await supabase.from('companies').select('id, name').ilike('name', trimmed).limit(1).maybeSingle();
+  if (exact) return exact;
+
+  const { data: partial } = await supabase.from('companies').select('id, name').ilike('name', `%${trimmed}%`).limit(1).maybeSingle();
+  return partial || null;
 }
 
 // Rasm xabaridan eng katta o'lchamdagi file_id'ni oladi va Bot 1'ning fayl
@@ -94,93 +120,18 @@ async function extractReceiptUrl(ctx: SessionContext): Promise<string> {
   return downloadAndStoreReceipt(fileLink.toString());
 }
 
-// ============================================================================
-// Telefon raqami orqali kompaniya topish — deep-link'siz (menyudan to'g'ridan
-// -to'g'ri kirilganda).
-//
-// DIQQAT: `users.phone` ro'yxatdan o'tish/profil tahrirlashda ANIQ QANDAY
-// yozilgan bo'lsa shundayligicha saqlanadi (hech qanday normalizatsiyasiz —
-// src/routes/users.ts) — "+998901234567" va "+998 90 123 45 67" boshqa-
-// boshqa satr hisoblanadi. Oldin `.eq('phone', phone)` bilan ANIQ mos
-// kelishi kerak edi, shu sabab foydalanuvchi bo'sh joy/format bilan biroz
-// boshqacha yozsa "topilmadi" bo'lardi. Endi src/routes/crm.ts'dagi
-// findClientByPhone() bilan bir xil naqsh: nomzodlarni olib, normalize_phone
-// (oxirgi 9 raqam) bo'yicha JS'da solishtiramiz.
-// ============================================================================
-async function findCompanyByPhone(phone: string): Promise<{ id: string; name: string } | null> {
-  const normalized = normalizePhone(phone);
-  if (!normalized) return null;
-
-  const { data: candidates } = await supabase
-    .from('users')
-    .select('phone, company_id')
-    .eq('role', 'director')
-    .not('phone', 'is', null)
-    .limit(500);
-  if (!candidates) return null;
-
-  const match = candidates.find((u) => normalizePhone(String(u.phone || '')) === normalized);
-  if (!match) return null;
-
-  const { data: company } = await supabase.from('companies').select('id, name').eq('id', match.company_id).maybeSingle();
-  return company || null;
-}
-
-// Zaxira qidiruv: telefon bo'yicha topilmasa (masalan direktor boshqa
-// raqamdan yozayotgan bo'lsa), kompaniya NOMI bo'yicha qidiramiz — avval
-// aniq (katta-kichik harfsiz) mos kelish, topilmasa qisman qidiruv.
-// Foydalanuvchi allaqachon saytda ro'yxatdan o'tgan bo'lishi SHART — bu
-// funksiya faqat MAVJUD companies qatorini topadi, yangisini yaratmaydi
-// (chunki hisobga kirish uchun parol/users qatori kerak, botda yaratilmaydi).
-async function findCompanyByName(name: string): Promise<{ id: string; name: string } | null> {
-  const trimmed = name.trim();
-  if (!trimmed) return null;
-
-  const { data: exact } = await supabase.from('companies').select('id, name').ilike('name', trimmed).limit(1).maybeSingle();
-  if (exact) return exact;
-
-  const { data: partial } = await supabase.from('companies').select('id, name').ilike('name', `%${trimmed}%`).limit(1).maybeSingle();
-  return partial || null;
+function parsePositiveInt(text: string): number | null {
+  const n = Number.parseInt(text.replace(/\D/g, ''), 10);
+  return Number.isFinite(n) && n >= 1 ? n : null;
 }
 
 // ============================================================================
-// Menyudan to'g'ridan-to'g'ri kirish (deep-link'siz)
+// Menyudan to'g'ridan-to'g'ri kirish (deep-link'siz) — ikkalasi ham darhol
+// bir xil bosqichlar ketma-ketligini boshlaydi (companyId hali noma'lum,
+// 4-bosqichda kompaniya nomi orqali aniqlanadi).
 // ============================================================================
 export async function enterGetCodeFlowFromMenu(ctx: SessionContext): Promise<void> {
-  await resetSession(ctx);
-  ctx.session.step = 'menu_get_code_awaiting_phone';
-  await ctx.reply("Hisobingizni topish uchun telefon raqamingizni kiriting (masalan: +998901234567):");
-}
-
-export async function handleMenuGetCodePhoneText(ctx: SessionContext, text: string): Promise<void> {
-  const phone = text.trim();
-  const company = await findCompanyByPhone(phone);
-  if (company) {
-    await enterGetCodeFlow(ctx, company.id);
-    // Kompaniyani aniqlash uchun ishlatilgan raqamni qayta so'ramaslik uchun
-    // saqlab qo'yamiz — getcode oqimi buni ko'rib, telefon bosqichini o'tkazib yuboradi.
-    ctx.session.phone = phone;
-    return;
-  }
-
-  // Telefon bo'yicha topilmadi — zaxira: kompaniya nomi bo'yicha qidiramiz
-  // (masalan direktor boshqa raqamdan yozayotgan bo'lishi mumkin, lekin
-  // saytda allaqachon ro'yxatdan o'tgan).
-  ctx.session.phone = phone;
-  ctx.session.step = 'menu_get_code_awaiting_company_name';
-  await ctx.reply("Bu raqam bilan hisob topilmadi. Kompaniyangiz nomini kiriting:");
-}
-
-export async function handleMenuGetCodeCompanyNameText(ctx: SessionContext, text: string): Promise<void> {
-  const company = await findCompanyByName(text.trim());
-  if (!company) {
-    await ctx.reply("Bunday nomdagi kompaniya ham topilmadi. Iltimos, avval saytda ro'yxatdan o'ting yoki admin bilan bog'laning.");
-    await resetSession(ctx);
-    return;
-  }
-  const phone = ctx.session.phone;
-  await enterGetCodeFlow(ctx, company.id);
-  if (phone) ctx.session.phone = phone;
+  await enterGetCodeFlow(ctx, '');
 }
 
 export async function enterUpgradeFlowFromMenu(ctx: SessionContext): Promise<void> {
@@ -191,11 +142,9 @@ export async function enterUpgradeFlowFromMenu(ctx: SessionContext): Promise<voi
 // PART D.3 — "Kalit olish" oqimi (birinchi xarid)
 // ============================================================================
 export async function enterGetCodeFlow(ctx: SessionContext, companyId: string): Promise<void> {
-  const phone = ctx.session.phone; // menyu-orqali kirishda allaqachon aniqlangan bo'lishi mumkin
   await resetSession(ctx);
   ctx.session.flow = 'get_code';
-  ctx.session.companyId = companyId;
-  if (phone) ctx.session.phone = phone;
+  ctx.session.companyId = companyId || undefined;
 
   const tariffs = await listTariffs();
   ctx.session.step = 'getcode_selecting_tariff';
@@ -210,8 +159,16 @@ export async function handleGetCodeTariffSelected(ctx: SessionContext & { match:
   if (!tariff) { await ctx.editMessageText("Noma'lum tarif."); return; }
 
   ctx.session.selectedTariffId = tariffId;
-  ctx.session.step = 'getcode_awaiting_name';
+  ctx.session.step = 'getcode_awaiting_employee_count';
   await ctx.editMessageText(`Siz *${tariff.name}* tarifini tanladingiz.`, { parse_mode: 'Markdown' });
+  await ctx.reply("Nechta xodimingiz bor?");
+}
+
+export async function handleGetCodeEmployeeCountText(ctx: SessionContext, text: string): Promise<void> {
+  const n = parsePositiveInt(text);
+  if (!n) { await ctx.reply('Iltimos, ijobiy butun son kiriting (masalan: 5).'); return; }
+  ctx.session.employeeCount = n;
+  ctx.session.step = 'getcode_awaiting_name';
   await ctx.reply("Ism va familiyangizni kiriting:");
 }
 
@@ -219,30 +176,26 @@ export async function handleGetCodeNameText(ctx: SessionContext, text: string): 
   const name = text.trim();
   if (!name) { await ctx.reply('Iltimos, ism va familiyangizni kiriting.'); return; }
   ctx.session.fullName = name;
-
-  if (ctx.session.phone) {
-    ctx.session.step = 'getcode_awaiting_employee_count';
-    await ctx.reply("Nechta xodimingiz bor?");
-    return;
-  }
   ctx.session.step = 'getcode_awaiting_phone';
   await ctx.reply("Telefon raqamingizni kiriting:");
 }
 
 export async function handleGetCodePhoneText(ctx: SessionContext, text: string): Promise<void> {
-  const phone = text.trim();
-  ctx.session.phone = phone;
-  ctx.session.step = 'getcode_awaiting_employee_count';
-  await ctx.reply("Nechta xodimingiz bor?");
+  ctx.session.phone = text.trim();
+  ctx.session.step = 'getcode_awaiting_company_name';
+  await ctx.reply("Kompaniyangiz nomini kiriting:");
 }
 
-export async function handleGetCodeEmployeeCountText(ctx: SessionContext, text: string): Promise<void> {
-  const n = Number.parseInt(text.replace(/\D/g, ''), 10);
-  if (!Number.isFinite(n) || n < 1) {
-    await ctx.reply('Iltimos, ijobiy butun son kiriting (masalan: 5).');
-    return;
+export async function handleGetCodeCompanyNameText(ctx: SessionContext, text: string): Promise<void> {
+  if (!ctx.session.companyId) {
+    const company = await findCompanyByName(text);
+    if (!company) {
+      await ctx.reply("Bunday nomdagi kompaniya topilmadi. Iltimos, avval saytda ro'yxatdan o'ting yoki admin bilan bog'laning.");
+      await resetSession(ctx);
+      return;
+    }
+    ctx.session.companyId = company.id;
   }
-  ctx.session.employeeCount = n;
   await showGetCodePaymentInfo(ctx);
 }
 
@@ -258,7 +211,8 @@ async function showGetCodePaymentInfo(ctx: SessionContext): Promise<void> {
       `Tanlagan tarifingiz: *${tariff.name}*`,
       `${formatSum(tariff.price)} so'm/xodim × ${employeeCount} xodim = *${formatSum(total)} so'm*`,
       '',
-      PAYMENT_CARD_TEXT_GETCODE,
+      "To'lov qiling:",
+      PAYMENT_CARD_TEXT,
       '',
       "To'lov qilgach, chek rasmini (screenshot/rasm) yuboring.",
     ].join('\n'),
@@ -300,7 +254,7 @@ export async function handleGetCodeReceiptPhoto(ctx: SessionContext): Promise<vo
     employeeCount,
   });
 
-  await ctx.reply("So'rovingiz tasdiqlash uchun yuborildi. Tez orada xabar beramiz.");
+  await ctx.reply("So'rovingiz qabul qilindi. Tez orada kodingizni beramiz.");
   await resetSession(ctx);
 
   const total = tariff.price * employeeCount;
@@ -324,12 +278,23 @@ export async function handleGetCodeReceiptPhoto(ctx: SessionContext): Promise<vo
 }
 
 // ============================================================================
-// PART D.4 — "Tarifni o'zgartirish" oqimi (proratsiya bilan)
+// PART D.4 — "Tarifni o'zgartirish" oqimi (proratsiya bilan) — Kalit olish
+// bilan BIR XIL bosqich tartibi: xodimlar soni -> ism -> telefon -> kompaniya
+// nomi -> [proratsiya uchun oxirgi obuna, agar bo'lsa] -> tarif tanlash ->
+// narx -> to'lov.
 // ============================================================================
 export async function enterUpgradeFlow(ctx: SessionContext, companyId: string): Promise<void> {
   await resetSession(ctx);
   ctx.session.flow = 'upgrade';
   ctx.session.companyId = companyId || undefined;
+  ctx.session.step = 'upgrade_awaiting_employee_count';
+  await ctx.reply("Nechta xodimingiz bor?");
+}
+
+export async function handleUpgradeEmployeeCountText(ctx: SessionContext, text: string): Promise<void> {
+  const n = parsePositiveInt(text);
+  if (!n) { await ctx.reply('Iltimos, ijobiy butun son kiriting (masalan: 5).'); return; }
+  ctx.session.employeeCount = n;
   ctx.session.step = 'upgrade_awaiting_name';
   await ctx.reply("Ism va familiyangizni kiriting:");
 }
@@ -343,77 +308,29 @@ export async function handleUpgradeNameText(ctx: SessionContext, text: string): 
 }
 
 export async function handleUpgradePhoneText(ctx: SessionContext, text: string): Promise<void> {
-  const phone = text.trim();
-  ctx.session.phone = phone;
-
-  // D.4 band 2: eng so'nggi subscriptions qatori TELEFON bo'yicha qidiriladi
-  // — bu telefon "Kalit olish" orqali birinchi xarid qilinganda ham
-  // saqlangan (src/lib/tariffPayments.ts'dagi bootstrap izohiga qarang),
-  // shu sabab har qanday oldingi xaridor shu yerda topiladi.
-  let sub: LatestSubscription | null;
-  try {
-    sub = await findLatestSubscriptionByPhone(phone);
-  } catch (e: any) {
-    console.error('Obuna qidirishda xato:', e?.message);
-    await ctx.reply('Xatolik yuz berdi. Birozdan so\'ng qayta urinib ko\'ring.');
-    return;
-  }
-
-  if (!sub) {
-    // Zaxira: ehtimol bu odam boshqa telefondan yozayotgan bo'lsa-da,
-    // kompaniya saytda ro'yxatdan o'tgan — nomi bo'yicha qidiramiz.
-    ctx.session.step = 'upgrade_awaiting_company_name_fallback';
-    await ctx.reply("Bu raqam bo'yicha oldingi xarid topilmadi. Kompaniyangiz nomini kiriting:");
-    return;
-  }
-
-  ctx.session.companyId = sub.company_id;
-  ctx.session.subOldTariffId = sub.tariff_id;
-  ctx.session.subPaidAmount = Number(sub.paid_amount);
-  ctx.session.subExpiresAt = sub.expires_at;
-  // Reviziya 3, band 1: xodimlar soni oxirgi obunadan MEROS olinadi, qayta so'ralmaydi.
-  ctx.session.employeeCount = sub.employee_count;
-
-  const currentTariff = await getTariff(sub.tariff_id);
-  const active = isSubscriptionActive(sub);
-
-  // Reviziya 3: yangi tarif tanlashdan oldin, joriy tarifni ko'rsatib
-  // "shumi?" deb tasdiqlatiladi (foydalanuvchi shunday so'radi).
-  ctx.session.step = 'upgrade_confirm_current';
-  await ctx.reply(
-    [
-      `Joriy tarifingiz: *${currentTariff?.name || "belgilanmagan"}*, ${sub.employee_count} xodim.`,
-      `To'langan: *${formatSum(sub.paid_amount)} so'm* (${new Date(sub.paid_at).toLocaleDateString('uz-UZ')})`,
-      `Amal qilish muddati: ${new Date(sub.expires_at).toLocaleDateString('uz-UZ')}${active ? '' : ' (tugagan)'}`,
-      '',
-      'Shumi?',
-    ].join('\n'),
-    {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('✅ Ha', 'upgrade_current:yes'), Markup.button.callback("❌ Yo'q", 'upgrade_current:no')],
-      ]),
-    },
-  );
+  ctx.session.phone = text.trim();
+  ctx.session.step = 'upgrade_awaiting_company_name';
+  await ctx.reply("Kompaniyangiz nomini kiriting:");
 }
 
-export async function handleUpgradeCompanyNameFallbackText(ctx: SessionContext, text: string): Promise<void> {
-  const company = await findCompanyByName(text.trim());
-  if (!company) {
-    await ctx.reply("Bunday nomdagi kompaniya ham topilmadi. Avval \"🔑 Kalit olish\" orqali ro'yxatdan o'ting yoki admin bilan bog'laning.");
-    await resetSession(ctx);
-    return;
+export async function handleUpgradeCompanyNameText(ctx: SessionContext, text: string): Promise<void> {
+  if (!ctx.session.companyId) {
+    const company = await findCompanyByName(text);
+    if (!company) {
+      await ctx.reply("Bunday nomdagi kompaniya topilmadi. Iltimos, avval saytda ro'yxatdan o'ting yoki admin bilan bog'laning.");
+      await resetSession(ctx);
+      return;
+    }
+    ctx.session.companyId = company.id;
   }
 
-  // Topilgan kompaniyaning oldingi obunasi bo'lishi mumkin (masalan
-  // boshqa xodim to'lagan, telefon undan farqli) — bo'lsa xodimlar sonini
-  // meros olib, oddiy "topilgan" yo'lga o'tamiz; bo'lmasa (chindan ham
-  // birinchi xarid) xodimlar sonini so'raymiz.
-  ctx.session.companyId = company.id;
+  // Proratsiya uchun: shu kompaniyaning oxirgi (eng so'nggi to'langan)
+  // obunasi bo'lsa — company_id bo'yicha qidiramiz (telefon emas — bu
+  // ancha ishonchli, chunki kompaniya allaqachon nom orqali aniqlangan).
   const { data: latestSub } = await supabase
     .from('subscriptions')
-    .select('tariff_id, paid_amount, paid_at, expires_at, employee_count')
-    .eq('company_id', company.id)
+    .select('tariff_id, paid_amount, paid_at, expires_at')
+    .eq('company_id', ctx.session.companyId)
     .order('paid_at', { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -422,43 +339,18 @@ export async function handleUpgradeCompanyNameFallbackText(ctx: SessionContext, 
     ctx.session.subOldTariffId = latestSub.tariff_id;
     ctx.session.subPaidAmount = Number(latestSub.paid_amount);
     ctx.session.subExpiresAt = latestSub.expires_at;
-    ctx.session.employeeCount = latestSub.employee_count;
+  }
 
-    const currentTariff = await getTariff(latestSub.tariff_id);
-    const active = new Date(latestSub.expires_at).getTime() > Date.now();
-    ctx.session.step = 'upgrade_confirm_current';
-    await ctx.reply(
-      [
-        `Joriy tarifingiz: *${currentTariff?.name || "belgilanmagan"}*, ${latestSub.employee_count} xodim.`,
-        `To'langan: *${formatSum(latestSub.paid_amount)} so'm* (${new Date(latestSub.paid_at).toLocaleDateString('uz-UZ')})`,
-        `Amal qilish muddati: ${new Date(latestSub.expires_at).toLocaleDateString('uz-UZ')}${active ? '' : ' (tugagan)'}`,
-        '',
-        'Shumi?',
-      ].join('\n'),
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('✅ Ha', 'upgrade_current:yes'), Markup.button.callback("❌ Yo'q", 'upgrade_current:no')],
-        ]),
-      },
-    );
+  const allTariffs = await listTariffs();
+  const otherTariffs = latestSub ? allTariffs.filter((t) => t.id !== latestSub.tariff_id) : allTariffs;
+  if (otherTariffs.length === 0) {
+    await ctx.reply("Boshqa tarif mavjud emas.");
+    await resetSession(ctx);
     return;
   }
 
-  // Haqiqatan ham birinchi xarid — xodimlar sonini so'raymiz (meros
-  // oladigan joyi yo'q) va to'g'ridan-to'g'ri tarif tanlashga o'tamiz.
-  ctx.session.step = 'upgrade_awaiting_employee_count_fallback';
-  await ctx.reply("Nechta xodimingiz bor?");
-}
-
-export async function handleUpgradeEmployeeCountFallbackText(ctx: SessionContext, text: string): Promise<void> {
-  const n = Number.parseInt(text.replace(/\D/g, ''), 10);
-  if (!Number.isFinite(n) || n < 1) {
-    await ctx.reply('Iltimos, ijobiy butun son kiriting (masalan: 5).');
-    return;
-  }
-  ctx.session.employeeCount = n;
-  await showUpgradeTariffOptions(ctx);
+  ctx.session.step = 'upgrade_selecting_tariff';
+  await ctx.reply("Qaysi tarifga o'tmoqchisiz?", tariffSelectKeyboard(otherTariffs, 'upgrade_tariff'));
 }
 
 async function showUpgradeTariffOptions(ctx: SessionContext): Promise<void> {
@@ -473,20 +365,6 @@ async function showUpgradeTariffOptions(ctx: SessionContext): Promise<void> {
 
   ctx.session.step = 'upgrade_selecting_tariff';
   await ctx.reply("Qaysi tarifga o'tasiz?", tariffSelectKeyboard(otherTariffs, 'upgrade_tariff'));
-}
-
-export async function handleUpgradeConfirmCurrent(ctx: SessionContext & { match: RegExpExecArray }): Promise<void> {
-  const choice = ctx.match[1];
-  await ctx.answerCbQuery();
-
-  if (choice === 'no') {
-    await ctx.editMessageText('Bekor qilindi. Qaytadan boshlash uchun: /start');
-    await resetSession(ctx);
-    return;
-  }
-
-  await ctx.deleteMessage().catch(() => {});
-  await showUpgradeTariffOptions(ctx);
 }
 
 export async function handleUpgradeTariffSelected(ctx: SessionContext & { match: RegExpExecArray }): Promise<void> {
@@ -550,7 +428,7 @@ export async function handleUpgradeConfirmPay(ctx: SessionContext & { match: Reg
   }
 
   ctx.session.step = 'upgrade_awaiting_receipt';
-  await ctx.editMessageText([PAYMENT_CARD_TEXT_UPGRADE, '', "To'lov qilgach, chek rasmini (screenshot/rasm) yuboring."].join('\n'), {
+  await ctx.editMessageText(["To'lov qiling:", PAYMENT_CARD_TEXT, '', "To'lov qilgach, chek rasmini (screenshot/rasm) yuboring."].join('\n'), {
     parse_mode: 'Markdown',
   });
 }
@@ -601,7 +479,7 @@ async function finalizeTariffChangeRequest(ctx: SessionContext, receiptUrl: stri
     employeeCount,
   });
 
-  await ctx.reply("So'rovingiz tasdiqlash uchun yuborildi. Tez orada xabar beramiz.");
+  await ctx.reply("So'rovingiz qabul qilindi. Tez orada kodingizni beramiz.");
   await resetSession(ctx);
 
   const caption = [
