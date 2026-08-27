@@ -30,6 +30,7 @@ import {
   enterGetCodeFlowFromMenu,
   enterUpgradeFlowFromMenu,
   handleMenuGetCodePhoneText,
+  handleMenuGetCodeCompanyNameText,
   handleGetCodeTariffSelected,
   handleGetCodeNameText,
   handleGetCodePhoneText,
@@ -37,6 +38,8 @@ import {
   handleGetCodeReceiptPhoto,
   handleUpgradeNameText,
   handleUpgradePhoneText,
+  handleUpgradeCompanyNameFallbackText,
+  handleUpgradeEmployeeCountFallbackText,
   handleUpgradeConfirmCurrent,
   handleUpgradeTariffSelected,
   handleUpgradeConfirmPay,
@@ -96,7 +99,10 @@ bot1.on('text', async (ctx) => {
   if (step === 'getcode_awaiting_employee_count') return handleGetCodeEmployeeCountText(sctx, text);
   if (step === 'upgrade_awaiting_name') return handleUpgradeNameText(sctx, text);
   if (step === 'upgrade_awaiting_phone') return handleUpgradePhoneText(sctx, text);
+  if (step === 'upgrade_awaiting_company_name_fallback') return handleUpgradeCompanyNameFallbackText(sctx, text);
+  if (step === 'upgrade_awaiting_employee_count_fallback') return handleUpgradeEmployeeCountFallbackText(sctx, text);
   if (step === 'menu_get_code_awaiting_phone') return handleMenuGetCodePhoneText(sctx, text);
+  if (step === 'menu_get_code_awaiting_company_name') return handleMenuGetCodeCompanyNameText(sctx, text);
   if (step === 'feedback_awaiting_text') return handleFeedbackText(sctx, text);
 
   // Eski marketing oqimi bosqichlari.
