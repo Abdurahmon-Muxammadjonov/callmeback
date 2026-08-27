@@ -19,7 +19,7 @@ import {
 // Part D qayta qurilishi: "Kalit olish" (D.3) va "Tarifni o'zgartirish"
 // (D.4) — to'liq spec bo'yicha, chek surati + proratsiya bilan.
 
-const PAYMENT_CARD_TEXT = "💳 Karta: 5614 6864 0400 6860 (A.L)";
+const PAYMENT_CARD_TEXT = "💳 Karta: 5614 6865 0400 6860 (A.L)";
 
 // Telegram'ning (legacy) 'Markdown' parse_mode'i 4 ta belgini maxsus
 // deb hisoblaydi: _ * ` [ — foydalanuvchi matnida (ism, familiya, Telegram
