@@ -1,14 +1,15 @@
 import { Markup } from 'telegraf';
-import { TARIFFS, TARIFF_ORDER, DURATIONS, DURATION_DISCOUNT_LABELS, monthlyTotal, formatSum } from './pricing';
 
 export const MENU_INFO = "ℹ️ Platforma haqida ma'lumot";
 export const MENU_PRICING = '📊 Tariflar bilan tanishish';
+// "Sotib olmoqchiman" — bot1.ts'da MENU_GET_CODE bilan AYNAN bir xil
+// oqimga (tariffFlow.ts'dagi enterGetCodeFlowFromMenu) yo'naltiriladi —
+// eski, alohida narx-hisoblovchi/lid yig'uvchi oqim (handlers/purchase.ts)
+// olib tashlandi, chunki ikkalasi funksional jihatdan bir xil bo'lib qoldi.
 export const MENU_BUY = '🛒 Sotib olmoqchiman';
 export const MENU_ADMIN = "👨‍💼 Admin bilan bog'lanish";
-// Mavjud mijozlar uchun — saytdagi "Kod olish"/"Tarifni yangilash" tugmasi
-// bosilib deep-link orqali kelmasdan, to'g'ridan-to'g'ri botga o'zi yozib
-// kirgan bo'lsa ham shu ikki oqim (Part 2 / Part 4.2) ishlashi uchun.
-// Telefon raqami orqali kompaniyasi aniqlanadi (tariffFlow.ts).
+// To'g'ridan-to'g'ri botga yozib kirilganda (deep-link'siz) ham "Kalit
+// olish"/"Tarifni o'zgartirish" oqimlari ishlashi uchun (tariffFlow.ts).
 export const MENU_GET_CODE = '🎟 Kod olish';
 export const MENU_UPGRADE = '⬆️ Tarifni oshirish';
 // Xodim/mijoz fikr-mulohaza, taklif yoki shikoyat yozadi — matn to'g'ridan
@@ -28,39 +29,3 @@ export const MAIN_MENU = Markup.keyboard([
   .resize()
   .persistent();
 
-export const PHONE_REQUEST_KEYBOARD = Markup.keyboard([
-  [Markup.button.contactRequest('📱 Raqamni yuborish')],
-])
-  .resize()
-  .oneTime();
-
-export function tariffInlineKeyboard() {
-  const rows = TARIFF_ORDER.map((key, i) => {
-    const t = TARIFFS[key];
-    const label = `${i + 1}️⃣ ${t.name}${t.popular ? ' ⭐' : ''} — ${formatSum(t.pricePerEmployee)} so'm`;
-    return [Markup.button.callback(label, `tariff:${key}`)];
-  });
-  return Markup.inlineKeyboard(rows);
-}
-
-export const TARIFF_CONFIRM_KEYBOARD = Markup.inlineKeyboard([
-  [Markup.button.callback('✅ Ha, tanladim', 'tariff_confirm:yes')],
-  [Markup.button.callback('❌ Bekor qilish', 'tariff_confirm:no')],
-]);
-
-export function durationInlineKeyboard(tariffKey: string, employeeCount: number) {
-  const rows = DURATIONS.map((d) => {
-    const total = monthlyTotal(tariffKey, d, employeeCount);
-    const discount = DURATION_DISCOUNT_LABELS[d];
-    const label = discount
-      ? `${d} oy — ${formatSum(total)} so'm/oy (${discount})`
-      : `${d} oy — ${formatSum(total)} so'm/oy`;
-    return [Markup.button.callback(label, `duration:${d}`)];
-  });
-  return Markup.inlineKeyboard(rows);
-}
-
-export const FINAL_CONFIRM_KEYBOARD = Markup.inlineKeyboard([
-  [Markup.button.callback('✅ Ha', 'final_confirm:yes')],
-  [Markup.button.callback("❌ Yo'q", 'final_confirm:no')],
-]);

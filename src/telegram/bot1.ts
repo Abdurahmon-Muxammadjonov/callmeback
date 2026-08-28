@@ -10,18 +10,6 @@ import {
   handleFeedbackText,
   cancelFlow,
 } from './handlers/menu';
-import {
-  startPurchaseFlow,
-  onTariffSelected,
-  onTariffConfirm,
-  handleEmployeeCount,
-  onDurationSelected,
-  onFinalConfirm,
-  handleName,
-  handlePhoneContact,
-  handlePhoneText,
-  handleCompany,
-} from './handlers/purchase';
 import { handleFreeformQuestion } from './handlers/faq';
 import { MENU_INFO, MENU_PRICING, MENU_BUY, MENU_ADMIN, MENU_GET_CODE, MENU_UPGRADE, MENU_FEEDBACK } from './keyboards';
 import {
@@ -62,18 +50,10 @@ bot1.command('start', async (ctx) => {
 });
 bot1.command('cancel', (ctx) => cancelFlow(ctx as SessionContext));
 
-// --- Eski marketing oqimi (callback tugmalari) ---
-bot1.action(/^tariff:(.+)$/, (ctx) => onTariffSelected(ctx as any));
-bot1.action(/^tariff_confirm:(yes|no)$/, (ctx) => onTariffConfirm(ctx as any));
-bot1.action(/^duration:(\d+)$/, (ctx) => onDurationSelected(ctx as any));
-bot1.action(/^final_confirm:(yes|no)$/, (ctx) => onFinalConfirm(ctx as any));
-
-// --- Yangi tarif-ochish oqimi (callback tugmalari) — Part D qayta qurilishi ---
+// --- Tarif-ochish oqimi (callback tugmalari) — Part D qayta qurilishi ---
 bot1.action(/^getcode_tariff:(.+)$/, (ctx) => handleGetCodeTariffSelected(ctx as any));
 bot1.action(/^upgrade_tariff:(.+)$/, (ctx) => handleUpgradeTariffSelected(ctx as any));
 bot1.action(/^upgrade_pay:(yes|no)$/, (ctx) => handleUpgradeConfirmPay(ctx as any));
-
-bot1.on('contact', (ctx) => handlePhoneContact(ctx as SessionContext));
 
 // Chek surati — faqat tegishli bosqichda kutilmoqda bo'lsa ishlaydi (D.3/D.4).
 bot1.on('photo', async (ctx) => {
@@ -88,9 +68,8 @@ bot1.on('text', async (ctx) => {
   const sctx = ctx as SessionContext;
   const text = (ctx.message as any).text.trim();
   const step = sctx.session.step;
-  const state = sctx.session.state;
 
-  // Yangi oqim matn-kutish bosqichlari — eng avval tekshiriladi.
+  // Matn-kutish bosqichlari.
   if (step === 'getcode_awaiting_employee_count') return handleGetCodeEmployeeCountText(sctx, text);
   if (step === 'getcode_awaiting_name') return handleGetCodeNameText(sctx, text);
   if (step === 'getcode_awaiting_phone') return handleGetCodePhoneText(sctx, text);
@@ -101,15 +80,12 @@ bot1.on('text', async (ctx) => {
   if (step === 'upgrade_awaiting_company_name') return handleUpgradeCompanyNameText(sctx, text);
   if (step === 'feedback_awaiting_text') return handleFeedbackText(sctx, text);
 
-  // Eski marketing oqimi bosqichlari.
-  if (state === 'awaiting_employee_count') return handleEmployeeCount(sctx, text);
-  if (state === 'awaiting_name') return handleName(sctx, text);
-  if (state === 'awaiting_phone') return handlePhoneText(sctx, text);
-  if (state === 'awaiting_company') return handleCompany(sctx, text);
-
   if (text === MENU_INFO) return sendPlatformInfo(sctx);
   if (text === MENU_PRICING) return sendPricingBrowse(sctx);
-  if (text === MENU_BUY) return startPurchaseFlow(sctx);
+  // "Sotib olmoqchiman" endi "Kod olish" bilan AYNAN bir xil oqim —
+  // foydalanuvchi shunday so'radi (eski, alohida narx-hisoblovchi/lid
+  // yig'uvchi oqim handlers/purchase.ts bilan birga olib tashlandi).
+  if (text === MENU_BUY) return enterGetCodeFlowFromMenu(sctx);
   if (text === MENU_GET_CODE) return enterGetCodeFlowFromMenu(sctx);
   if (text === MENU_UPGRADE) return enterUpgradeFlowFromMenu(sctx);
   if (text === MENU_ADMIN) return sendAdminContactInfo(sctx);
