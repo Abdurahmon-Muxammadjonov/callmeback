@@ -2,14 +2,14 @@ import { Markup } from 'telegraf';
 
 export const MENU_INFO = "ℹ️ Platforma haqida ma'lumot";
 export const MENU_PRICING = '📊 Tariflar bilan tanishish';
-// "Sotib olmoqchiman" — bot1.ts'da MENU_GET_CODE bilan AYNAN bir xil
-// oqimga (tariffFlow.ts'dagi enterGetCodeFlowFromMenu) yo'naltiriladi —
-// eski, alohida narx-hisoblovchi/lid yig'uvchi oqim (handlers/purchase.ts)
-// olib tashlandi, chunki ikkalasi funksional jihatdan bir xil bo'lib qoldi.
+// "Sotib olmoqchiman" — YANGI mijoz uchun (tariffFlow.ts'dagi
+// enterGetCodeFlowFromMenu / Flow A: tarif tanlash -> xodim -> ism ->
+// telefon -> kompaniya nomi -> to'lov).
 export const MENU_BUY = '🛒 Sotib olmoqchiman';
 export const MENU_ADMIN = "👨‍💼 Admin bilan bog'lanish";
-// To'g'ridan-to'g'ri botga yozib kirilganda (deep-link'siz) ham "Kalit
-// olish"/"Tarifni o'zgartirish" oqimlari ishlashi uchun (tariffFlow.ts).
+// "Kod olish" va "Tarifni oshirish" — MAVJUD mijoz uchun, ikkalasi ham
+// AYNAN BIR XIL oqimga (tariffFlow.ts'dagi enterUpgradeFlowFromMenu /
+// Flow B: telefon -> joriy tarif -> yangi tarif -> to'lov) yo'naltiriladi.
 export const MENU_GET_CODE = '🎟 Kod olish';
 export const MENU_UPGRADE = '⬆️ Tarifni oshirish';
 // Xodim/mijoz fikr-mulohaza, taklif yoki shikoyat yozadi — matn to'g'ridan

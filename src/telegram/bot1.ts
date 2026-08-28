@@ -24,11 +24,8 @@ import {
   handleGetCodeCompanyNameText,
   handleGetCodeReceiptPhoto,
   handleUpgradeEmployeeCountText,
-  handleUpgradeNameText,
   handleUpgradePhoneText,
-  handleUpgradeCompanyNameText,
   handleUpgradeTariffSelected,
-  handleUpgradeConfirmPay,
   handleUpgradeReceiptPhoto,
 } from './tariffFlow';
 
@@ -43,7 +40,10 @@ bot1.command('start', async (ctx) => {
       await ctx.reply("Havola muddati tugagan yoki allaqachon ishlatilgan. Iltimos, saytdan qayta oching.");
       return;
     }
-    if (resolved.purpose === 'get_code') return enterGetCodeFlow(ctx as SessionContext, resolved.companyId);
+    // "get_code" deep-link ham endi Flow B (mavjud mijoz) semantikasiga
+    // ega — companyId sayt orqali (kirgan foydalanuvchi) allaqachon ma'lum,
+    // shu sabab telefon-qidiruv bosqichi kerak emas (Reviziya 5).
+    if (resolved.purpose === 'get_code') return enterUpgradeFlow(ctx as SessionContext, resolved.companyId);
     if (resolved.purpose === 'upgrade') return enterUpgradeFlow(ctx as SessionContext, resolved.companyId);
   }
   return handleStart(ctx as SessionContext);
@@ -53,7 +53,6 @@ bot1.command('cancel', (ctx) => cancelFlow(ctx as SessionContext));
 // --- Tarif-ochish oqimi (callback tugmalari) — Part D qayta qurilishi ---
 bot1.action(/^getcode_tariff:(.+)$/, (ctx) => handleGetCodeTariffSelected(ctx as any));
 bot1.action(/^upgrade_tariff:(.+)$/, (ctx) => handleUpgradeTariffSelected(ctx as any));
-bot1.action(/^upgrade_pay:(yes|no)$/, (ctx) => handleUpgradeConfirmPay(ctx as any));
 
 // Chek surati — faqat tegishli bosqichda kutilmoqda bo'lsa ishlaydi (D.3/D.4).
 bot1.on('photo', async (ctx) => {
@@ -74,19 +73,17 @@ bot1.on('text', async (ctx) => {
   if (step === 'getcode_awaiting_name') return handleGetCodeNameText(sctx, text);
   if (step === 'getcode_awaiting_phone') return handleGetCodePhoneText(sctx, text);
   if (step === 'getcode_awaiting_company_name') return handleGetCodeCompanyNameText(sctx, text);
-  if (step === 'upgrade_awaiting_employee_count') return handleUpgradeEmployeeCountText(sctx, text);
-  if (step === 'upgrade_awaiting_name') return handleUpgradeNameText(sctx, text);
   if (step === 'upgrade_awaiting_phone') return handleUpgradePhoneText(sctx, text);
-  if (step === 'upgrade_awaiting_company_name') return handleUpgradeCompanyNameText(sctx, text);
+  if (step === 'upgrade_awaiting_employee_count') return handleUpgradeEmployeeCountText(sctx, text);
   if (step === 'feedback_awaiting_text') return handleFeedbackText(sctx, text);
 
   if (text === MENU_INFO) return sendPlatformInfo(sctx);
   if (text === MENU_PRICING) return sendPricingBrowse(sctx);
-  // "Sotib olmoqchiman" endi "Kod olish" bilan AYNAN bir xil oqim —
-  // foydalanuvchi shunday so'radi (eski, alohida narx-hisoblovchi/lid
-  // yig'uvchi oqim handlers/purchase.ts bilan birga olib tashlandi).
+  // "Sotib olmoqchiman" — YANGI mijoz uchun (Kalit olish/Flow A, o'zgarishsiz).
   if (text === MENU_BUY) return enterGetCodeFlowFromMenu(sctx);
-  if (text === MENU_GET_CODE) return enterGetCodeFlowFromMenu(sctx);
+  // "Kod olish" va "Tarifni oshirish" — endi AYNAN BIR XIL, MAVJUD mijoz
+  // uchun Flow B (telefon-qidiruv -> joriy tarif -> yangi tarif), Reviziya 5.
+  if (text === MENU_GET_CODE) return enterUpgradeFlowFromMenu(sctx);
   if (text === MENU_UPGRADE) return enterUpgradeFlowFromMenu(sctx);
   if (text === MENU_ADMIN) return sendAdminContactInfo(sctx);
   if (text === MENU_FEEDBACK) return enterFeedbackFlow(sctx);
