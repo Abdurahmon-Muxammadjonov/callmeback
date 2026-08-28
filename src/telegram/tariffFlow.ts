@@ -95,11 +95,29 @@ async function getCompanyName(companyId: string): Promise<string> {
   return data?.name || "Noma'lum kompaniya";
 }
 
-// Kompaniya NOMI bo'yicha qidiradi (avval aniq — katta-kichik harfsiz mos
-// kelish, topilmasa qisman mos kelish). Faqat MAVJUD companies qatorini
-// topadi, yangisini yaratmaydi — kod faqat saytga KIRGAN (parolli hisobga
-// ega) foydalanuvchi tomonidan ishlatilishi mumkin, bot orqali yangi hisob
-// yaratilmaydi.
+// Faqat solishtirish uchun: probel/tire/tinish belgilarni olib tashlaydi va
+// kichik harfga o'tkazadi ("Sales Pulse" va "salespulse" BIR XIL deb
+// hisoblansin — foydalanuvchi saytda qanday yozgan bo'lsa, botga probel
+// bilan/bilan kiritishi ODATIY holat).
+function normalizeCompanyName(s: string): string {
+  return s.toLowerCase().replace(/[\s\-_.,'"()]+/g, '');
+}
+
+// Kompaniya NOMI bo'yicha qidiradi, uch bosqichda (yengildan qattiqqa):
+//   1) aniq (katta-kichik harfsiz) mos kelish
+//   2) Postgres darajasidagi qisman mos kelish (substring, katta-kichik harfsiz)
+//   3) FUZZY: probel/tinish belgilar va katta-kichik harflarni e'tiborsiz
+//      qoldirib, ikkala yo'nalishda solishtiradi. Kompaniyalar soni kichik
+//      bo'lgani uchun to'liq ro'yxatni olib, Node'da solishtiramiz.
+// Faqat MAVJUD companies qatorini topadi, yangisini yaratmaydi — kod faqat
+// saytga KIRGAN (parolli hisobga ega) foydalanuvchi tomonidan ishlatilishi
+// mumkin, bot orqali yangi hisob yaratilmaydi.
+//
+// 3-bosqich production'da aniqlangan xatoni tuzatadi: foydalanuvchi saytda
+// "salespulse" deb ro'yxatdan o'tgan, lekin botga "Sales Pulse" deb probel
+// bilan kiritganida eski (faqat Postgres ilike'ga tayangan) qidiruv buni
+// TOPOLMAY, "Bunday nomdagi kompaniya topilmadi" deb noto'g'ri javob
+// qaytargan — kompaniya YANGI YARATILGAN bo'lsa ham xuddi shu xato chiqardi.
 async function findCompanyByName(name: string): Promise<{ id: string; name: string } | null> {
   const trimmed = name.trim();
   if (!trimmed) return null;
@@ -108,7 +126,26 @@ async function findCompanyByName(name: string): Promise<{ id: string; name: stri
   if (exact) return exact;
 
   const { data: partial } = await supabase.from('companies').select('id, name').ilike('name', `%${trimmed}%`).limit(1).maybeSingle();
-  return partial || null;
+  if (partial) return partial;
+
+  const normalizedInput = normalizeCompanyName(trimmed);
+  // Juda qisqa (1-2 belgili) kirish uchun fuzzy qidiruv o'tkazilmaydi —
+  // aks holda noto'g'ri kompaniyaga (boshqa tenant'ga!) tasodifan mos
+  // kelib qolishi mumkin (to'lov so'rovi noto'g'ri kompaniyaga bog'lanib
+  // qolishi — xavfsizlik jihatidan xavfli xato bo'lardi).
+  if (normalizedInput.length < 3) return null;
+
+  const { data: all } = await supabase.from('companies').select('id, name').limit(1000);
+  if (!all || all.length === 0) return null;
+
+  for (const c of all) {
+    if (normalizeCompanyName(c.name) === normalizedInput) return c;
+  }
+  for (const c of all) {
+    const normalizedStored = normalizeCompanyName(c.name);
+    if (normalizedStored.includes(normalizedInput) || normalizedInput.includes(normalizedStored)) return c;
+  }
+  return null;
 }
 
 // Rasm xabaridan eng katta o'lchamdagi file_id'ni oladi va Bot 1'ning fayl
