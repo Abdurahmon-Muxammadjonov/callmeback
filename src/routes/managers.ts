@@ -1,18 +1,29 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import { supabase, withSchemaReloadRetry, fetchAllRows } from '../lib/supabase';
+import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 
 const router = Router();
 
 const VALID_STATUS = ['active', 'inactive', 'on_leave', 'flagged'];
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// XAVFSIZLIK TUZATISHI (production'da aniqlangan CRITICAL xato): bu router
+// avval requireAuth'siz va company_id filtrisiz edi — HAR QANDAY kishi
+// (login qilmasdan ham) BARCHA kompaniyalarning xodimlari (ism, status,
+// kunlik reja va h.k.) ro'yxatini ko'ra, hatto o'chira/o'zgartira olardi.
+// Endi: requireAuth majburiy, ro'yxat/o'qish/yozish/o'chirish FAQAT
+// chaqiruvchining o'z kompaniyasiga (req.auth.companyId) tegishli
+// menejerlar bilan cheklangan.
+
 // GET /managers — operatorlar + har birining qo'ng'iroqlar soni (?platform_id= filtri)
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
+    const companyId = req.auth!.companyId as string;
     const platformId = typeof req.query.platform_id === 'string' && req.query.platform_id ? req.query.platform_id : null;
     let q = supabase
       .from('managers')
       .select('*, calls(count)')
+      .eq('company_id', companyId)
       .order('created_at', { ascending: false });
     if (platformId) q = q.eq('platform_id', platformId);
     const { data, error } = await withSchemaReloadRetry(() => q);
@@ -30,10 +41,11 @@ router.get('/', async (req: Request, res: Response) => {
 // GET /managers/presence — onlayn menejer id'lari (last_seen_at oxirgi 2 daqiqada).
 // MUHIM: '/:id' dan OLDIN turishi shart.
 const PRESENCE_WINDOW_MS = 120_000;
-router.get('/presence', async (_req: Request, res: Response) => {
+router.get('/presence', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
+    const companyId = req.auth!.companyId as string;
     const since = new Date(Date.now() - PRESENCE_WINDOW_MS).toISOString();
-    const { data, error } = await supabase.from('managers').select('id').gte('last_seen_at', since);
+    const { data, error } = await supabase.from('managers').select('id').eq('company_id', companyId).gte('last_seen_at', since);
     if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
     return res.status(200).json({ success: true, data: (data || []).map((m) => m.id) });
   } catch (err: any) {
@@ -41,11 +53,22 @@ router.get('/presence', async (_req: Request, res: Response) => {
   }
 });
 
+// Berilgan manager id chaqiruvchining o'z kompaniyasiga tegishli ekanini
+// tekshiradi — bo'lmasa null qaytaradi (chaqiruvchi 404 qilib javob beradi,
+// "boshqa kompaniyaning manageri mavjud emas" bilan bir xil ko'rinadi —
+// mavjudligini ham oshkor qilmaslik uchun).
+async function assertOwnManager(id: string, companyId: string): Promise<boolean> {
+  const { data } = await supabase.from('managers').select('id').eq('id', id).eq('company_id', companyId).maybeSingle();
+  return !!data;
+}
+
 // POST /managers/:id/ping — menejer onlayn ekanini bildiradi (heartbeat).
-router.post('/:id/ping', async (req: Request, res: Response) => {
+router.post('/:id/ping', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
+    const companyId = req.auth!.companyId as string;
     const id = String(req.params.id);
     if (!UUID_REGEX.test(id)) return res.status(400).json({ success: false, error: 'id yaroqli UUID bo\'lishi kerak.' });
+    if (!(await assertOwnManager(id, companyId))) return res.status(404).json({ success: false, error: 'Manager topilmadi.' });
     const { error } = await supabase.from('managers').update({ last_seen_at: new Date().toISOString() }).eq('id', id);
     if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
     return res.status(200).json({ success: true });
@@ -54,8 +77,9 @@ router.post('/:id/ping', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
+    const companyId = req.auth!.companyId as string;
     const { name, status, role, platform_id, daily_call_target, pbx_id } = req.body ?? {};
     if (!name || typeof name !== 'string') {
       return res.status(400).json({ success: false, error: '"name" majburiy.' });
@@ -63,7 +87,7 @@ router.post('/', async (req: Request, res: Response) => {
     if (status && !VALID_STATUS.includes(status)) {
       return res.status(400).json({ success: false, error: `status quyidagilardan biri bo'lishi kerak: ${VALID_STATUS.join(', ')}` });
     }
-    const insertData: Record<string, unknown> = { name, status: status || 'active' };
+    const insertData: Record<string, unknown> = { name, status: status || 'active', company_id: companyId };
     if (role !== undefined) insertData.role = role;
     if (platform_id !== undefined) insertData.platform_id = platform_id;
     if (daily_call_target !== undefined) insertData.daily_call_target = Math.max(0, Math.floor(Number(daily_call_target) || 0));
@@ -80,11 +104,12 @@ router.post('/', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/:id', async (req: Request, res: Response) => {
+router.get('/:id', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
+    const companyId = req.auth!.companyId as string;
     const id = String(req.params.id);
     if (!UUID_REGEX.test(id)) return res.status(400).json({ success: false, error: "id yaroqli UUID bo'lishi kerak." });
-    const { data, error } = await supabase.from('managers').select('*').eq('id', id).maybeSingle();
+    const { data, error } = await supabase.from('managers').select('*').eq('id', id).eq('company_id', companyId).maybeSingle();
     if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
     if (!data) return res.status(404).json({ success: false, error: 'Manager topilmadi.' });
     return res.status(200).json({ success: true, data });
@@ -93,10 +118,12 @@ router.get('/:id', async (req: Request, res: Response) => {
   }
 });
 
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
+    const companyId = req.auth!.companyId as string;
     const id = String(req.params.id);
     if (!UUID_REGEX.test(id)) return res.status(400).json({ success: false, error: "id yaroqli UUID bo'lishi kerak." });
+    if (!(await assertOwnManager(id, companyId))) return res.status(404).json({ success: false, error: 'Manager topilmadi.' });
     const { name, status, role, platform_id, daily_call_target, pbx_id } = req.body ?? {};
     const update: Record<string, unknown> = {};
     if (name !== undefined) update.name = name;
@@ -122,10 +149,12 @@ router.put('/:id', async (req: Request, res: Response) => {
   }
 });
 
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
+    const companyId = req.auth!.companyId as string;
     const id = String(req.params.id);
     if (!UUID_REGEX.test(id)) return res.status(400).json({ success: false, error: "id yaroqli UUID bo'lishi kerak." });
+    if (!(await assertOwnManager(id, companyId))) return res.status(404).json({ success: false, error: 'Manager topilmadi.' });
     const { error } = await supabase.from('managers').delete().eq('id', id);
     if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
     return res.status(200).json({ success: true, message: `Manager ${id} o'chirildi.` });
@@ -134,13 +163,14 @@ router.delete('/:id', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/:id/stats', async (req: Request, res: Response) => {
+router.get('/:id/stats', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
+    const companyId = req.auth!.companyId as string;
     const id = String(req.params.id);
     if (!UUID_REGEX.test(id)) return res.status(400).json({ success: false, error: "id yaroqli UUID bo'lishi kerak." });
 
     const { data: manager, error: mErr } = await supabase
-      .from('managers').select('id, name, status, role, daily_call_target, last_seen_at, platform_id').eq('id', id).maybeSingle();
+      .from('managers').select('id, name, status, role, daily_call_target, last_seen_at, platform_id').eq('id', id).eq('company_id', companyId).maybeSingle();
     if (mErr) return res.status(500).json({ success: false, error: `Database Error: ${mErr.message}` });
     if (!manager) return res.status(404).json({ success: false, error: 'Manager topilmadi.' });
 

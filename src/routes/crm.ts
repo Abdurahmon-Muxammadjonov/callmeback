@@ -4,6 +4,7 @@ import { connect, getUsers, getStatus, markSynced } from '../lib/amocrm';
 import { enqueueBatchCalls, type BatchCallItem } from './analyze-call';
 import { randomUUID } from 'node:crypto';
 import { runPbxHistorySync } from '../scripts/sync-pbx-history';
+import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 
 const router = Router();
 const INTERNAL_PBX_WEBHOOK_PATH = '/crm/webhook/pbx';
@@ -581,8 +582,13 @@ router.post('/test-connection', async (req: Request, res: Response) => {
 });
 
 // GET /crm/dashboard/managers — amoCRM managers darhol sinxron qilib, dashboard'ga ko'rsatish
-router.get('/dashboard/managers', async (req: Request, res: Response) => {
+// XAVFSIZLIK TUZATISHI (production'da aniqlangan CRITICAL xato): avval
+// requireAuth'siz va company_id filtrisiz edi — HAR QANDAY kishi BARCHA
+// kompaniyalarning xodimlar ro'yxatini ko'ra olardi (bir xil sinf xato
+// managers.ts'da ham topilgan va tuzatilgan edi).
+router.get('/dashboard/managers', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
+    const companyId = req.auth!.companyId as string;
     const hasIntegration = await supabase
       .from('crm_integrations')
       .select('id, enabled')
@@ -608,6 +614,7 @@ router.get('/dashboard/managers', async (req: Request, res: Response) => {
     const { data: managers, error: fetchErr } = await supabase
       .from('managers')
       .select('id, crm_id, name, status')
+      .eq('company_id', companyId)
       .order('created_at', { ascending: false });
 
     if (fetchErr) {

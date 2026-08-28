@@ -1,15 +1,21 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import { supabase } from '../lib/supabase';
+import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 
 const router = Router();
 
-// GET /shifts/events/latest?user_id=:id
+// XAVFSIZLIK TUZATISHI (production'da aniqlangan xato): avval ?user_id=
+// so'ralgan qiymatga TEKSHIRUVSIZ ishonardi (IDOR — boshqa foydalanuvchining
+// smena hodisalarini uning UUID'sini bilib/taxmin qilib yaratish/o'qish
+// mumkin edi). Endi user_id so'rovdan emas, autentifikatsiya qilingan
+// req.auth.userId'dan olinadi.
+//
+// GET /shifts/events/latest
 // On-read: joriy vaqt smena chegarasidan o'tgan bo'lsa, shu kun uchun hodisani
 // (bir marta) yaratadi va qaytaradi. Aks holda data: null.
-router.get('/events/latest', async (req: Request, res: Response) => {
+router.get('/events/latest', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
-    const userId = typeof req.query.user_id === 'string' ? req.query.user_id : '';
-    if (!userId) return res.status(400).json({ success: false, error: 'user_id majburiy.' });
+    const userId = req.auth!.userId;
 
     const { data: user, error: uErr } = await supabase
       .from('users').select('shift_start, shift_end').eq('id', userId).maybeSingle();

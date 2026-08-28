@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { supabase, fetchAllRows } from '../lib/supabase';
+import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
+import { getCompanyManagerIds } from '../lib/companyScope';
 
 const router = Router();
 
@@ -15,7 +17,11 @@ function daysAgo(base: Date, n: number): Date {
   return d;
 }
 
-// GET /api/management/platforms — mavjud platformalar ro'yxati
+// GET /api/management/platforms — mavjud platformalar ro'yxati.
+// DIQQAT: bu jadval kompaniyaga tegishli MA'LUMOT emas — reklama
+// kanallarining umumiy (nom/rang/ikonka) ro'yxati, barcha tenant'lar
+// uchun bir xil va maxfiy emas — shu sabab requireAuth talab qilinmaydi
+// (boshqa xavfsizlik tuzatishlaridan farqli o'laroq).
 router.get('/platforms', async (_req: Request, res: Response) => {
   try {
     const { data, error } = await supabase
@@ -31,15 +37,25 @@ router.get('/platforms', async (_req: Request, res: Response) => {
 
 // GET /api/management/relationship-dynamics?platform_id=
 // "Sabablarsiz munosabatlar" — javobsiz va bad-lead metrikalarining vaqt dinamikasi.
-// Hisob-kitob DB tomonida (supabase/optimize_analytics_aggregates.sql'dagi
-// calls_relationship_dynamics) — 14 kunlik oynadagi har bir qo'ng'iroq qatorini
-// Node'ga tortib JS'da kun bo'yicha filtrlash o'rniga, bitta so'rovda kunlik
-// jamlangan holda qaytadi (faol platformada bu son katta bo'lsa ham sekinlashmaydi).
-router.get('/relationship-dynamics', async (req: Request, res: Response) => {
+// Hisob-kitob DB tomonida (supabase/optimize_analytics_aggregates.sql +
+// supabase/tenant_scoped_aggregates.sql'dagi calls_relationship_dynamics).
+//
+// XAVFSIZLIK TUZATISHI (production'da aniqlangan CRITICAL xato): avval
+// requireAuth'siz va tenant filtrisiz edi — HAR QANDAY kishi boshqa
+// kompaniyalarning agregatlangan qo'ng'iroq dinamikasini ko'ra olardi.
+// Endi requireAuth majburiy va p_manager_ids (chaqiruvchi kompaniyaning
+// o'z menejerlari) DB funksiyasiga uzatiladi — supabase/
+// tenant_scoped_aggregates.sql ishga tushirilgunga qadar bu funksiya
+// eski (p_manager_ids'siz) imzoda bo'lsa, chaqiruv xato bilan qaytadi —
+// bu ATAYLAB shunday: aniq xato, jim-jimgina boshqa tenant ma'lumotini
+// ko'rsatishdan YAXSHIROQ.
+router.get('/relationship-dynamics', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
+    const companyId = req.auth!.companyId as string;
     const platformId = typeof req.query.platform_id === 'string' && req.query.platform_id ? req.query.platform_id : null;
+    const managerIds = await getCompanyManagerIds(companyId);
 
-    const { data, error } = await supabase.rpc('calls_relationship_dynamics', { p_platform_id: platformId });
+    const { data, error } = await supabase.rpc('calls_relationship_dynamics', { p_platform_id: platformId, p_manager_ids: managerIds });
     if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
 
     return res.status(200).json({ success: true, data });
@@ -50,19 +66,26 @@ router.get('/relationship-dynamics', async (req: Request, res: Response) => {
 
 // GET /api/management/conversion-history?platform_id=&days=14
 // Kunlik trafik/sotuv konversiyasi tarixi + o'sha kungi qo'ng'iroqlar soni.
-router.get('/conversion-history', async (req: Request, res: Response) => {
+// XAVFSIZLIK TUZATISHI: requireAuth + calls.company_id bo'yicha filtr
+// qo'shildi (calls!inner(...) join'i allaqachon platform_id uchun
+// ishlatilgan edi — endi company_id ham shu joinga qo'shildi, yangi SQL
+// shart emas).
+router.get('/conversion-history', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
+    const companyId = req.auth!.companyId as string;
     const platformId = typeof req.query.platform_id === 'string' && req.query.platform_id ? req.query.platform_id : null;
     const days = Math.min(90, Math.max(1, parseInt(String(req.query.days || '14'), 10) || 14));
     const todayStart = startOfTodayUTC();
     const start = daysAgo(todayStart, days - 1);
 
-    // Konversiyalar (calls bilan join — platforma filtri uchun) — sahifalab, 1000
-    // qatorlik standart chegaradan oshsa ham hammasi yig'ib olinishi uchun.
+    // Konversiyalar (calls bilan join — platforma VA kompaniya filtri uchun) —
+    // sahifalab, 1000 qatorlik standart chegaradan oshsa ham hammasi yig'ib
+    // olinishi uchun.
     const convRows = await fetchAllRows<{ traffic_conversion: number | null; sales_conversion: number | null; created_at: string }>((from, to) => {
       let cq = supabase
         .from('conversions')
-        .select('traffic_conversion, sales_conversion, created_at, calls!inner(platform_id)')
+        .select('traffic_conversion, sales_conversion, created_at, calls!inner(platform_id, company_id)')
+        .eq('calls.company_id', companyId)
         .gte('created_at', start.toISOString())
         .range(from, to);
       if (platformId) cq = cq.eq('calls.platform_id', platformId);
@@ -71,7 +94,7 @@ router.get('/conversion-history', async (req: Request, res: Response) => {
 
     // Kunlik qo'ng'iroqlar soni
     const callRows = await fetchAllRows<{ created_at: string }>((from, to) => {
-      let kq = supabase.from('calls').select('created_at').gte('created_at', start.toISOString()).range(from, to);
+      let kq = supabase.from('calls').select('created_at').eq('company_id', companyId).gte('created_at', start.toISOString()).range(from, to);
       if (platformId) kq = kq.eq('platform_id', platformId);
       return kq;
     });
