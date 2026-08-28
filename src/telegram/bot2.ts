@@ -57,7 +57,12 @@ async function markCaptionResolved(ctx: any, verdict: string): Promise<void> {
 // ============================================================================
 bot2.action(/^key_approve:(.+)$/, async (ctx) => {
   const requestId = ctx.match[1];
-  await ctx.answerCbQuery();
+  // .catch(): eskirgan callback_query_id tasdiqlash amalini TO'XTATMASLIGI
+  // SHART — bu faqat "yuklanmoqda" spinner'i, muvaffaqiyatsiz bo'lsa ham
+  // to'lovni tasdiqlash davom etadi (production'da aniqlangan CRITICAL
+  // xato — avval unguarded await bo'lgani uchun admin tugmani bossa ham
+  // to'lov ba'zan HECH QANDAY belgi/xatosiz tasdiqlanmay qolardi).
+  await ctx.answerCbQuery().catch(() => {});
   try {
     const result = await approveKeyRequest(requestId, String(ctx.from!.id));
     await markCaptionResolved(ctx, '✅ *TASDIQLANDI*');
@@ -70,7 +75,7 @@ bot2.action(/^key_approve:(.+)$/, async (ctx) => {
 
 bot2.action(/^key_reject:(.+)$/, async (ctx) => {
   const requestId = ctx.match[1];
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {}); // qarang: key_approve'dagi izoh
   ctx.session.rejectingRequestId = requestId;
   ctx.session.step = 'awaiting_key_rejection_reason';
   await ctx.reply("Rad etish sababini yozing:");
@@ -81,7 +86,7 @@ bot2.action(/^key_reject:(.+)$/, async (ctx) => {
 // ============================================================================
 bot2.action(/^tariffchange_approve:(.+)$/, async (ctx) => {
   const requestId = ctx.match[1];
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {}); // qarang: key_approve'dagi izoh
   try {
     const result = await approveTariffChangeRequest(requestId, String(ctx.from!.id));
     await markCaptionResolved(ctx, '✅ *TASDIQLANDI*');
@@ -94,7 +99,7 @@ bot2.action(/^tariffchange_approve:(.+)$/, async (ctx) => {
 
 bot2.action(/^tariffchange_reject:(.+)$/, async (ctx) => {
   const requestId = ctx.match[1];
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {}); // qarang: key_approve'dagi izoh
   ctx.session.rejectingRequestId = requestId;
   ctx.session.step = 'awaiting_tariffchange_rejection_reason';
   await ctx.reply("Rad etish sababini yozing:");

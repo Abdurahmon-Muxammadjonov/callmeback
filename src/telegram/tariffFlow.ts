@@ -164,7 +164,16 @@ export async function enterGetCodeFlow(ctx: SessionContext, companyId: string): 
 
 export async function handleGetCodeTariffSelected(ctx: SessionContext & { match: RegExpExecArray }): Promise<void> {
   const tariffId = ctx.match[1];
-  await ctx.answerCbQuery();
+  // .catch(): callback_query_id eskirgan/vaqti o'tgan bo'lishi mumkin
+  // (masalan foydalanuvchi ikki marta bossa yoki tarmoq sekin bo'lsa) —
+  // bu shunchaki "yuklanmoqda" spinner'ini o'chiradi, muvaffaqiyatsiz
+  // bo'lsa ham TANLOVNI QAYTA ISHLASH davom etishi SHART. Aks holda
+  // (avval await bilan, .catch'siz) bu yerda tashlangan xato butun
+  // handler'ni to'xtatib qo'yar edi va sessiya bosqichi ILGARILAMASDAN
+  // qolib ketardi — foydalanuvchi tarif tugmasini bossa ham hech narsa
+  // saqlanmas edi (production'da aniqlangan CRITICAL xato — shu bilan
+  // bir xil naqsh bot2.ts'dagi approve/reject tugmalarida ham bor edi).
+  await ctx.answerCbQuery().catch(() => {});
 
   const tariff = await getTariff(tariffId);
   if (!tariff) { await ctx.editMessageText("Noma'lum tarif."); return; }
@@ -375,7 +384,7 @@ async function showCurrentTariffAndAskNew(ctx: SessionContext, companyId: string
 
 export async function handleUpgradeTariffSelected(ctx: SessionContext & { match: RegExpExecArray }): Promise<void> {
   const tariffId = ctx.match[1];
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {}); // qarang: handleGetCodeTariffSelected'dagi izoh
 
   const tariff = await getTariff(tariffId);
   if (!tariff) { await ctx.editMessageText("Noma'lum tarif."); return; }
