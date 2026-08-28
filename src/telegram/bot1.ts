@@ -11,12 +11,14 @@ import {
   cancelFlow,
 } from './handlers/menu';
 import { handleFreeformQuestion } from './handlers/faq';
-import { MENU_INFO, MENU_PRICING, MENU_BUY, MENU_ADMIN, MENU_GET_CODE, MENU_UPGRADE, MENU_FEEDBACK } from './keyboards';
+import { MENU_INFO, MENU_PRICING, MENU_BUY, MENU_ADMIN, MENU_GET_CODE, MENU_UPGRADE, MENU_FEEDBACK, MENU_REGISTER } from './keyboards';
 import {
   enterGetCodeFlow,
   enterUpgradeFlow,
   enterGetCodeFlowFromMenu,
   enterUpgradeFlowFromMenu,
+  enterRegisterChoice,
+  handleRegisterChoice,
   handleGetCodeTariffSelected,
   handleGetCodeEmployeeCountText,
   handleGetCodeNameText,
@@ -53,6 +55,7 @@ bot1.command('cancel', (ctx) => cancelFlow(ctx as SessionContext));
 // --- Tarif-ochish oqimi (callback tugmalari) — Part D qayta qurilishi ---
 bot1.action(/^getcode_tariff:(.+)$/, (ctx) => handleGetCodeTariffSelected(ctx as any));
 bot1.action(/^upgrade_tariff:(.+)$/, (ctx) => handleUpgradeTariffSelected(ctx as any));
+bot1.action(/^register_choice:(new|existing)$/, (ctx) => handleRegisterChoice(ctx as any));
 
 // Chek surati — faqat tegishli bosqichda kutilmoqda bo'lsa ishlaydi (D.3/D.4).
 bot1.on('photo', async (ctx) => {
@@ -87,6 +90,9 @@ bot1.on('text', async (ctx) => {
   if (text === MENU_UPGRADE) return enterUpgradeFlowFromMenu(sctx);
   if (text === MENU_ADMIN) return sendAdminContactInfo(sctx);
   if (text === MENU_FEEDBACK) return enterFeedbackFlow(sctx);
+  // "Ro'yxatdan o'tish" — yagona kirish eshigi: yangi/mavjud mijoz
+  // tanlovini so'rab, shunga qarab Flow A yoki Flow B'ga yo'naltiradi.
+  if (text === MENU_REGISTER) return enterRegisterChoice(sctx);
   if (text === '❌ Bekor qilish') return cancelFlow(sctx);
 
   return handleFreeformQuestion(sctx, text);

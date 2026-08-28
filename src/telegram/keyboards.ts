@@ -16,15 +16,22 @@ export const MENU_UPGRADE = '⬆️ Tarifni oshirish';
 // -to'g'ri Bot 2'ga (adminlarga) yuboriladi (handlers/menu.ts'dagi
 // enterFeedbackFlow/handleFeedbackText'ga qarang).
 export const MENU_FEEDBACK = '📝 Etiroz/Tavsiya';
+// Yagona "kirish eshigi": bosilganda avval "Yangimisiz yoki mavjud
+// mijozmisiz?" deb so'raydi, javobiga qarab Sotib olmoqchiman (yangi)
+// yoki Kod olish (mavjud, telefon orqali) oqimiga yo'naltiradi —
+// tariffFlow.ts'dagi enterRegisterChoice'ga qarang.
+export const MENU_REGISTER = "📝 Ro'yxatdan o'tish";
 
 // Joylashuv: 1-tugma (kompaniya/platforma haqida) TO'LIQ qatorni egallaydi,
-// qolgan 6 tasi 2 USTUN qilib (chapda 3, o'ngda 3 — har qatorda bittadan
-// juft) joylashadi (foydalanuvchi shunday so'radi).
+// keyingi 6 tasi 2 USTUN qilib (chapda 3, o'ngda 3 — har qatorda bittadan
+// juft) joylashadi, "Ro'yxatdan o'tish" esa ENG PASTDA, alohida TO'LIQ
+// (100%) qatorda turadi (foydalanuvchi shunday so'radi).
 export const MAIN_MENU = Markup.keyboard([
   [MENU_INFO],
   [MENU_PRICING, MENU_UPGRADE],
   [MENU_BUY, MENU_ADMIN],
   [MENU_GET_CODE, MENU_FEEDBACK],
+  [MENU_REGISTER],
 ])
   .resize()
   .persistent();

@@ -150,6 +150,33 @@ export async function enterUpgradeFlowFromMenu(ctx: SessionContext): Promise<voi
 }
 
 // ============================================================================
+// "📝 Ro'yxatdan o'tish" — yagona kirish eshigi: avval "yangimisiz yoki
+// mavjud mijozmisiz?" deb so'raydi, javobiga qarab Flow A (Sotib
+// olmoqchiman) yoki Flow B (Kod olish/Tarifni oshirish, telefon orqali)
+// oqimiga yo'naltiradi. Mavjud 3 tugma (Sotib olmoqchiman/Kod olish/
+// Tarifni oshirish) o'zgarishsiz qoladi — bu shunchaki qo'shimcha, tezroq
+// kirish eshigi.
+// ============================================================================
+export async function enterRegisterChoice(ctx: SessionContext): Promise<void> {
+  await resetSession(ctx);
+  await ctx.reply(
+    'Siz yangi mijozmisiz yoki bizda allaqachon obunangiz bormi?',
+    Markup.inlineKeyboard([
+      [Markup.button.callback('🆕 Yangi mijozman', 'register_choice:new')],
+      [Markup.button.callback('🔁 Mavjud mijozman', 'register_choice:existing')],
+    ]),
+  );
+}
+
+export async function handleRegisterChoice(ctx: SessionContext & { match: RegExpExecArray }): Promise<void> {
+  const choice = ctx.match[1];
+  await ctx.answerCbQuery().catch(() => {});
+  await ctx.deleteMessage().catch(() => {});
+  if (choice === 'new') return enterGetCodeFlowFromMenu(ctx);
+  return enterUpgradeFlowFromMenu(ctx);
+}
+
+// ============================================================================
 // PART D.3 — "Kalit olish" oqimi (birinchi xarid)
 // ============================================================================
 export async function enterGetCodeFlow(ctx: SessionContext, companyId: string): Promise<void> {
