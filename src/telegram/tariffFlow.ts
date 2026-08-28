@@ -126,6 +126,21 @@ function parsePositiveInt(text: string): number | null {
   return Number.isFinite(n) && n >= 1 ? n : null;
 }
 
+// editMessageText Telegram tomonidan rad etilishi mumkin ("message to edit
+// not found" — xabar o'chirilgan/48 soatdan eski, yoki "message is not
+// modified") — bu ODATIY holat, ISHONCHSIZ emas. Shu sabab tahrirlash
+// muvaffaqiyatsiz bo'lsa YANGI xabar sifatida yuboriladi — hech qachon
+// tashlab yubormaydi (production'da aniqlangan xato: answerCbQuery bilan
+// bir xil sinf — tahrirlash tashlagan xato mutatsiya qilingan sessiya
+// holatini saqlashdan OLDIN butun handler'ni to'xtatib qo'yar edi).
+async function safeEditOrReply(ctx: SessionContext, text: string, extra?: Record<string, unknown>): Promise<void> {
+  try {
+    await ctx.editMessageText(text, extra as any);
+  } catch {
+    await ctx.reply(text, extra as any).catch(() => {});
+  }
+}
+
 // "Kod olish"/"Tarifni oshirish" oqimida (Reviziya 5) ism alohida
 // so'RALMAYDI — mijoz allaqachon telefon/companyId orqali aniqlangan, shu
 // sabab Telegram profilidagi ism Bot 2'ga ko'rsatish uchun ishlatiladi.
@@ -203,12 +218,12 @@ export async function handleGetCodeTariffSelected(ctx: SessionContext & { match:
   await ctx.answerCbQuery().catch(() => {});
 
   const tariff = await getTariff(tariffId);
-  if (!tariff) { await ctx.editMessageText("Noma'lum tarif."); return; }
+  if (!tariff) { await safeEditOrReply(ctx, "Noma'lum tarif."); return; }
 
   ctx.session.selectedTariffId = tariffId;
   ctx.session.step = 'getcode_awaiting_employee_count';
-  await ctx.editMessageText(`Siz *${tariff.name}* tarifini tanladingiz.`, { parse_mode: 'Markdown' });
-  await ctx.reply("Nechta xodimingiz bor?");
+  await safeEditOrReply(ctx, `Siz *${tariff.name}* tarifini tanladingiz.`, { parse_mode: 'Markdown' });
+  await ctx.reply("Nechta xodimingiz bor?").catch(() => {});
 }
 
 export async function handleGetCodeEmployeeCountText(ctx: SessionContext, text: string): Promise<void> {
@@ -414,12 +429,12 @@ export async function handleUpgradeTariffSelected(ctx: SessionContext & { match:
   await ctx.answerCbQuery().catch(() => {}); // qarang: handleGetCodeTariffSelected'dagi izoh
 
   const tariff = await getTariff(tariffId);
-  if (!tariff) { await ctx.editMessageText("Noma'lum tarif."); return; }
+  if (!tariff) { await safeEditOrReply(ctx, "Noma'lum tarif."); return; }
 
   ctx.session.selectedTariffId = tariffId;
   ctx.session.step = 'upgrade_awaiting_employee_count';
-  await ctx.editMessageText(`Siz *${tariff.name}* tarifini tanladingiz.`, { parse_mode: 'Markdown' });
-  await ctx.reply("Nechta xodimingiz bor?");
+  await safeEditOrReply(ctx, `Siz *${tariff.name}* tarifini tanladingiz.`, { parse_mode: 'Markdown' });
+  await ctx.reply("Nechta xodimingiz bor?").catch(() => {});
 }
 
 export async function handleUpgradeEmployeeCountText(ctx: SessionContext, text: string): Promise<void> {
