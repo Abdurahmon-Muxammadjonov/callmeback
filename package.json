@@ -10,7 +10,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "lint": "eslint",
-    "sync:pbx-history": "tsx src/scripts/sync-pbx-history.ts"
+    "sync:pbx-history": "tsx src/scripts/sync-pbx-history.ts",
+    "cleanup:recordings": "tsx src/scripts/cleanup-recordings.ts"
   },
   "dependencies": {
     "@google/genai": "^2.15.0",
