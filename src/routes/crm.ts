@@ -154,47 +154,44 @@ async function findClientByPhone(phoneRaw: string): Promise<{ id: string; name: 
   };
 }
 
-function mimeToExt(mimeType: string): string {
-  if (mimeType.includes('wav')) return 'wav';
-  if (mimeType.includes('ogg')) return 'ogg';
-  if (mimeType.includes('mp4') || mimeType.includes('m4a') || mimeType.includes('aac')) return 'm4a';
-  return 'mp3';
-}
-
-async function persistAudioToStorage(audioSourceUrl: string, apiKey: string): Promise<{ publicUrl: string; path: string }> {
-  const response = await fetch(audioSourceUrl, {
-    method: 'GET',
-    redirect: 'follow',
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; ProcellPBX/1.0)',
-      Accept: 'audio/*,*/*',
-      'X-API-Key': apiKey,
-      Authorization: `Bearer ${apiKey}`,
-    },
-  });
-  if (!response.ok) throw new Error(`Audio download failed: HTTP ${response.status}`);
-
-  const contentType = (response.headers.get('content-type') || 'audio/mpeg').split(';')[0].trim().toLowerCase();
-  if (contentType.startsWith('text/') || contentType.includes('html') || contentType.includes('json')) {
-    throw new Error(`Audio download failed: non-audio content-type (${contentType})`);
+// DIQQAT (2026-09-06): avval bu yerda har bir qo'ng'iroq audiosini PBX'dan
+// yuklab olib, Supabase Storage'ning "recordings" bucket'iga NUSXALAB
+// qo'yadigan funksiya bor edi va u fayllarni HECH QACHON o'chirmasdi.
+// Natijada storage kvotasi to'lib, BUTUN Supabase loyihasi bloklandi
+// (HTTP 402) — baza yopilib, Telegram bot ham, API ham ishlamay qoldi.
+//
+// Endi audio nusxalanmaydi: calls.audio_source_url'da PBX'dagi asl havola
+// saqlanadi, foydalanuvchiga esa GET /api/calls/:id/audio orqali oqim (proxy)
+// qilib beriladi (src/lib/audioAccess.ts). Storage sarflanmaydi.
+//
+// Quyidagi funksiya faqat ARZON tekshiruv qiladi: havola aniq audio EMASligi
+// ma'lum bo'lsa (HTML/JSON xato sahifasi qaytsa) — qo'ng'iroq o'tkazib
+// yuboriladi; avvalgi xatti-harakat saqlanadi, lekin faylni yuklab olmasdan.
+async function assertAudioReachable(audioSourceUrl: string, apiKey: string): Promise<void> {
+  // DIQQAT: bu faylda `Response` — Express'ning javob tipi (yuqorida import
+  // qilingan), fetch'niki EMAS. Shu sabab global fetch javobining tipini
+  // to'g'ridan-to'g'ri fetch'dan olamiz.
+  let response: Awaited<ReturnType<typeof fetch>>;
+  try {
+    response = await fetch(audioSourceUrl, {
+      method: 'HEAD',
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; ProcellPBX/1.0)',
+        Accept: 'audio/*,*/*',
+        'X-API-Key': apiKey,
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+  } catch {
+    return; // tarmoq xatosi/HEAD qo'llab-quvvatlanmasa — tahlil bosqichida aniqlanadi
   }
+  if (!response.ok) return; // ba'zi PBX'lar HEAD'ni qo'llamaydi — to'sib qo'ymaymiz
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (!buffer.length) throw new Error('Audio download failed: empty body');
-
-  await supabase.storage.createBucket('recordings', { public: true }).catch(() => {});
-  const extension = mimeToExt(contentType);
-  const objectPath = `pbx/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.${extension}`;
-
-  const { error: uploadError } = await supabase.storage
-    .from('recordings')
-    .upload(objectPath, buffer, { contentType, upsert: false });
-  if (uploadError) throw new Error(`Audio upload failed: ${uploadError.message}`);
-
-  const { data } = supabase.storage.from('recordings').getPublicUrl(objectPath);
-  if (!data?.publicUrl) throw new Error('Audio upload failed: public URL empty');
-
-  return { publicUrl: data.publicUrl, path: objectPath };
+  const contentType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (contentType.startsWith('text/') || contentType.includes('html') || contentType.includes('json')) {
+    throw new Error(`Audio havolasi audio emas (content-type: ${contentType})`);
+  }
 }
 
 async function resolveAudioUrlByCallId(callId: string, webhookUrl: string, apiKey: string): Promise<string> {
@@ -353,7 +350,7 @@ async function syncCallsFromPayload(calls: BatchCallItem[], apiKey: string, webh
           : '');
       if (!sourceAudioUrl) continue;
 
-      const persisted = await persistAudioToStorage(sourceAudioUrl, apiKey);
+      await assertAudioReachable(sourceAudioUrl, apiKey);
 
       let mappedClientId = call.client_id;
       let mappedClientName = call.client_name;
@@ -368,10 +365,8 @@ async function syncCallsFromPayload(calls: BatchCallItem[], apiKey: string, webh
 
       enrichedCalls.push({
         ...call,
-        audio_url: persisted.publicUrl,
+        audio_url: sourceAudioUrl,
         audio_source_url: sourceAudioUrl,
-        audio_storage_url: persisted.publicUrl,
-        audio_storage_path: persisted.path,
         client_id: mappedClientId,
         client_name: mappedClientName,
         client_phone: phone || undefined,
@@ -674,7 +669,7 @@ async function processPbxWebhookCallsInBackground(
         continue;
       }
 
-      const persisted = await persistAudioToStorage(sourceAudioUrl, expectedKey);
+      await assertAudioReachable(sourceAudioUrl, expectedKey);
 
       let mappedClientId = call.client_id;
       let mappedClientName = call.client_name;
@@ -689,10 +684,8 @@ async function processPbxWebhookCallsInBackground(
 
       enrichedCalls.push({
         ...call,
-        audio_url: persisted.publicUrl,
+        audio_url: sourceAudioUrl,
         audio_source_url: sourceAudioUrl,
-        audio_storage_url: persisted.publicUrl,
-        audio_storage_path: persisted.path,
         client_id: mappedClientId,
         client_name: mappedClientName,
         client_phone: phone || undefined,

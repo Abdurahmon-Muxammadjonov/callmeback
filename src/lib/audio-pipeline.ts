@@ -6,6 +6,7 @@ import { copyFile, mkdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { pbxAuthHeaders } from './audioAccess';
 
 export interface CriteriaScore {
   title: string;
@@ -132,6 +133,13 @@ function describeAxiosError(error: unknown, context: string): Error {
 }
 
 async function downloadAudioToTmp(audioUrl: string, targetFilePath: string): Promise<void> {
+  // Audio endi Supabase Storage'ga nusxalanmaydi (kvota to'lib loyiha
+  // bloklangani uchun) — calls.audio_url PBX'dagi ASL havolaga ishora
+  // qiladi, u esa API kalit talab qiladi. Shu sabab yuklab olishda PBX
+  // sarlavhalarini qo'shamiz; kalit FAQAT PBX hostiga yuboriladi
+  // (audioAccess.pbxAuthHeaders shuni tekshiradi), begona manzilga emas.
+  const authHeaders = await pbxAuthHeaders(audioUrl);
+
   let response;
   try {
     response = await axios.get(audioUrl, {
@@ -141,6 +149,7 @@ async function downloadAudioToTmp(audioUrl: string, targetFilePath: string): Pro
       headers: {
         'User-Agent': 'Procell-Audio/1.0',
         Accept: 'audio/*,*/*',
+        ...authHeaders,
       },
     });
   } catch (error) {

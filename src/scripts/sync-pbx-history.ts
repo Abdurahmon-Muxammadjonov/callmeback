@@ -1,6 +1,5 @@
 import '../env';
 
-import { randomUUID } from 'node:crypto';
 import { Agent } from 'undici';
 import { supabase } from '../lib/supabase';
 
@@ -423,81 +422,48 @@ async function fetchHistoryAudioUrl(call: PbxHistoryCall, config: SyncRuntimeCon
   return audioUrl;
 }
 
-function mimeToExt(mimeType: string): string {
-  if (mimeType.includes('wav')) return 'wav';
-  if (mimeType.includes('ogg')) return 'ogg';
-  if (mimeType.includes('mp4') || mimeType.includes('m4a') || mimeType.includes('aac')) return 'm4a';
-  return 'mp3';
-}
-
-async function readStreamToBufferInChunks(response: Response, maxBytes: number): Promise<Buffer> {
-  if (!response.body) throw new Error('Audio stream mavjud emas.');
-
-  const reader = response.body.getReader();
-  const chunks: Buffer[] = [];
-  let total = 0;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-
-    total += value.byteLength;
-    if (total > maxBytes) {
-      throw new Error(`Audio fayl juda katta: ${total} bytes (limit ${maxBytes}).`);
-    }
-    chunks.push(Buffer.from(value));
+// DIQQAT (2026-09-06): avval bu funksiya audioni PBX'dan TO'LIQ yuklab olib
+// Supabase Storage'ga nusxalardi. Tarixiy sync minglab qo'ng'iroqni import
+// qilgani uchun aynan shu storage kvotasini to'ldirib, butun loyihani
+// bloklab qo'ygan edi. Endi nusxa OLINMAYDI — calls.audio_source_url'da
+// PBX'dagi asl havola qoladi, eshitish esa GET /api/calls/:id/audio orqali
+// (src/lib/audioAccess.ts) amalga oshadi.
+//
+// Faylni yuklab olmaymiz, faqat HEAD bilan tekshiramiz: havola aniq audio
+// emasligi ma'lum bo'lsa — qo'ng'iroq import qilinmaydi (avvalgidek).
+async function assertAudioReachable(audioUrl: string, config: SyncRuntimeConfig): Promise<void> {
+  let response: Awaited<ReturnType<typeof fetch>>;
+  try {
+    response = await runWithRetry(async () => fetch(audioUrl, {
+      method: 'HEAD',
+      redirect: 'follow',
+      headers: {
+        Accept: 'audio/*,*/*',
+        Connection: 'keep-alive',
+        'X-API-Key': config.apiKey,
+        Authorization: `Bearer ${config.apiKey}`,
+        'User-Agent': 'Mozilla/5.0 (compatible; ProcellPBXHistorySync/1.0)',
+      },
+      signal: AbortSignal.timeout(config.audioTimeoutMs),
+      // @ts-expect-error — undici-specific option, standard fetch types don't declare it
+      dispatcher: pbxAgent,
+    }), {
+      retries: config.retryCount,
+      delayMs: config.retryDelayMs,
+      shouldRetry: ({ error }) => isRetryableNetworkError(error),
+      onRetry: ({ attempt, retries, error }) => {
+        console.warn(`Audio HEAD retry ${attempt}/${retries + 1}:`, (error as any)?.message || error);
+      },
+    });
+  } catch {
+    return; // HEAD qo'llab-quvvatlanmasa yoki tarmoq xatosi — import to'sib qo'yilmaydi
   }
+  if (!response.ok) return;
 
-  return Buffer.concat(chunks, total);
-}
-
-async function persistAudio(audioUrl: string, config: SyncRuntimeConfig): Promise<{ publicUrl: string; path: string }> {
-  const response = await runWithRetry(async () => fetch(audioUrl, {
-    method: 'GET',
-    redirect: 'follow',
-    headers: {
-      Accept: 'audio/*,*/*',
-      Connection: 'keep-alive',
-      'X-API-Key': config.apiKey,
-      Authorization: `Bearer ${config.apiKey}`,
-      'User-Agent': 'Mozilla/5.0 (compatible; ProcellPBXHistorySync/1.0)',
-    },
-    signal: AbortSignal.timeout(config.audioTimeoutMs),
-    // @ts-expect-error — undici-specific option, standard fetch types don't declare it
-    dispatcher: pbxAgent,
-  }), {
-    retries: config.retryCount,
-    delayMs: config.retryDelayMs,
-    shouldRetry: ({ error }) => isRetryableNetworkError(error),
-    onRetry: ({ attempt, retries, error }) => {
-      console.warn(`Audio fetch retry ${attempt}/${retries + 1}:`, (error as any)?.message || error);
-    },
-  });
-  if (!response.ok) throw new Error(`Audio yuklab bo‘lmadi: HTTP ${response.status}`);
-
-  const contentType = (response.headers.get('content-type') || 'audio/mpeg').split(';')[0].trim().toLowerCase();
+  const contentType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   if (contentType.startsWith('text/') || contentType.includes('html') || contentType.includes('json')) {
     throw new Error(`Audio emas (content-type=${contentType}).`);
   }
-
-  const buffer = await readStreamToBufferInChunks(response, config.maxAudioBytes);
-  if (!buffer.length) throw new Error('Audio body bo‘sh.');
-
-  await supabase.storage.createBucket(config.audioBucket, { public: true }).catch(() => {});
-  const ext = mimeToExt(contentType);
-  const day = new Date().toISOString().slice(0, 10);
-  const objectPath = `pbx/history/${day}/${randomUUID()}.${ext}`;
-
-  const { error: uploadError } = await supabase.storage
-    .from(config.audioBucket)
-    .upload(objectPath, buffer, { contentType, upsert: false });
-  if (uploadError) throw new Error(`Storage upload xatosi: ${uploadError.message}`);
-
-  const { data } = supabase.storage.from(config.audioBucket).getPublicUrl(objectPath);
-  if (!data?.publicUrl) throw new Error('Storage public URL olinmadi.');
-
-  return { publicUrl: data.publicUrl, path: objectPath };
 }
 
 async function loadUsersPhoneMap(): Promise<Map<string, { id: string; name: string; phone: string | null }>> {
@@ -571,9 +537,7 @@ function buildCallInsertRow(params: {
   call: PbxHistoryCall;
   managerId: string;
   client?: { id: string; name: string; phone: string | null };
-  audioPublicUrl: string;
   audioSourceUrl: string;
-  audioStoragePath: string;
 }): CallInsertRow {
   const createdAt = params.call.startedAt || new Date().toISOString();
 
@@ -582,10 +546,8 @@ function buildCallInsertRow(params: {
     crm_id: params.call.crmId,
     pbx_call_id: params.call.pbxCallId,
     direction: params.call.direction,
-    audio_url: params.audioPublicUrl,
+    audio_url: params.audioSourceUrl,
     audio_source_url: params.audioSourceUrl,
-    audio_storage_url: params.audioPublicUrl,
-    audio_storage_path: params.audioStoragePath,
     client_phone: params.call.clientPhone,
     client_name: params.call.clientName || params.client?.name || null,
     created_at: createdAt,
@@ -756,15 +718,13 @@ export async function runPbxHistorySync(options: RunSyncOptions = {}): Promise<S
             const mappedClient = normalizedPhone ? usersByPhone.get(normalizedPhone) : undefined;
 
             const sourceAudioUrl = await fetchHistoryAudioUrl(parsed, config);
-            const persisted = await persistAudio(sourceAudioUrl, config);
+            await assertAudioReachable(sourceAudioUrl, config);
 
             pendingRows.push(buildCallInsertRow({
               call: parsed,
               managerId: manager.id,
               client: mappedClient,
-              audioPublicUrl: persisted.publicUrl,
               audioSourceUrl: sourceAudioUrl,
-              audioStoragePath: persisted.path,
             }));
             if (pendingRows.length >= config.writeBatchSize) {
               await flushPendingRows();
