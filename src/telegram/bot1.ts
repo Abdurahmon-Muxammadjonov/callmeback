@@ -19,6 +19,14 @@ import {
   enterUpgradeFlowFromMenu,
   enterRegisterChoice,
   handleRegisterChoice,
+  enterCodeByEmailFlow,
+  enterCodeByEmailFlowFromMenu,
+  handleCodeEmailPhoneText,
+  handleCodeEmailEmailText,
+  handleCodeEmailTariffSelected,
+  handleCodeEmailEmployeeCountText,
+  handleCodeEmailConfirmPay,
+  handleCodeEmailReceiptPhoto,
   handleGetCodeTariffSelected,
   handleGetCodeEmployeeCountText,
   handleGetCodeNameText,
@@ -42,10 +50,9 @@ bot1.command('start', async (ctx) => {
       await ctx.reply("Havola muddati tugagan yoki allaqachon ishlatilgan. Iltimos, saytdan qayta oching.");
       return;
     }
-    // "get_code" deep-link ham endi Flow B (mavjud mijoz) semantikasiga
-    // ega — companyId sayt orqali (kirgan foydalanuvchi) allaqachon ma'lum,
-    // shu sabab telefon-qidiruv bosqichi kerak emas (Reviziya 5).
-    if (resolved.purpose === 'get_code') return enterUpgradeFlow(ctx as SessionContext, resolved.companyId);
+    // "get_code" deep-link -> "Kod olish" oqimi (Reviziya 6). companyId sayt
+    // orqali allaqachon ma'lum, shu sabab email so'ralmaydi — faqat telefon.
+    if (resolved.purpose === 'get_code') return enterCodeByEmailFlow(ctx as SessionContext, resolved.companyId);
     if (resolved.purpose === 'upgrade') return enterUpgradeFlow(ctx as SessionContext, resolved.companyId);
   }
   return handleStart(ctx as SessionContext);
@@ -56,6 +63,8 @@ bot1.command('cancel', (ctx) => cancelFlow(ctx as SessionContext));
 bot1.action(/^getcode_tariff:(.+)$/, (ctx) => handleGetCodeTariffSelected(ctx as any));
 bot1.action(/^upgrade_tariff:(.+)$/, (ctx) => handleUpgradeTariffSelected(ctx as any));
 bot1.action(/^register_choice:(new|existing)$/, (ctx) => handleRegisterChoice(ctx as any));
+bot1.action(/^codeemail_tariff:(.+)$/, (ctx) => handleCodeEmailTariffSelected(ctx as any));
+bot1.action(/^codeemail_pay:(yes|no)$/, (ctx) => handleCodeEmailConfirmPay(ctx as any));
 
 // Chek surati — faqat tegishli bosqichda kutilmoqda bo'lsa ishlaydi (D.3/D.4).
 bot1.on('photo', async (ctx) => {
@@ -63,6 +72,7 @@ bot1.on('photo', async (ctx) => {
   const step = sctx.session.step;
   if (step === 'getcode_awaiting_receipt') return handleGetCodeReceiptPhoto(sctx);
   if (step === 'upgrade_awaiting_receipt') return handleUpgradeReceiptPhoto(sctx);
+  if (step === 'codeemail_awaiting_receipt') return handleCodeEmailReceiptPhoto(sctx);
   // Kutilmagan rasm — e'tiborsiz qoldiriladi (masalan tasodifiy yuborilgan bo'lsa).
 });
 
@@ -78,15 +88,20 @@ bot1.on('text', async (ctx) => {
   if (step === 'getcode_awaiting_company_name') return handleGetCodeCompanyNameText(sctx, text);
   if (step === 'upgrade_awaiting_phone') return handleUpgradePhoneText(sctx, text);
   if (step === 'upgrade_awaiting_employee_count') return handleUpgradeEmployeeCountText(sctx, text);
+  if (step === 'codeemail_awaiting_phone') return handleCodeEmailPhoneText(sctx, text);
+  if (step === 'codeemail_awaiting_email') return handleCodeEmailEmailText(sctx, text);
+  if (step === 'codeemail_awaiting_employee_count') return handleCodeEmailEmployeeCountText(sctx, text);
   if (step === 'feedback_awaiting_text') return handleFeedbackText(sctx, text);
 
   if (text === MENU_INFO) return sendPlatformInfo(sctx);
   if (text === MENU_PRICING) return sendPricingBrowse(sctx);
   // "Sotib olmoqchiman" — YANGI mijoz uchun (Kalit olish/Flow A, o'zgarishsiz).
   if (text === MENU_BUY) return enterGetCodeFlowFromMenu(sctx);
-  // "Kod olish" va "Tarifni oshirish" — endi AYNAN BIR XIL, MAVJUD mijoz
-  // uchun Flow B (telefon-qidiruv -> joriy tarif -> yangi tarif), Reviziya 5.
-  if (text === MENU_GET_CODE) return enterUpgradeFlowFromMenu(sctx);
+  // "Kod olish" — EMAIL orqali kompaniyani topadigan alohida oqim (Reviziya 6,
+  // 2026-09-20): telefon -> saytdagi email -> tarif -> xodim -> "To'laysizmi?"
+  // -> karta -> chek -> Bot 2 -> kod. Yangi (hali to'lamagan) kompaniya ham topiladi.
+  if (text === MENU_GET_CODE) return enterCodeByEmailFlowFromMenu(sctx);
+  // "Tarifni oshirish" — o'zgarishsiz: Flow B (telefon -> obuna -> joriy tarif -> yangi tarif).
   if (text === MENU_UPGRADE) return enterUpgradeFlowFromMenu(sctx);
   if (text === MENU_ADMIN) return sendAdminContactInfo(sctx);
   if (text === MENU_FEEDBACK) return enterFeedbackFlow(sctx);

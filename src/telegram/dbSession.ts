@@ -17,7 +17,8 @@ export interface BotSession {
   phone?: string;
   company?: string;
   // --- yangi tarif-ochish oqimi (Part 2/3/4) ---
-  flow?: 'get_code' | 'upgrade';
+  flow?: 'get_code' | 'upgrade' | 'code_email';
+  email?: string; // 'code_email' oqimi — saytdagi ro'yxat emaili
   companyId?: string;
   step?: string;
   selectedTariffId?: string;

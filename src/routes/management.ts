@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { supabase, fetchAllRows } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 import { getCompanyManagerIds } from '../lib/companyScope';
+import { isMissingFunctionError, relationshipDynamicsInNode } from '../lib/analyticsFallback';
 
 const router = Router();
 
@@ -44,11 +45,10 @@ router.get('/platforms', async (_req: Request, res: Response) => {
 // requireAuth'siz va tenant filtrisiz edi — HAR QANDAY kishi boshqa
 // kompaniyalarning agregatlangan qo'ng'iroq dinamikasini ko'ra olardi.
 // Endi requireAuth majburiy va p_manager_ids (chaqiruvchi kompaniyaning
-// o'z menejerlari) DB funksiyasiga uzatiladi — supabase/
-// tenant_scoped_aggregates.sql ishga tushirilgunga qadar bu funksiya
-// eski (p_manager_ids'siz) imzoda bo'lsa, chaqiruv xato bilan qaytadi —
-// bu ATAYLAB shunday: aniq xato, jim-jimgina boshqa tenant ma'lumotini
-// ko'rsatishdan YAXSHIROQ.
+// o'z menejerlari) DB funksiyasiga uzatiladi. supabase/
+// tenant_scoped_aggregates.sql hali ishga tushirilmagan bo'lsa (eski imzo),
+// xuddi shu tenant chegarasi bilan Node'da hisoblanadi (analyticsFallback.ts) —
+// boshqa tenant ma'lumoti hech qachon ko'rsatilmaydi.
 router.get('/relationship-dynamics', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
     const companyId = req.auth!.companyId as string;
@@ -56,7 +56,14 @@ router.get('/relationship-dynamics', requireAuth, async (req: CompanyAuthedReque
     const managerIds = await getCompanyManagerIds(companyId);
 
     const { data, error } = await supabase.rpc('calls_relationship_dynamics', { p_platform_id: platformId, p_manager_ids: managerIds });
-    if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
+    if (error) {
+      // SQL (tenant_scoped_aggregates.sql) hali ishga tushirilmagan bo'lsa —
+      // bir xil tenant chegarasi bilan Node'da hisoblaymiz.
+      if (isMissingFunctionError(error)) {
+        return res.status(200).json({ success: true, data: await relationshipDynamicsInNode(managerIds, platformId), fallback: true });
+      }
+      return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
+    }
 
     return res.status(200).json({ success: true, data });
   } catch (err: any) {

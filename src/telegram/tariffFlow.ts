@@ -14,9 +14,14 @@ import {
   type LatestSubscription,
 } from '../lib/tariffPayments';
 
-// Part D qayta qurilishi — REVIZIYA 5 (yakuniy, foydalanuvchi tasdiqladi):
-// endi ikkita AJRALGAN oqim bor, ikkalasi ham bitta umumiy kartaga to'laydi
-// (PAYMENT_CARD_TEXT):
+// Part D qayta qurilishi — REVIZIYA 6 (2026-09-20, foydalanuvchi tasdiqladi):
+// uchta oqim bor, hammasi bitta umumiy kartaga to'laydi (PAYMENT_CARD_TEXT —
+// 2026-09-20'da 8600... o'rniga 5614 6821 1878 9132 (L.A) ga almashtirildi).
+//
+//  C) "🎟 Kod olish" — EMAIL orqali (pastdagi alohida blokga qarang):
+//     telefon -> saytdagi email (users.email -> company_id) -> tarif ->
+//     xodimlar soni -> "To'laysizmi?" -> karta -> chek -> Bot 2 -> kod.
+//     Yangi (hali to'lamagan) kompaniya ham topiladi.
 //
 //  A) "🛒 Sotib olmoqchiman" — YANGI mijoz, hech narsa oldindan ma'lum emas:
 //     tarif tanlash -> xodimlar soni -> ism -> telefon -> kompaniya nomi
@@ -24,8 +29,9 @@ import {
 //     ro'yxatdan o'tgan bo'lishi SHART) -> narx+karta -> chek rasmi ->
 //     Bot 2'ga forward. Quyida "Kalit olish" nomi bilan qoldirilgan (D.3).
 //
-//  B) "🎟 Kod olish" VA "⬆️ Tarifni oshirish" — endi AYNAN BIR XIL, MAVJUD
-//     mijoz uchun: telefon raqam (faqat menyudan kirilganda so'raladi) ->
+//  B) "⬆️ Tarifni oshirish" (Reviziya 6'dan boshlab "Kod olish" bu oqimda
+//     EMAS — u C'ga o'tdi) — MAVJUD mijoz uchun: telefon raqam (faqat
+//     menyudan kirilganda so'raladi) ->
 //     shu raqam bo'yicha OXIRGI obuna (subscriptions) qidiriladi ->
 //     topilmasa "avval Sotib olmoqchiman orqali ro'yxatdan o'ting" ->
 //     topilsa "Sizning tarifingiz: X" ko'rsatiladi -> yangi tarif tanlanadi
@@ -33,7 +39,7 @@ import {
 //     proratsiya olib tashlandi) -> chek rasmi -> Bot 2'ga forward. Ism
 //     alohida so'RALMAYDI — Telegram profilidan olinadi (telegramDisplayName).
 
-const PAYMENT_CARD_TEXT = "💳 Karta: 8600 1404 7274 5281 (A.X.M)";
+const PAYMENT_CARD_TEXT = "💳 Karta: 5614 6821 1878 9132 (L.A)";
 
 // Telegram'ning (legacy) 'Markdown' parse_mode'i 4 ta belgini maxsus
 // deb hisoblaydi: _ * ` [ — foydalanuvchi matnida (ism, familiya, Telegram
@@ -367,6 +373,256 @@ export async function handleGetCodeReceiptPhoto(ctx: SessionContext): Promise<vo
     `📦 Tarif: ${tariff.name} — ${formatSum(tariff.price)} so'm/xodim × ${employeeCount} xodim = ${formatSum(total)} so'm`,
     `🕐 Vaqt: ${new Date().toISOString()}`,
   ].join('\n');
+
+  await forwardToBot2({
+    caption,
+    receiptUrl,
+    approveAction: `key_approve:${requestId}`,
+    rejectAction: `key_reject:${requestId}`,
+  });
+}
+
+// ============================================================================
+// "🎟 Kod olish" — EMAIL orqali (Reviziya 6, 2026-09-20, foydalanuvchi
+// tasdiqladi; FAQAT shu tugma uchun — Sotib olmoqchiman/Tarifni oshirish
+// o'zgarishsiz qoldi).
+//
+// Maqsad: odam saytda kompaniya yaratadi -> dashboard'da hamma bo'lim qulf ->
+// "kodni Telegramdan oling" -> botda "Kod olish":
+//   1. Telefon raqam
+//   2. Saytda ro'yxatdan o'tgan EMAIL -> users.email bo'yicha kompaniya
+//      topiladi (yangi, hali to'lamagan kompaniya ham topiladi — avvalgi
+//      "kompaniya nomi topilmadi" muammosi shu bilan hal bo'ladi)
+//   3. "Ha, topildi! Qaysi tarifni tanlaysiz?" -> tarif
+//   4. Xodimlar soni -> narx -> "To'laysizmi?" (Ha/Yo'q)
+//   5. Ha -> karta + "chekni shu chatga tashlang"
+//   6. Chek -> Bot 2'ga: "shu foydalanuvchiga 13 xonali kod beraymi?" ->
+//      admin Ha -> Bot 1 kodni yuboradi (1 soat, 1 marta) -> saytga kiritsa
+//      redeem_unlock_code tarifga qarab bo'limlarni ochadi.
+// Deep-link orqali (companyId ma'lum) kirilganda email so'ralmaydi.
+// ============================================================================
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+async function findCompanyByUserEmail(email: string): Promise<{ id: string; name: string } | null> {
+  const normalized = email.trim().toLowerCase();
+  if (!EMAIL_REGEX.test(normalized)) return null;
+
+  // ilike — saytda katta harf bilan yozilgan bo'lsa ham topilsin.
+  const { data: user } = await supabase
+    .from('users')
+    .select('company_id')
+    .ilike('email', normalized)
+    .not('company_id', 'is', null)
+    .limit(1)
+    .maybeSingle();
+  if (!user?.company_id) return null;
+
+  const { data: company } = await supabase.from('companies').select('id, name').eq('id', user.company_id).maybeSingle();
+  return company || null;
+}
+
+export async function enterCodeByEmailFlowFromMenu(ctx: SessionContext): Promise<void> {
+  await enterCodeByEmailFlow(ctx, '');
+}
+
+export async function enterCodeByEmailFlow(ctx: SessionContext, companyId: string): Promise<void> {
+  await resetSession(ctx);
+  ctx.session.flow = 'code_email';
+  ctx.session.companyId = companyId || undefined;
+  ctx.session.fullName = telegramDisplayName(ctx);
+  ctx.session.step = 'codeemail_awaiting_phone';
+  await ctx.reply("Telefon raqamingizni kiriting:");
+}
+
+export async function handleCodeEmailPhoneText(ctx: SessionContext, text: string): Promise<void> {
+  const phone = text.trim();
+  if (phone.replace(/\D/g, '').length < 7) {
+    await ctx.reply("Iltimos, to'g'ri telefon raqam kiriting (masalan: +998 90 123 45 67).");
+    return;
+  }
+  ctx.session.phone = phone;
+
+  if (ctx.session.companyId) {
+    // Deep-link — kompaniya allaqachon ma'lum, email so'ramaymiz.
+    await showCodeEmailTariffOptions(ctx, ctx.session.companyId);
+    return;
+  }
+
+  ctx.session.step = 'codeemail_awaiting_email';
+  await ctx.reply("Saytda ro'yxatdan o'tgan email (Gmail) manzilingizni kiriting:");
+}
+
+export async function handleCodeEmailEmailText(ctx: SessionContext, text: string): Promise<void> {
+  const email = text.trim().toLowerCase();
+  if (!EMAIL_REGEX.test(email)) {
+    await ctx.reply("Bu email ko'rinishida emas. Iltimos, saytda ro'yxatdan o'tgan email'ingizni kiriting (masalan: ism@gmail.com).");
+    return;
+  }
+
+  let company: { id: string; name: string } | null;
+  try {
+    company = await findCompanyByUserEmail(email);
+  } catch (e: any) {
+    console.error('Email bo\'yicha kompaniya qidirishda xato:', e?.message);
+    await ctx.reply("Xatolik yuz berdi. Birozdan so'ng qayta urinib ko'ring.");
+    return;
+  }
+
+  if (!company) {
+    await ctx.reply(
+      "❌ Bu email bilan saytda ro'yxatdan o'tilmagan.\n\nAvval saytda kompaniya yarating (ro'yxatdan o'ting), keyin shu yerga qaytib \"🎟 Kod olish\"ni qayta bosing.",
+    );
+    await resetSession(ctx);
+    return;
+  }
+
+  ctx.session.email = email;
+  ctx.session.companyId = company.id;
+  await showCodeEmailTariffOptions(ctx, company.id, company.name);
+}
+
+async function showCodeEmailTariffOptions(ctx: SessionContext, companyId: string, companyName?: string): Promise<void> {
+  const name = companyName || (await getCompanyName(companyId));
+
+  // Kompaniyada allaqachon tarif bo'lsa — o'shani qayta ko'rsatmaymiz.
+  const { data: company } = await supabase.from('companies').select('tariff_id').eq('id', companyId).maybeSingle();
+  const currentTariffId = company?.tariff_id ?? null;
+  const allTariffs = await listTariffs();
+  const tariffs = currentTariffId ? allTariffs.filter((t) => t.id !== currentTariffId) : allTariffs;
+
+  if (tariffs.length === 0) {
+    await ctx.reply("Tanlash uchun tarif topilmadi. Admin bilan bog'laning.");
+    await resetSession(ctx);
+    return;
+  }
+
+  ctx.session.step = 'codeemail_selecting_tariff';
+  await ctx.reply(
+    `✅ Ha, topildi!\n🏢 Kompaniya: *${escapeMarkdown(name)}*\n\nEndi qaysi tarifni tanlaysiz?`,
+    { parse_mode: 'Markdown', ...tariffSelectKeyboard(tariffs, 'codeemail_tariff') },
+  );
+}
+
+export async function handleCodeEmailTariffSelected(ctx: SessionContext & { match: RegExpExecArray }): Promise<void> {
+  const tariffId = ctx.match[1];
+  await ctx.answerCbQuery().catch(() => {}); // qarang: handleGetCodeTariffSelected'dagi izoh
+
+  const tariff = await getTariff(tariffId);
+  if (!tariff) { await safeEditOrReply(ctx, "Noma'lum tarif."); return; }
+
+  ctx.session.selectedTariffId = tariffId;
+  ctx.session.step = 'codeemail_awaiting_employee_count';
+  await safeEditOrReply(ctx, `Siz *${tariff.name}* tarifini tanladingiz.`, { parse_mode: 'Markdown' });
+  await ctx.reply("Nechta xodimingiz bor?").catch(() => {});
+}
+
+export async function handleCodeEmailEmployeeCountText(ctx: SessionContext, text: string): Promise<void> {
+  const n = parsePositiveInt(text);
+  if (!n) { await ctx.reply('Iltimos, ijobiy butun son kiriting (masalan: 5).'); return; }
+  ctx.session.employeeCount = n;
+
+  const tariff = await getTariff(ctx.session.selectedTariffId as string);
+  if (!tariff) { await ctx.reply("Sessiya eskirgan. Qaytadan boshlang: /start"); await resetSession(ctx); return; }
+
+  const total = tariff.price * n;
+  ctx.session.finalPrice = total;
+  ctx.session.step = 'codeemail_confirm_pay';
+  await ctx.reply(
+    [
+      `📦 Tarif: *${tariff.name}*`,
+      `💰 ${formatSum(tariff.price)} so'm/xodim × ${n} xodim = *${formatSum(total)} so'm*`,
+      '',
+      "To'laysizmi?",
+    ].join('\n'),
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("✅ Ha, to'layman", 'codeemail_pay:yes'), Markup.button.callback("❌ Yo'q", 'codeemail_pay:no')],
+      ]),
+    },
+  );
+}
+
+export async function handleCodeEmailConfirmPay(ctx: SessionContext & { match: RegExpExecArray }): Promise<void> {
+  const choice = ctx.match[1];
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (choice === 'no') {
+    await safeEditOrReply(ctx, "Bekor qilindi. Xohlasangiz \"🎟 Kod olish\"ni qaytadan bosing.");
+    await resetSession(ctx);
+    return;
+  }
+
+  const tariff = await getTariff(ctx.session.selectedTariffId as string);
+  const employeeCount = ctx.session.employeeCount;
+  if (!tariff || !employeeCount) { await safeEditOrReply(ctx, "Sessiya eskirgan. Qaytadan boshlang: /start"); await resetSession(ctx); return; }
+
+  ctx.session.step = 'codeemail_awaiting_receipt';
+  await safeEditOrReply(
+    ctx,
+    [
+      `💰 To'lov summasi: *${formatSum(tariff.price * employeeCount)} so'm*`,
+      '',
+      PAYMENT_CARD_TEXT,
+      '',
+      "To'lov qilgach, to'lov chekini (screenshot/rasm) shu chatga tashlang.",
+    ].join('\n'),
+    { parse_mode: 'Markdown' },
+  );
+}
+
+export async function handleCodeEmailReceiptPhoto(ctx: SessionContext): Promise<void> {
+  const companyId = ctx.session.companyId;
+  const tariffId = ctx.session.selectedTariffId;
+  const fullName = ctx.session.fullName || telegramDisplayName(ctx);
+  const phone = ctx.session.phone;
+  const employeeCount = ctx.session.employeeCount;
+  if (!companyId || !tariffId || !phone || !employeeCount) {
+    await ctx.reply('Sessiya eskirgan. Qaytadan boshlang: /start');
+    await resetSession(ctx);
+    return;
+  }
+
+  let receiptUrl: string;
+  try {
+    receiptUrl = await extractReceiptUrl(ctx);
+  } catch (e: any) {
+    console.error('Chek rasmini saqlashda xato:', e?.message);
+    await ctx.reply("Rasmni saqlab bo'lmadi. Iltimos, qayta yuboring yoki birozdan so'ng urinib ko'ring.");
+    return;
+  }
+
+  const tariff = await getTariff(tariffId);
+  if (!tariff) { await ctx.reply("Noma'lum tarif. Qaytadan boshlang: /start"); await resetSession(ctx); return; }
+
+  const { id: requestId } = await createKeyRequest({
+    companyId,
+    tariffId,
+    fullName,
+    phone,
+    telegramId: String(ctx.from!.id),
+    receiptFileId: receiptUrl,
+    employeeCount,
+  });
+
+  await ctx.reply("✅ Chek qabul qilindi. Admin tasdiqlagach, 13 xonali kodingiz shu chatga keladi.");
+  const email = ctx.session.email;
+  await resetSession(ctx);
+
+  const total = tariff.price * employeeCount;
+  const caption = [
+    "🆕 *Kod olish so'rovi (email orqali)*",
+    '',
+    `🏢 Kompaniya: ${escapeMarkdown(await getCompanyName(companyId))}`,
+    `👤 Ism: ${escapeMarkdown(fullName)}`,
+    `📱 Telefon: ${escapeMarkdown(phone)}`,
+    email ? `📧 Email: ${escapeMarkdown(email)}` : null,
+    `💬 Telegram: ${ctx.from!.username ? '@' + escapeMarkdown(ctx.from!.username) : "username yo'q"} (id: ${ctx.from!.id})`,
+    `📦 Tarif: ${escapeMarkdown(tariff.name)} — ${formatSum(tariff.price)} so'm/xodim × ${employeeCount} xodim = ${formatSum(total)} so'm`,
+    `🕐 Vaqt: ${new Date().toISOString()}`,
+    '',
+    "❓ Shu foydalanuvchiga *13 xonali kod* beraymi?",
+  ].filter((line): line is string => line !== null).join('\n');
 
   await forwardToBot2({
     caption,

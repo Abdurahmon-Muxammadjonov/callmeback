@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { supabase, fetchAllRows } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 import { getCompanyManagerIds } from '../lib/companyScope';
+import { isMissingFunctionError, popStatsInNode } from '../lib/analyticsFallback';
 
 const router = Router();
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -230,7 +231,15 @@ router.get('/pop', requireAuth, async (req: CompanyAuthedRequest, res: Response)
     const platformId = typeof req.query.platform_id === 'string' && req.query.platform_id ? req.query.platform_id : null;
     const managerIds = await getCompanyManagerIds(companyId);
     const { data, error } = await supabase.rpc('calls_pop_stats', { p_platform_id: platformId, p_manager_ids: managerIds });
-    if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
+    if (error) {
+      // supabase/tenant_scoped_aggregates.sql hali ishga tushirilmagan bo'lsa
+      // (DB funksiyasi p_manager_ids'ni bilmaydi) — xuddi shu tenant
+      // chegarasi bilan Node'da hisoblaymiz; dashboard bo'sh qolmaydi.
+      if (isMissingFunctionError(error)) {
+        return res.status(200).json({ success: true, data: await popStatsInNode(managerIds), fallback: true });
+      }
+      return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
+    }
     return res.status(200).json({ success: true, data });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'PoP hisoblashda xatolik.' });
