@@ -26,8 +26,16 @@ const allowedOrigins = [
   'https://procell.uz',
   'https://www.procell.uz',
   'https://prosell.vercel.app',
+  'https://call-me.vercel.app',
   'http://localhost:3000',
 ];
+// Vercel har bir deploy uchun preview URL yaratadi (call-me-<hash>.vercel.app,
+// call-me-git-<branch>-...vercel.app) va production ham call-me.vercel.app —
+// ularning HAMMASIga ruxsat beramiz (aks holda yangi deploy'dan keyin
+// frontend backend'ga ulana olmay "backend oflayn" bo'lib qoladi, xuddi
+// 2026-09-20'dagidek — loyiha prosell -> call-me nomlangach CORS uzildi).
+// Faqat SHU loyihaning (call-me/prosell prefiksli) vercel domenlari.
+const allowedOriginRegex = /^https:\/\/(call-me|prosell)[a-z0-9-]*\.vercel\.app$/;
 
 process.on('unhandledRejection', (reason) => {
   console.error('[process] unhandledRejection:', (reason as any)?.message || reason);
@@ -39,7 +47,7 @@ process.on('uncaughtException', (error) => {
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    if (!origin || allowedOrigins.includes(origin) || allowedOriginRegex.test(origin)) return callback(null, true);
     return callback(new Error('Not allowed by CORS'));
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
