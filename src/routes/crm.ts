@@ -18,6 +18,7 @@ type PbxConfigRow = {
   last_test_status?: number | null;
   last_test_at?: string | null;
   updated_at?: string | null;
+  company_id?: string | null;
 };
 
 const isValidHttpUrl = (v: string) => {
@@ -55,18 +56,57 @@ async function loadLatestPbxIntegration(options: { onlyEnabled?: boolean } = {})
   return data || null;
 }
 
+// MULTI-TENANT (2026-09-20): har kompaniya o'z PBX'ini ulaydi. Quyidagi
+// helperlar company_id bo'yicha ishlaydi. loadLatestPbxIntegration (global,
+// yuqorida) faqat legacy (company_id=NULL) yagona qator uchun qoldirildi.
+async function loadPbxIntegrationForCompany(companyId: string): Promise<PbxConfigRow | null> {
+  const { data, error } = await withSchemaReloadRetry<PbxConfigRow | null>(() => supabase
+    .from('crm_integrations')
+    .select('id, enabled, webhook_url, api_key, last_test_status, last_test_at, updated_at, company_id')
+    .eq('company_id', companyId)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle());
+  if (error) throw new Error(`Database Error: ${error.message}`);
+  return data || null;
+}
+
+// Webhook kelganda: kelgan api_key bo'yicha QAYSI kompaniya ekanini topamiz.
+// api_key noyob bo'lishi kutiladi (har kompaniya o'z PBX akkauntini ulaydi).
+// company_id=NULL (legacy global) qator ham topilishi mumkin — u holda
+// qo'ng'iroqlar tenant'siz (legacy) bo'lib qoladi.
+async function loadPbxIntegrationByApiKey(apiKey: string): Promise<PbxConfigRow | null> {
+  if (!apiKey) return null;
+  const { data, error } = await withSchemaReloadRetry<PbxConfigRow | null>(() => supabase
+    .from('crm_integrations')
+    .select('id, enabled, webhook_url, api_key, company_id')
+    .eq('api_key', apiKey)
+    .eq('enabled', true)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle());
+  if (error) return null;
+  return data || null;
+}
+
 async function saveIntegrationTestResult(params: {
   webhookUrl: string;
   apiKey: string;
   statusCode: number;
   enabled?: boolean;
+  companyId: string | null;
 }): Promise<void> {
   if (!params.webhookUrl || !params.apiKey) return;
-  const existing = await loadLatestPbxIntegration();
+  // Test natijasi shu KOMPANIYANING integratsiyasiga yoziladi (/status ham
+  // company bo'yicha o'qiydi). companyId=null bo'lsagina legacy global qatorga.
+  const existing = params.companyId
+    ? await loadPbxIntegrationForCompany(params.companyId)
+    : await loadLatestPbxIntegration();
   await withSchemaReloadRetry<null>(() => supabase
     .from('crm_integrations')
     .upsert({
       id: existing?.id || randomUUID(),
+      company_id: params.companyId,
       webhook_url: params.webhookUrl,
       api_key: params.apiKey,
       enabled: params.enabled ?? true,
@@ -286,7 +326,7 @@ function extractCallsFromPayload(payload: any): BatchCallItem[] {
   return [];
 }
 
-async function syncManagersFromPayload(managers: any[]): Promise<{ count: number; names: string[] }> {
+async function syncManagersFromPayload(managers: any[], companyId: string | null): Promise<{ count: number; names: string[] }> {
   if (!Array.isArray(managers) || managers.length === 0) return { count: 0, names: [] };
 
   const normalizeStatus = (raw: string): string => {
@@ -294,6 +334,13 @@ async function syncManagersFromPayload(managers: any[]): Promise<{ count: number
     if (value === 'active' || value === 'inactive' || value === 'on_leave' || value === 'flagged') return value;
     return 'active';
   };
+
+  // MULTI-TENANT: xodimlar shu KOMPANIYAGA yoziladi va topish/dublikat
+  // tekshiruvi ham FAQAT o'sha kompaniya ichida (har xil kompaniyada bir xil
+  // "101" extension yoki bir xil ism BOSHQA-BOSHQA xodim). onConflict o'rniga
+  // qo'lda find-then-insert — chunki unique index (company_id, pbx_id) NULL
+  // company uchun ishlamaydi.
+  const scoped = <T extends { eq: any; is: any }>(q: T): T => (companyId ? q.eq('company_id', companyId) : q.is('company_id', null));
 
   let inserted = 0;
   const names = new Set<string>();
@@ -306,25 +353,18 @@ async function syncManagersFromPayload(managers: any[]): Promise<{ count: number
     const status = normalizeStatus(pickString(item, ['status', 'state']));
     try {
       if (pbxId) {
-        const { error } = await supabase
-          .from('managers')
-          .upsert({ pbx_id: pbxId, name, status }, { onConflict: 'pbx_id' });
+        const { data: existing } = await scoped(supabase.from('managers').select('id').eq('pbx_id', pbxId)).limit(1).maybeSingle();
+        if (existing?.id) { inserted++; continue; }
+        const { error } = await supabase.from('managers').insert({ pbx_id: pbxId, name, status, company_id: companyId });
         if (!error) inserted++;
         continue;
       }
 
-      const { data: existing, error: findError } = await supabase
-        .from('managers')
-        .select('id')
-        .eq('name', name)
-        .limit(1)
-        .maybeSingle();
+      const { data: existing, error: findError } = await scoped(supabase.from('managers').select('id').eq('name', name)).limit(1).maybeSingle();
       if (findError) continue;
       if (existing?.id) continue;
 
-      const { error: insertError } = await supabase
-        .from('managers')
-        .insert({ name, status });
+      const { error: insertError } = await supabase.from('managers').insert({ name, status, company_id: companyId });
       if (!insertError) inserted++;
     } catch {
       continue;
@@ -333,7 +373,7 @@ async function syncManagersFromPayload(managers: any[]): Promise<{ count: number
   return { count: inserted, names: Array.from(names) };
 }
 
-async function syncCallsFromPayload(calls: BatchCallItem[], apiKey: string, webhookUrl: string): Promise<number> {
+async function syncCallsFromPayload(calls: BatchCallItem[], apiKey: string, webhookUrl: string, companyId: string | null): Promise<number> {
   if (!Array.isArray(calls) || calls.length === 0) return 0;
 
   const enrichedCalls: BatchCallItem[] = [];
@@ -371,6 +411,9 @@ async function syncCallsFromPayload(calls: BatchCallItem[], apiKey: string, webh
         client_name: mappedClientName,
         client_phone: phone || undefined,
         pbx_call_id: callId || undefined,
+        // Qo'ng'iroq va uning xodimi shu KOMPANIYAGA yoziladi — dashboard'da
+        // faqat o'z kompaniyasiga ko'rinadi (api_key -> company_id).
+        ...(companyId ? { company_id: companyId } : {}),
       });
     } catch {
       continue;
@@ -389,11 +432,12 @@ async function syncCallsFromPayload(calls: BatchCallItem[], apiKey: string, webh
 }
 
 // GET /crm/status — ulanish holati (OAuth + simple PBX webhook).
-router.get('/status', async (_req: Request, res: Response) => {
+router.get('/status', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
-    const cfg = await loadLatestPbxIntegration({ onlyEnabled: true });
+    const companyId = req.auth!.companyId as string;
+    const cfg = await loadPbxIntegrationForCompany(companyId);
     const connected = !!(cfg?.enabled && cfg?.last_test_status === 200 && cfg?.webhook_url && cfg?.api_key);
-    console.log('[pbx/status] connected=', connected, 'last_test_status=', cfg?.last_test_status ?? null, 'hasWebhook=', !!cfg?.webhook_url);
+    console.log('[pbx/status] company=', companyId, 'connected=', connected, 'last_test_status=', cfg?.last_test_status ?? null);
     return res.status(200).json({ connected });
   } catch (e: any) {
     console.log('[pbx/status] connected=false reason=', e?.message || e);
@@ -403,8 +447,9 @@ router.get('/status', async (_req: Request, res: Response) => {
 
 // POST /crm/connect-simple
 // Body: { webhook_url, api_key }
-router.post('/connect-simple', async (req: Request, res: Response) => {
+router.post('/connect-simple', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
+    const companyId = req.auth!.companyId as string;
     const webhookUrl = typeof req.body?.webhook_url === 'string' ? req.body.webhook_url.trim() : '';
     const apiKey = typeof req.body?.api_key === 'string' ? req.body.api_key.trim() : '';
     const enabled = true;
@@ -416,11 +461,23 @@ router.post('/connect-simple', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: '"api_key" majburiy.' });
     }
 
-    const existing = await loadLatestPbxIntegration();
+    // Boshqa kompaniya AYNAN shu api_key'ni ulab qo'ymaganini tekshiramiz —
+    // aks holda webhook'da api_key -> company_id noaniq bo'lib qolardi
+    // (ikki kompaniya bir xil kalit bilan). Har kompaniya o'z PBX
+    // akkauntini (o'z kalitini) ulashi shart.
+    const clash = await loadPbxIntegrationByApiKey(apiKey);
+    if (clash && clash.company_id && clash.company_id !== companyId) {
+      return res.status(409).json({ success: false, error: 'Bu api_key boshqa kompaniyaga ulangan. O\'z PBX akkauntingizning kalitini kiriting.' });
+    }
+
+    // Har kompaniyaga bitta integratsiya (uq_crm_integrations_company) —
+    // shu kompaniyaning mavjud qatorini yangilaymiz yoki yangisini yaratamiz.
+    const existing = await loadPbxIntegrationForCompany(companyId);
     const { error } = await withSchemaReloadRetry<null>(() => supabase
       .from('crm_integrations')
       .upsert({
         id: existing?.id || randomUUID(),
+        company_id: companyId,
         webhook_url: webhookUrl,
         api_key: apiKey,
         enabled,
@@ -440,7 +497,7 @@ router.post('/connect-simple', async (req: Request, res: Response) => {
 // POST /crm/test-connection
 // Body: { webhook_url, api_key }
 // Test PBX ulanishni: webhook'ga test request yubor va javobni tekshir.
-router.post('/test-connection', async (req: Request, res: Response) => {
+router.post('/test-connection', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
     const webhookUrl = typeof req.body?.webhook_url === 'string' ? req.body.webhook_url.trim() : '';
     const apiKey = typeof req.body?.api_key === 'string' ? req.body.api_key.trim() : '';
@@ -481,7 +538,7 @@ router.post('/test-connection', async (req: Request, res: Response) => {
     console.log('[pbx/test-connection] upstream status=', testResponse.status, testResponse.statusText, 'url=', webhookUrl);
 
     if (testResponse.status === 404) {
-      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: 404, enabled: true });
+      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: 404, enabled: true, companyId: req.auth!.companyId as string });
       return res.status(404).json({
         success: false,
         error: 'Webhook route topilmadi (404). URL noto\'g\'ri yoki backendda route yo\'q.',
@@ -489,7 +546,7 @@ router.post('/test-connection', async (req: Request, res: Response) => {
     }
 
     if (testResponse.status === 401 || testResponse.status === 403) {
-      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: testResponse.status, enabled: true });
+      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: testResponse.status, enabled: true, companyId: req.auth!.companyId as string });
       return res.status(401).json({
         success: false,
         error: "API key noto'g'ri yoki webhook autentifikatsiyasi muvaffaqiyatsiz",
@@ -497,7 +554,7 @@ router.post('/test-connection', async (req: Request, res: Response) => {
     }
 
     if (!testResponse.ok) {
-      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: testResponse.status, enabled: true });
+      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: testResponse.status, enabled: true, companyId: req.auth!.companyId as string });
       return res.status(400).json({
         success: false,
         error: `PBX javob berdi: ${testResponse.status} ${testResponse.statusText}`,
@@ -505,7 +562,7 @@ router.post('/test-connection', async (req: Request, res: Response) => {
     }
 
     if (isInternalPbxWebhookUrl(webhookUrl)) {
-      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: 200, enabled: true });
+      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: 200, enabled: true, companyId: req.auth!.companyId as string });
       return res.status(200).json({
         success: true,
         message: 'PBX sync muvaffaqiyatli, 0 xodim + 0 audio yuklandi',
@@ -531,16 +588,16 @@ router.post('/test-connection', async (req: Request, res: Response) => {
     const managersPayload = extractManagersFromPayload(payload);
     const callsPayload = extractCallsFromPayload(payload);
     if (managersPayload.length === 0 && callsPayload.length === 0) {
-      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: 404, enabled: true });
+      await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: 404, enabled: true, companyId: req.auth!.companyId as string });
       return res.status(404).json({
         success: false,
         error: 'Webhook ishladi, lekin hech qanday managers yoki calls ma\'lumoti kelmadi. PBX response formatini tekshiring.',
       });
     }
 
-    const managersSync = await syncManagersFromPayload(managersPayload);
-    const callsInserted = await syncCallsFromPayload(callsPayload, apiKey, webhookUrl);
-    await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: 200, enabled: true });
+    const managersSync = await syncManagersFromPayload(managersPayload, req.auth!.companyId as string);
+    const callsInserted = await syncCallsFromPayload(callsPayload, apiKey, webhookUrl, req.auth!.companyId as string);
+    await saveIntegrationTestResult({ webhookUrl, apiKey, statusCode: 200, enabled: true, companyId: req.auth!.companyId as string });
 
     return res.status(200).json({
       success: true,
@@ -557,6 +614,7 @@ router.post('/test-connection', async (req: Request, res: Response) => {
         apiKey: typeof req.body?.api_key === 'string' ? req.body.api_key.trim() : '',
         statusCode: 408,
         enabled: true,
+        companyId: req.auth!.companyId as string,
       }).catch(() => {});
       return res.status(400).json({
         success: false,
@@ -568,6 +626,7 @@ router.post('/test-connection', async (req: Request, res: Response) => {
       apiKey: typeof req.body?.api_key === 'string' ? req.body.api_key.trim() : '',
       statusCode: 0,
       enabled: true,
+      companyId: req.auth!.companyId as string,
     }).catch(() => {});
     return res.status(400).json({
       success: false,
@@ -646,6 +705,7 @@ async function processPbxWebhookCallsInBackground(
   calls: BatchCallItem[],
   webhookUrl: string,
   expectedKey: string,
+  companyId: string | null,
 ): Promise<void> {
   const enrichedCalls: BatchCallItem[] = [];
   const skipped: Array<{ index: number; error: string }> = [];
@@ -690,6 +750,9 @@ async function processPbxWebhookCallsInBackground(
         client_name: mappedClientName,
         client_phone: phone || undefined,
         pbx_call_id: callId || undefined,
+        // Qo'ng'iroq va uning xodimi shu KOMPANIYAGA yoziladi — dashboard'da
+        // faqat o'z kompaniyasiga ko'rinadi (api_key -> company_id).
+        ...(companyId ? { company_id: companyId } : {}),
       });
     } catch (e: any) {
       skipped.push({ index, error: e?.message || 'Webhook call processing failed' });
@@ -713,15 +776,15 @@ async function processPbxWebhookCallsInBackground(
 
 router.post('/webhook/pbx', async (req: Request, res: Response) => {
   try {
-    const cfg = await loadLatestPbxIntegration({ onlyEnabled: true });
-
-    const expectedKey = typeof cfg?.api_key === 'string' ? cfg.api_key.trim() : '';
-    if (!expectedKey || cfg?.enabled === false) {
-      return res.status(401).json({ success: false, error: 'Noto\'g\'ri API key.' });
-    }
-
+    // MULTI-TENANT: kelgan api_key bo'yicha QAYSI kompaniya ekanini topamiz.
+    // Har kompaniya o'z PBX akkauntini (o'z kalitini) ulaydi, shuning uchun
+    // api_key -> company_id. Topilmasa (yoki o'chirilgan bo'lsa) 401.
     const providedKey = getApiKeyFromRequest(req);
-    if (!providedKey || providedKey !== expectedKey) {
+    const cfg = providedKey ? await loadPbxIntegrationByApiKey(providedKey) : null;
+    const expectedKey = typeof cfg?.api_key === 'string' ? cfg.api_key.trim() : '';
+    const webhookCompanyId = cfg?.company_id ?? null;
+
+    if (!providedKey || !expectedKey || cfg?.enabled === false || providedKey !== expectedKey) {
       // Diagnostic only — never log the expected/stored key, just enough about what
       // arrived to figure out which transport (header/query/body) the caller actually used.
       console.warn('PBX webhook: API key mos kelmadi.', {
@@ -769,7 +832,7 @@ router.post('/webhook/pbx', async (req: Request, res: Response) => {
     });
 
     const webhookUrl = typeof cfg?.webhook_url === 'string' ? cfg.webhook_url.trim() : '';
-    void processPbxWebhookCallsInBackground(calls, webhookUrl, expectedKey);
+    void processPbxWebhookCallsInBackground(calls, webhookUrl, expectedKey, webhookCompanyId);
   } catch (e: any) {
     if (!res.headersSent) {
       return res.status(500).json({ success: false, error: e?.message || 'PBX webhook xatosi.' });

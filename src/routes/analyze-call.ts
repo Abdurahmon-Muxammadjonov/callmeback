@@ -119,11 +119,16 @@ interface ActiveCriterion {
 
 // admin `/criteria` orqali kiritgan aktiv qoidalarni (masalan, sotuv skripti bosqichlarini)
 // bir marta o'qib, ham Gemini promptiga, ham jarima/bonus hisobiga ishlatiladi.
-async function fetchActiveCriteria(supabase: SupabaseClient): Promise<ActiveCriterion[]> {
-  const { data, error } = await supabase
+async function fetchActiveCriteria(supabase: SupabaseClient, companyId: string | null): Promise<ActiveCriterion[]> {
+  // Mezonlar HAR KOMPANIYAGA alohida (multi-tenant): qo'ng'iroq qaysi
+  // kompaniyaniki bo'lsa, AI o'sha kompaniyaning FAOL mezonlari bilan
+  // baholaydi. company_id=NULL (legacy PBX) uchun global (NULL) mezonlar.
+  let q = supabase
     .from('criteria')
     .select('title, description, penalty_amount, category, type')
     .eq('is_active', true);
+  q = companyId ? q.eq('company_id', companyId) : q.is('company_id', null);
+  const { data, error } = await q;
   if (error || !data) return [];
   return data.map((c) => ({
     title: String(c.title || ''),
@@ -380,18 +385,20 @@ function makeAutoCrmId(prefix: string): string {
 }
 
 async function getOrCreateDefaultManager(
-  supabase: SupabaseClient
+  supabase: SupabaseClient,
+  companyId: string | null,
 ): Promise<{ id: string; name: string; status: string; company_id: string | null }> {
-  const { data: existing } = await supabase
+  let sel = supabase
     .from('managers')
     .select('id, name, status, company_id')
-    .eq('name', DEFAULT_MANAGER_NAME)
-    .limit(1);
+    .eq('name', DEFAULT_MANAGER_NAME);
+  sel = companyId ? sel.eq('company_id', companyId) : sel.is('company_id', null);
+  const { data: existing } = await sel.limit(1);
   if (existing && existing.length > 0) return existing[0];
 
   const { data: created, error } = await supabase
     .from('managers')
-    .insert({ name: DEFAULT_MANAGER_NAME, status: 'active', crm_id: makeAutoCrmId('auto-default') })
+    .insert({ name: DEFAULT_MANAGER_NAME, status: 'active', crm_id: makeAutoCrmId('auto-default'), company_id: companyId })
     .select('id, name, status, company_id')
     .single();
   if (error || !created) {
@@ -405,14 +412,16 @@ async function getOrCreateDefaultManager(
 async function getOrCreateManagerByName(
   supabase: SupabaseClient,
   name: string,
+  companyId: string | null,
 ): Promise<{ id: string; name: string; status: string; company_id: string | null }> {
   const clean = name.trim();
-  const { data: existing } = await supabase
-    .from('managers').select('id, name, status, company_id').eq('name', clean).limit(1);
+  let sel = supabase.from('managers').select('id, name, status, company_id').eq('name', clean);
+  sel = companyId ? sel.eq('company_id', companyId) : sel.is('company_id', null);
+  const { data: existing } = await sel.limit(1);
   if (existing && existing.length > 0) return existing[0];
 
   const { data: created, error } = await supabase
-    .from('managers').insert({ name: clean, status: 'active', crm_id: makeAutoCrmId('auto-manager') }).select('id, name, status, company_id').single();
+    .from('managers').insert({ name: clean, status: 'active', crm_id: makeAutoCrmId('auto-manager'), company_id: companyId }).select('id, name, status, company_id').single();
   if (error || !created) {
     throw new Error(`Manager yaratib bo'lmadi: ${error?.message || 'unknown'}`);
   }
@@ -426,15 +435,17 @@ async function getOrCreateManagerByName(
 async function getOrCreateManagerByPbxId(
   supabase: SupabaseClient,
   pbxId: string,
+  companyId: string | null,
 ): Promise<{ id: string; name: string; status: string; company_id: string | null }> {
   const clean = pbxId.trim();
-  const { data: existing } = await supabase
-    .from('managers').select('id, name, status, company_id').eq('pbx_id', clean).limit(1);
+  let sel = supabase.from('managers').select('id, name, status, company_id').eq('pbx_id', clean);
+  sel = companyId ? sel.eq('company_id', companyId) : sel.is('company_id', null);
+  const { data: existing } = await sel.limit(1);
   if (existing && existing.length > 0) return existing[0];
 
   const { data: created, error } = await supabase
     .from('managers')
-    .insert({ name: `PBX ${clean}`, status: 'active', pbx_id: clean, crm_id: makeAutoCrmId('auto-pbx') })
+    .insert({ name: `PBX ${clean}`, status: 'active', pbx_id: clean, crm_id: makeAutoCrmId('auto-pbx'), company_id: companyId })
     .select('id, name, status, company_id')
     .single();
   if (error || !created) {
@@ -634,9 +645,24 @@ async function processOneBatchCall(
 // Butun batch'ni fon rejimida, cheklangan parallellik bilan ishlaydi.
 async function processBatchInBackground(supabase: SupabaseClient, prepared: PreparedCall[]): Promise<void> {
   try {
-    const activeCriteria = await fetchActiveCriteria(supabase);
-    const extraRules = buildDynamicRules(activeCriteria);
-    await runWithConcurrency(prepared, ANALYZE_CONCURRENCY, (p) => processOneBatchCall(supabase, p, extraRules, activeCriteria));
+    // Mezonlar har kompaniyaga alohida — har bir kompaniya uchun FAOL
+    // mezonlarni bir marta olib keshlaymiz (company_id -> {criteria, rules}),
+    // so'ng har qo'ng'iroqni o'z kompaniyasining mezonlari bilan baholaymiz.
+    const cache = new Map<string, { criteria: ActiveCriterion[]; rules: string }>();
+    const criteriaFor = async (companyId: string | null) => {
+      const key = companyId || '__global__';
+      let hit = cache.get(key);
+      if (!hit) {
+        const criteria = await fetchActiveCriteria(supabase, companyId);
+        hit = { criteria, rules: buildDynamicRules(criteria) };
+        cache.set(key, hit);
+      }
+      return hit;
+    };
+    await runWithConcurrency(prepared, ANALYZE_CONCURRENCY, async (p) => {
+      const { criteria, rules } = await criteriaFor(p.companyId ?? null);
+      await processOneBatchCall(supabase, p, rules, criteria);
+    });
     console.log(`Batch tugadi: ${prepared.length} ta qo'ng'iroq tahlil qilindi.`);
   } catch (e) {
     console.error('Batch background error:', (e as Error).message);
@@ -744,21 +770,36 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
     return { status: 400, body: { success: false, error: 'Bir batch\'da maksimal 200 ta qo\'ng\'iroq.' } };
   }
 
+  // Manager'lar HAR KOMPANIYAGA alohida (multi-tenant): map kaliti
+  // `${company_id}::${name}` — har xil kompaniyada bir xil ism yoki bir
+  // xil "101" extension BOSHQA-BOSHQA manager bo'lib qoladi, aralashmaydi.
+  const ck = (companyId: string | null | undefined, val: string) => `${companyId || 'null'}::${val}`;
+
   const nameMap = new Map<string, string>();
-  for (const nm of new Set(items.map((it) => (it?.manager_name || '').trim()).filter(Boolean))) {
-    const m = await getOrCreateManagerByName(supabase, nm);
-    nameMap.set(nm, m.id);
+  for (const key of new Set(items.filter((it) => (it?.manager_name || '').trim()).map((it) => ck(it.company_id, (it.manager_name || '').trim())))) {
+    const [cid, ...rest] = key.split('::');
+    const m = await getOrCreateManagerByName(supabase, rest.join('::'), cid === 'null' ? null : cid);
+    nameMap.set(key, m.id);
   }
 
   const pbxIdMap = new Map<string, string>();
-  for (const pid of new Set(items.map((it) => (it?.manager_pbx_id || '').trim()).filter(Boolean))) {
-    const m = await getOrCreateManagerByPbxId(supabase, pid);
-    pbxIdMap.set(pid, m.id);
+  for (const key of new Set(items.filter((it) => (it?.manager_pbx_id || '').trim()).map((it) => ck(it.company_id, (it.manager_pbx_id || '').trim())))) {
+    const [cid, ...rest] = key.split('::');
+    const m = await getOrCreateManagerByPbxId(supabase, rest.join('::'), cid === 'null' ? null : cid);
+    pbxIdMap.set(key, m.id);
   }
 
-  let defaultManager: { id: string } | null = null;
-  if (items.some((it) => !it?.manager_id && !(it?.manager_name || '').trim() && !(it?.manager_pbx_id || '').trim())) {
-    defaultManager = await getOrCreateDefaultManager(supabase);
+  // Default manager ham har kompaniyaga alohida.
+  const defaultManagerByCompany = new Map<string, string>();
+  for (const it of items) {
+    if (!it?.manager_id && !(it?.manager_name || '').trim() && !(it?.manager_pbx_id || '').trim()) {
+      const cid = it?.company_id || null;
+      const key = cid || 'null';
+      if (!defaultManagerByCompany.has(key)) {
+        const m = await getOrCreateDefaultManager(supabase, cid);
+        defaultManagerByCompany.set(key, m.id);
+      }
+    }
   }
 
   const candidates: Array<{
@@ -795,9 +836,13 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
       return;
     }
 
-    if (!mid && (it.manager_name || '').trim()) mid = nameMap.get((it.manager_name as string).trim());
-    if (!mid && (it.manager_pbx_id || '').trim()) mid = pbxIdMap.get((it.manager_pbx_id as string).trim());
-    if (!mid) mid = defaultManager!.id;
+    // Map kalitlari company-aware (`${company_id}::${val}`) — mos manager
+    // FAQAT o'sha kompaniya ichidan tanlanadi.
+    const ckLocal = `${it.company_id || 'null'}::`;
+    if (!mid && (it.manager_name || '').trim()) mid = nameMap.get(ckLocal + (it.manager_name as string).trim());
+    if (!mid && (it.manager_pbx_id || '').trim()) mid = pbxIdMap.get(ckLocal + (it.manager_pbx_id as string).trim());
+    if (!mid) mid = defaultManagerByCompany.get(it.company_id || 'null');
+    if (!mid) { skipped.push({ index: i, error: 'manager aniqlanmadi' }); return; }
 
     const crmId = typeof it.crm_id === 'string' ? it.crm_id.trim() : '';
     if (it.crm_id !== undefined && !crmId) {
@@ -954,6 +999,10 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
     //  - hech biri yo'q → "Tayinlanmagan" menejer
     const managerName = (req.body && typeof req.body.manager_name === 'string' && req.body.manager_name.trim())
       ? req.body.manager_name.trim() : '';
+    // company_id ixtiyoriy (single endpoint auth'siz — PBX/test): berilsa
+    // manager va mezonlar o'sha kompaniyaga bog'lanadi, aks holda null (legacy).
+    const bodyCompanyId = (req.body && typeof req.body.company_id === 'string' && isValidUUID(req.body.company_id.trim()))
+      ? req.body.company_id.trim() : null;
     let manager: { id: string; name: string; status: string; company_id: string | null };
     if (manager_id !== undefined && manager_id !== null && manager_id !== '') {
       if (typeof manager_id !== 'string' || !isValidUUID(manager_id)) {
@@ -969,14 +1018,15 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
       }
       manager = data;
     } else if (managerName) {
-      manager = await getOrCreateManagerByName(supabase, managerName);
+      manager = await getOrCreateManagerByName(supabase, managerName, bodyCompanyId);
       manager_id = manager.id;
     } else {
-      manager = await getOrCreateDefaultManager(supabase);
+      manager = await getOrCreateDefaultManager(supabase, bodyCompanyId);
       manager_id = manager.id;
     }
 
-    const activeCriteria = await fetchActiveCriteria(supabase);
+    // Mezonlar manager'ning kompaniyasidan (u aniqlangan kompaniya).
+    const activeCriteria = await fetchActiveCriteria(supabase, manager.company_id ?? bodyCompanyId);
     const extraRules = buildDynamicRules(activeCriteria);
 
     // Audit kirishi: fayl bo'lsa diskdagi fayldan, aks holda URL'dan.
@@ -1002,7 +1052,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
 
     const { data: callRow, error: callInsertError } = await supabase
       .from('calls')
-      .insert({ manager_id, audio_url, status: 'done', ...(platformId ? { platform_id: platformId } : {}), ...callRowFields(audit) })
+      .insert({ manager_id, audio_url, status: 'done', ...(manager.company_id ? { company_id: manager.company_id } : {}), ...(platformId ? { platform_id: platformId } : {}), ...callRowFields(audit) })
       .select('id')
       .single();
 
