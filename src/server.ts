@@ -11,6 +11,7 @@ import companySectionsRouter from './routes/company-sections';
 import companyWebhooksRouter, { incomingRouter as webhooksIncomingRouter } from './routes/company-webhooks';
 import dashboardRouter from './routes/dashboard';
 import telegramWebhooksRouter from './routes/telegram-webhooks';
+import utelWebhookRouter from './routes/utel-webhook';
 import analyzeCallRouter, { recoverStuckCalls } from './routes/analyze-call';
 import managersRouter from './routes/managers';
 import criteriaRouter from './routes/criteria';
@@ -64,6 +65,10 @@ app.use(express.json({
     if (!ct) return true;
     return /json|text\/plain/i.test(ct);
   },
+  // Raw body'ni saqlaymiz — webhook imzosini tekshirish (masalan UTel
+  // signing secret bo'lsa) parsed emas, aynan tashilgan baytlar bo'yicha
+  // hisoblanadi; noma'lum formatли payload'ни ham xom ko'rish uchun.
+  verify: (req, _res, buf) => { (req as any).rawBody = buf; },
 }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
@@ -86,6 +91,7 @@ app.use('/company', companyWebhooksRouter);
 app.use('/webhooks', webhooksIncomingRouter);
 app.use('/dashboard', dashboardRouter);
 app.use('/internal/telegram', telegramWebhooksRouter);
+app.use('/webhook', utelWebhookRouter); // POST /webhook/utel — UTel (utel.uz) virtual PBX webhook qabul qiluvchi
 app.use('/managers', managersRouter);
 app.use('/criteria', criteriaRouter);
 app.use('/api/analyze-call', analyzeCallRouter);
