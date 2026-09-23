@@ -238,4 +238,90 @@ router.get('/pop', requireAuth, async (req: CompanyAuthedRequest, res: Response)
   }
 });
 
+// GET /analytics/daily-minutes?days=30
+// KUNLIK GAPLASHUV DAQIQALARI — "Solishtirish paneli" uchun (foydalanuvchi
+// talabi 2026-09-23: "1 kunda necha minut umumiy gaplashganini hamma
+// audionikini yozsin, 3 soniyami 40 soniyami farqi yo'q").
+//
+// Shu sabab BU YERDA hech qanday filtr yo'q: qo'ng'iroq tahlil qilinganmi,
+// matni bormi, qisqami — hammasining davomiyligi qo'shiladi.
+//
+// Kun chegarasi TOSHKENT vaqti bo'yicha (ish kuni 09:00-23:00 shu
+// mintaqada) — UTC bo'yicha bo'lsa, kechki qo'ng'iroqlar ertangi kunga
+// tushib ketardi.
+const TASHKENT_TZ = 'Asia/Tashkent';
+const dayKeyTashkent = (iso: string): string =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: TASHKENT_TZ, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .format(new Date(iso));
+
+router.get('/daily-minutes', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
+  try {
+    const companyId = req.auth!.companyId as string;
+    const days = Math.min(90, Math.max(1, parseInt(String(req.query.days || '30'), 10) || 30));
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    const [calls, managers] = await Promise.all([
+      fetchAllRows<{ created_at: string; duration: number | null; manager_id: string | null; operator_ext: string | null }>((from, to) =>
+        supabase
+          .from('calls')
+          .select('created_at, duration, manager_id, operator_ext')
+          .eq('company_id', companyId)
+          .gte('created_at', since)
+          .range(from, to)),
+      supabase.from('managers').select('id, name, pbx_id').eq('company_id', companyId),
+    ]);
+
+    const nameById = new Map<string, string>();
+    for (const m of managers.data || []) nameById.set(m.id, m.name);
+
+    // kun -> { calls, seconds, operatorlar }
+    const byDay = new Map<string, { calls: number; seconds: number; ops: Map<string, { name: string; calls: number; seconds: number }> }>();
+    for (const c of calls) {
+      const day = dayKeyTashkent(c.created_at);
+      const entry = byDay.get(day) || { calls: 0, seconds: 0, ops: new Map() };
+      const sec = Math.max(0, Number(c.duration) || 0);
+      entry.calls += 1;
+      entry.seconds += sec;
+
+      const opKey = c.manager_id || (c.operator_ext ? `ext:${c.operator_ext}` : 'ext:—');
+      const opName = c.manager_id
+        ? nameById.get(c.manager_id) || 'Xodim'
+        : c.operator_ext
+          ? `Operator ${c.operator_ext}`
+          : 'Noma\'lum';
+      const op = entry.ops.get(opKey) || { name: opName, calls: 0, seconds: 0 };
+      op.calls += 1;
+      op.seconds += sec;
+      entry.ops.set(opKey, op);
+
+      byDay.set(day, entry);
+    }
+
+    const data = [...byDay.entries()]
+      .sort((a, b) => b[0].localeCompare(a[0])) // yangi kun yuqorida
+      .map(([date, v]) => ({
+        date,
+        calls: v.calls,
+        seconds: v.seconds,
+        minutes: Math.round((v.seconds / 60) * 10) / 10,
+        operators: [...v.ops.values()]
+          .sort((a, b) => b.seconds - a.seconds)
+          .map((o) => ({ name: o.name, calls: o.calls, minutes: Math.round((o.seconds / 60) * 10) / 10 })),
+      }));
+
+    const totalSeconds = data.reduce((s, d) => s + d.seconds, 0);
+    return res.status(200).json({
+      success: true,
+      data,
+      summary: {
+        days: data.length,
+        calls: data.reduce((s, d) => s + d.calls, 0),
+        minutes: Math.round((totalSeconds / 60) * 10) / 10,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Kunlik daqiqalarni hisoblashda xatolik.' });
+  }
+});
+
 export default router;
