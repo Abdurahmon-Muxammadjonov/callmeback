@@ -5,6 +5,7 @@ import os from 'node:os';
 import { supabase } from '../lib/supabase';
 import { processTranscriptToCall } from './analyze-call';
 import { submitAudioForAnalysis, waitForAnalysis, isSalesAiConfigured } from '../lib/salesAiClient';
+import { isWorkTime, workWindowLabel } from '../lib/workHours';
 
 // ============================================================================
 // UTel (utc381.utel.uz) — O'zbek virtual PBX / bulutli telefoniya webhook.
@@ -135,7 +136,9 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
     direction,
     client_phone: ch?.external_number != null ? String(ch.external_number) : null,
     duration: typeof ch?.duration === 'number' ? ch.duration : null,
-    status: 'processing',
+    // Ish vaqtida bo'lsa darhol tahlilga ketadi; tashqarisida 'queued'
+    // bo'lib turadi va ertalab 09:00 da navbat oladi.
+    status: isWorkTime() ? 'processing' : 'queued',
   };
 
   let insert = await supabase.from('calls').insert({ ...baseRow, operator_ext: src || null }).select('id').single();
@@ -151,9 +154,17 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
     return;
   }
 
-  // Tahlil (sales-ai + Gemini) fon rejimida — ISHONCHLILIK uchun: agar bu
+  // ISH VAQTIDAN TASHQARIDA tahlil qilmaymiz — qo'ng'iroq (audio bilan)
+  // saqlandi va 'queued' holatida turadi; ertalab 09:00 da navbat uni
+  // o'zi oladi. Bekorga token sarflanmaydi, kun 19:00 da yopiq qoladi.
+  if (!isWorkTime()) {
+    console.log(`UTel: ish vaqtidan tashqari (${workWindowLabel()}) — ${callId} navbatga qo'yildi.`);
+    return;
+  }
+
+  // Tahlil (sales-ai + GPT) fon rejimida — ISHONCHLILIK uchun: agar bu
   // ishlov uzilib qolsa (deploy/restart/timeout), qo'ng'iroq 'processing'
-  // qoladi va recoverUtelCalls() uni keyin qayta oladi. Shu sabab bu yerda
+  // qoladi va navbat uni keyin qayta oladi. Shu sabab bu yerda
   // await qilib kutmaymiz — void.
   void analyzeUtelCall(call.id, audioUrl, companyId, ch?.external_number != null ? String(ch.external_number) : undefined);
 }
@@ -357,6 +368,13 @@ export function startUtelWorker(): void {
       try {
         if (!isSalesAiConfigured()) {
           await new Promise((r) => setTimeout(r, 30_000));
+          continue;
+        }
+        // Ish vaqtidan tashqarida navbat TO'XTAYDI (19:00 dan keyin kun
+        // yopiq). Har 5 daqiqada qaytib tekshiradi — 09:00 bo'lishi bilan
+        // tunda to'plangan qo'ng'iroqlarni o'zi oladi.
+        if (!isWorkTime()) {
+          await new Promise((r) => setTimeout(r, 5 * 60_000));
           continue;
         }
         const processed = await runQueueOnce();

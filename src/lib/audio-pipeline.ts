@@ -9,6 +9,7 @@ import { pipeline } from 'node:stream/promises';
 import { pbxAuthHeaders } from './audioAccess';
 import { withGeminiSlot } from './geminiLimiter';
 import { analyzeWithOpenAi, isOpenAiAnalyzerConfigured } from './openaiAnalyzer';
+import { buildScriptRules } from './evaluationScript';
 
 export interface CriteriaScore {
   title: string;
@@ -318,18 +319,16 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
     // ball qaysi asosda chiqqani na modelga, na foydalanuvchiga ayon edi.
     // Endi aniq bandlar va ularning ulushi beriladi, va ball SABABI
     // operator_evaluation'da (dashboard'dagi "ROP izohi") yoziladi.
-    [
-      'kpi_score — menejerning shu qo\'ng\'iroqdagi ishini 0-100 oralig\'ida baholang. Quyidagi 6 band bo\'yicha baholang va ularni qo\'shib umumiy ball chiqaring:',
-      '  1) Salomlashish va o\'zini/kompaniyani tanishtirish — 10 ball',
-      '  2) Mijoz ehtiyojini aniqlash (ochiq savollar berish, tinglash) — 25 ball',
-      '  3) Mahsulot/xizmat va narxni aniq taqdim etish — 20 ball',
-      '  4) E\'tiroz va savollar bilan ishlash (shubhaga javob berish) — 20 ball',
-      '  5) Keyingi qadamni aniq belgilash (uchrashuv, qayta aloqa, kelishuv) — 15 ball',
-      '  6) Muloqot madaniyati: ohang, xushmuomalalik, aniq nutq — 10 ball',
-      'Band bajarilmagan bo\'lsa — o\'sha ballni bermang. Qo\'ng\'iroq juda qisqa yoki mijoz darhol rad etgan bo\'lsa, bu menejerning aybi bo\'lmasligi mumkin — shuni hisobga oling.',
-    ].join('\n'),
-    'operator_evaluation — KPI balli NEGA aynan shunday chiqqanini QISQA (2-3 gap) va ANIQ yozing: qaysi bandlar bajarildi, qaysilari bajarilmadi. Umumiy gap ("yaxshi ishladi") emas, aniq dalil bilan yozing. Masalan: "Ball 65. Salomlashdi va ehtiyojni aniqladi, narxni aytdi. Lekin e\'tirozga javob bermadi va keyingi qadam belgilanmadi."',
-    'criteria_scores massivini FAQAT quyida "QO\'SHIMCHA DINAMIK QOIDALAR" berilgan bo\'lsa to\'ldiring — har bir faol qoida uchun alohida ball bering. Qoidalar berilmagan bo\'lsa, criteria_scores bo\'sh massiv ([]) bo\'lsin.',
+    buildScriptRules(),
+    // Platformada ball 10 BALLIK tizimda ko'rsatiladi (foydalanuvchi talabi
+    // 2026-09-23). kpi_score maydoni texnik sabablarga ko'ra 0-100 bo'lib
+    // qoladi (baza ustuni), lekin izohda ball 10 ballik ko'rinishda yoziladi:
+    // 65 -> "6.5/10". Shunda xodim ko'rgan raqam bilan izoh mos keladi.
+    'operator_evaluation — KPI balli NEGA aynan shunday chiqqanini QISQA (2-3 gap) va ANIQ yozing. Boshida ballni 10 BALLIK ko\'rinishda yozing (kpi_score/10, bir xona: 65 -> "Ball 6.5/10"). Keyin qaysi bandlar bajarilgani va qaysilari bajarilmaganini aniq dalil bilan sanab o\'ting — umumiy gap ("yaxshi ishladi") yozmang. Masalan: "Ball 6.5/10. Salomlashdi, ehtiyojni aniqladi va narxni aytdi. Lekin e\'tirozga javob bermadi va keyingi qadam belgilanmadi."',
+    // criteria_scores endi skript bandlari bilan to'ldiriladi (avval
+    // "faqat dinamik qoidalar bo'lsa" deyilardi va mezonsiz kompaniyada
+    // bo'sh qolardi — shu sabab ball tafsiloti ko'rinmasdi).
+    'criteria_scores — YUQORIDAGI SKRIPT bandlarining har biri uchun bitta element qo\'shing: {title: band nomi, category: "Skript", score: shu band necha foiz bajarilgani (0-100)}. Agar quyida "QO\'SHIMCHA DINAMIK QOIDALAR" ham berilgan bo\'lsa, ularni HAM shu massivga qo\'shing (category: "Mezon").',
     'Agar bitim yopilmagan bo\'lsa, lost_reasons massivida sababini yozing; yopilgan bo\'lsa — bo\'sh massiv.',
     'total_calls, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count — transkriptni diqqat bilan o\'qib, ULARNI HAQIQIY sanoqqa asoslab to\'ldiring (taxmin qilib to\'ldirmang). Odatda bitta audio = bitta qo\'ng\'iroq (total_calls=1), lekin transkriptda bir nechta alohida suhbat/qo\'ng\'iroq ketma-ket ketgan bo\'lsa, shularning barchasini sanang. incoming_count + outgoing_count yig\'indisi total_calls\'ga teng bo\'lishi kerak.',
 
