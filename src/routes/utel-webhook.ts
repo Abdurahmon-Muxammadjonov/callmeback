@@ -6,6 +6,7 @@ import { supabase } from '../lib/supabase';
 import { processTranscriptToCall } from './analyze-call';
 import { submitAudioForAnalysis, waitForAnalysis, isSalesAiConfigured } from '../lib/salesAiClient';
 import { isWorkTime, workWindowLabel } from '../lib/workHours';
+import { probeWavDurationSec } from '../lib/audioDuration';
 
 // ============================================================================
 // UTel (utc381.utel.uz) — O'zbek virtual PBX / bulutli telefoniya webhook.
@@ -115,6 +116,11 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
   const src = resolveOperatorExt(ch); // operator ichki raqami (src/dst dan qisqasi)
   const managerId = src ? await findManagerByExt(companyId, src) : null;
 
+  const rawDur = Number(ch?.duration);
+  const durationSec = Number.isFinite(rawDur) && rawDur > 0
+    ? Math.round(rawDur)
+    : (await probeWavDurationSec(audioUrl)) ?? 0;
+
   const typeName = String(ch?.type?.name || '').toLowerCase();
   const direction = typeName.includes('out') ? 'outgoing' : typeName.includes('in') ? 'incoming' : 'unknown';
 
@@ -135,7 +141,9 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
     pbx_call_id: callId,
     direction,
     client_phone: ch?.external_number != null ? String(ch.external_number) : null,
-    duration: typeof ch?.duration === 'number' ? ch.duration : null,
+    // UTel ko'pincha duration=0 yuboradi — bunda davomiylikni audio
+    // faylning o'zidan (WAV sarlavhasi + hajm) o'lchaymiz.
+    duration: durationSec,
     // Ish vaqtida bo'lsa darhol tahlilga ketadi; tashqarisida 'queued'
     // bo'lib turadi va ertalab 09:00 da navbat oladi.
     status: isWorkTime() ? 'processing' : 'queued',
@@ -204,11 +212,13 @@ export async function analyzeUtelCall(
     // yuklab, qaytadan matnga o'girardi (400+ qo'ng'iroq shu aylanada
     // qotib qolgan). Endi matn saqlanadi: qayta urinish FAQAT tahlilni
     // takrorlaydi — bir necha soniya, audiosiz.
-    await supabase.from('calls').update({
+    const upd: Record<string, unknown> = {
       transcript: res.fullText,
       transcript_segments: Array.isArray(res.dialog) ? res.dialog : [],
-      duration: res.durationSec ?? undefined,
-    }).eq('id', rowId);
+    };
+    // STT xizmati davomiylikni bilsa — shuni yozamiz (UTel 0 yuborgan bo'lishi mumkin).
+    if (Number(res.durationSec) > 0) upd.duration = Math.round(Number(res.durationSec));
+    await supabase.from('calls').update(upd).eq('id', rowId);
 
     await processTranscriptToCall(supabase, rowId, res.fullText, res.dialog, companyId);
     console.log(`UTel analiz done (row=${rowId}, so'z: ${res.wordsCount})`);
