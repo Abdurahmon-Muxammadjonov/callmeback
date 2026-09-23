@@ -324,7 +324,19 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
     // 2026-09-23). kpi_score maydoni texnik sabablarga ko'ra 0-100 bo'lib
     // qoladi (baza ustuni), lekin izohda ball 10 ballik ko'rinishda yoziladi:
     // 65 -> "6.5/10". Shunda xodim ko'rgan raqam bilan izoh mos keladi.
-    'operator_evaluation — KPI balli NEGA aynan shunday chiqqanini QISQA (2-3 gap) va ANIQ yozing. Boshida ballni 10 BALLIK ko\'rinishda yozing (kpi_score/10, bir xona: 65 -> "Ball 6.5/10"). Keyin qaysi bandlar bajarilgani va qaysilari bajarilmaganini aniq dalil bilan sanab o\'ting — umumiy gap ("yaxshi ishladi") yozmang. Masalan: "Ball 6.5/10. Salomlashdi, ehtiyojni aniqladi va narxni aytdi. Lekin e\'tirozga javob bermadi va keyingi qadam belgilanmadi."',
+    // Izoh IKKI TOMONLAMA bo'lishi shart (foydalanuvchi talabi 2026-09-23):
+    // avval NEGA shuncha ball OLGANI — ya'ni operator nimani yaxshi qilgani
+    // ("qiziqtirdi", "probniyga yozdirdi"), keyin nimani yaxshilash kerakligi.
+    // Avval model asosan kamchilikni yozar, xodim esa nima uchun maqtalganini
+    // bilmasdi.
+    [
+      'operator_evaluation — ball NEGA aynan shunday chiqqanini yozing. Format QAT\'IY, uch qismdan iborat:',
+      '   1) Qaysi skript ishlatilgani va ball: "(Yangi lid) Ball 8.2/10." yoki "(Eski baza) Ball 6.5/10."',
+      '   2) "Kuchli tomoni:" — operator nimani YAXSHI qilgani, aniq dalil bilan. Masalan: "mijozni qiziqtirdi va maqsadini aniqladi, probniyga shanba 14:00 ga yozdirdi", "narxni aniq aytdi va e\'tirozga dalil bilan javob berdi". Ball baland bo\'lsa — aynan NIMA uchun balandligi shu yerda ko\'rinsin.',
+      '   3) "Yaxshilash kerak:" — nima qilinmagani. Hammasi bajarilgan bo\'lsa: "Yaxshilash kerak: sezilarli kamchilik yo\'q."',
+      'Har ikkala qism ham HAR DOIM bo\'lsin — past ballda ham kuchli tomonini toping, baland ballda ham nima yaxshilash mumkinligini yozing. Umumiy gap ("yaxshi ishladi") yozmang, faqat transkriptdagi aniq dalil.',
+      'Namuna: "(Yangi lid) Ball 8.2/10. Kuchli tomoni: mijozning maqsadini va muddatini aniqladi, kursni foyda tilida tushuntirdi va probniyga shanba 14:00 ga yozdirib, joyini band qildi. Yaxshilash kerak: tariflar orasidagi farq aytilmadi va yopiq kanalga qo\'shish taklif qilinmadi."',
+    ].join('\n'),
     // criteria_scores endi skript bandlari bilan to'ldiriladi (avval
     // "faqat dinamik qoidalar bo'lsa" deyilardi va mezonsiz kompaniyada
     // bo'sh qolardi — shu sabab ball tafsiloti ko'rinmasdi).
