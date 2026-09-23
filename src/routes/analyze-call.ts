@@ -432,7 +432,7 @@ async function getOrCreateManagerByName(
 // Ism bilan emas, TURG'UN identifikator (pbx_id) bilan bog'laydi — shunda admin keyinchalik
 // menejer ismini "PBX 101" dan haqiqiy ismga o'zgartirsa ham, keyingi qo'ng'iroqlar
 // baribir to'g'ri menejerga (dublikat yaratmasdan) bog'lanaveradi.
-async function getOrCreateManagerByPbxId(
+export async function getOrCreateManagerByPbxId(
   supabase: SupabaseClient,
   pbxId: string,
   companyId: string | null,

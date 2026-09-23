@@ -3,7 +3,8 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { supabase } from '../lib/supabase';
-import { enqueueBatchCalls } from './analyze-call';
+import { getOrCreateManagerByPbxId } from './analyze-call';
+import { submitAudioForAnalysis, waitForAnalysis, isSalesAiConfigured } from '../lib/salesAiClient';
 
 // ============================================================================
 // UTel (utc381.utel.uz) — O'zbek virtual PBX / bulutli telefoniya webhook.
@@ -64,37 +65,90 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
   const audioUrl = typeof ch?.recorded_file_url === 'string' ? ch.recorded_file_url.trim() : '';
 
   if (!callId) { console.warn('UTel call_saved: call_id yo\'q — o\'tkazib yuborildi.'); return; }
-  if (!audioUrl) { console.warn(`UTel call_saved: recorded_file_url yo\'q (call_id=${callId}) — o\'tkazib yuborildi.`); return; }
+  if (!audioUrl) { console.warn(`UTel call_saved: recorded_file_url yo\'q (call_id=${callId}).`); return; }
 
   const companyId = companyIdForDomain(payload?.domain);
   if (!companyId) {
-    console.warn(`UTel call_saved: "${payload?.domain}" domeni uchun kompaniya xaritada topilmadi — o\'tkazib yuborildi (call_id=${callId}).`);
+    console.warn(`UTel call_saved: "${payload?.domain}" domeni uchun kompaniya topilmadi (call_id=${callId}).`);
     return;
   }
 
+  // Dedup: shu call_id allaqachon yozilgan bo'lsa — takrorlamaymiz (UTel
+  // hodisani qayta yuborishi mumkin).
+  const { data: existing } = await supabase.from('calls').select('id').eq('crm_id', callId).limit(1).maybeSingle();
+  if (existing?.id) { console.log(`UTel call_saved: ${callId} allaqachon mavjud — o'tkazib yuborildi.`); return; }
+
+  // Operator (ichki raqam src) JAMALS ichida topiladi/yaratiladi.
+  const src = ch?.src != null ? String(ch.src).trim() : '';
+  let managerId: string | null = null;
+  if (src) {
+    try {
+      const m = await getOrCreateManagerByPbxId(supabase, src, companyId);
+      managerId = m.id;
+    } catch (e: any) {
+      console.error(`UTel call_saved: operator (${src}) yaratib bo'lmadi:`, e?.message);
+    }
+  }
+
   const typeName = String(ch?.type?.name || '').toLowerCase();
-  const direction: 'incoming' | 'outgoing' | 'unknown' =
-    typeName.includes('out') ? 'outgoing' : typeName.includes('in') ? 'incoming' : 'unknown';
+  const direction = typeName.includes('out') ? 'outgoing' : typeName.includes('in') ? 'incoming' : 'unknown';
 
-  const item = {
-    audio_url: audioUrl,
-    crm_id: callId,                                            // dedup kaliti
-    pbx_call_id: callId,
-    manager_pbx_id: ch?.src != null ? String(ch.src) : undefined, // operator ichki raqami (108)
-    company_id: companyId,
-    client_phone: ch?.external_number != null ? String(ch.external_number) : undefined,
-    direction,
-    call_status: ch?.status?.name != null ? String(ch.status.name) : undefined,
-  };
+  // Qo'ng'iroq qatorini DARHOL yozamiz (status=processing) — audio dashboard'da
+  // ko'rinadi/eshitiladi; matn+tahlil sales-ai-front'dan kelgach yangilanadi.
+  const { data: call, error: insErr } = await supabase
+    .from('calls')
+    .insert({
+      company_id: companyId,
+      manager_id: managerId,
+      audio_url: audioUrl,
+      audio_source_url: audioUrl,
+      crm_id: callId,
+      pbx_call_id: callId,
+      direction,
+      client_phone: ch?.external_number != null ? String(ch.external_number) : null,
+      duration: typeof ch?.duration === 'number' ? ch.duration : null,
+      status: 'processing',
+    })
+    .select('id')
+    .single();
+  if (insErr || !call) {
+    console.error(`UTel call_saved: calls insert xatosi (call_id=${callId}):`, insErr?.message);
+    return;
+  }
 
+  // sales-ai-front (Whisper) bilan tahlil — Aisha/Gemini o'rniga (foydalanuvchi
+  // tanlovi). Sozlanmagan bo'lsa qo'ng'iroq 'processing' qolaveradi (audio bor).
+  if (!isSalesAiConfigured()) {
+    console.warn('SALES_AI_API_KEY sozlanmagan — audio saqlandi, tahlil o\'tkazilmadi.');
+    return;
+  }
   try {
-    const out = await enqueueBatchCalls([item], supabase);
-    console.log(`UTel call_saved -> enqueueBatchCalls: HTTP ${out.status} (call_id=${callId}, company=${companyId})`,
-      out.status >= 400 ? JSON.stringify(out.body).slice(0, 300) : '');
+    const clientName = ch?.external_number != null ? String(ch.external_number) : undefined;
+    const jobId = await submitAudioForAnalysis(audioUrl, clientName);
+    const res = await waitForAnalysis(jobId);
+
+    const update: Record<string, unknown> = {
+      transcript: res.fullText || null,
+      transcript_segments: Array.isArray(res.dialog) ? res.dialog : [],
+      status: res.status === 'done' ? 'done' : 'failed',
+      error: res.status === 'done' ? null : `sales-ai status: ${res.status}`,
+    };
+    // analysis strukturasi haqiqiy (gaplashilgan) qo'ng'iroqda aniqlanadi —
+    // shu sabab moslashuvchan map: bor bo'lgan maydonlarni olamiz, xomini
+    // client_info'ga saqlaymiz (yo'qolmasin, keyin aniq map qilamiz).
+    const a = res.analysis;
+    if (a && typeof a === 'object') {
+      const score = (a as any).score ?? (a as any).kpi_score ?? (a as any).kpi;
+      if (typeof score === 'number') update.kpi_score = score;
+      const summary = (a as any).summary ?? (a as any).comment ?? (a as any).rop_comment;
+      if (typeof summary === 'string' && summary) update.rop_comment = summary;
+      update.client_info = a;
+    }
+    await supabase.from('calls').update(update).eq('id', call.id);
+    console.log(`UTel call_saved -> sales-ai: ${res.status} (call_id=${callId}, so'z: ${res.wordsCount})`);
   } catch (e: any) {
-    // enqueue xatosi log'da qoladi — 200 ack allaqachon yuborilgan; UTel
-    // hodisani qayta yuborsa, dedup (crm_id) takror yozishdan saqlaydi.
-    console.error(`UTel call_saved enqueue xatosi (call_id=${callId}):`, e?.message || e);
+    console.error(`UTel call_saved sales-ai xatosi (call_id=${callId}):`, e?.message || e);
+    await supabase.from('calls').update({ status: 'failed', error: String(e?.message || e).slice(0, 500) }).eq('id', call.id).then(undefined, () => {});
   }
 }
 
