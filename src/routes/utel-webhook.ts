@@ -54,6 +54,20 @@ const UTEL_DOMAIN_TO_COMPANY: Record<string, string> = {
 // (<=5 raqam), mijoz raqami uzun (9+). Shu sabab operator = src/dst dan
 // qisqasi. (Avval xato: har doim src olingan -> incoming'da mijoz raqami
 // "xodim" bo'lib yaratilib, soxta operatorlar paydo bo'lardi.)
+// MIJOZ raqamini aniqlaydi: src/dst dan UZUNI (operator ichki raqami qisqa).
+//
+// DIQQAT (2026-09-23): avval client_phone sifatida ch.external_number
+// olinardi — u MIJOZNIKI EMAS, kompaniyaning o'z shahar raqami. Natijada
+// 696 qo'ng'iroqdan 695 tasida bir xil raqam (555889939) turib qolgan edi.
+function resolveClientNumber(ch: any): string | null {
+  const cands = [ch?.src, ch?.dst]
+    .map((x) => (x == null ? '' : String(x).trim()))
+    .filter(Boolean);
+  const external = cands.find((x) => x.replace(/\D/g, '').length > 5);
+  if (external) return external;
+  return ch?.external_number != null ? String(ch.external_number) : null;
+}
+
 function resolveOperatorExt(ch: any): string {
   const cands = [ch?.src, ch?.dst]
     .map((x) => (x == null ? '' : String(x).trim()))
@@ -140,7 +154,7 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
     crm_id: callId,
     pbx_call_id: callId,
     direction,
-    client_phone: ch?.external_number != null ? String(ch.external_number) : null,
+    client_phone: resolveClientNumber(ch),
     // UTel ko'pincha duration=0 yuboradi — bunda davomiylikni audio
     // faylning o'zidan (WAV sarlavhasi + hajm) o'lchaymiz.
     duration: durationSec,
@@ -174,7 +188,7 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
   // ishlov uzilib qolsa (deploy/restart/timeout), qo'ng'iroq 'processing'
   // qoladi va navbat uni keyin qayta oladi. Shu sabab bu yerda
   // await qilib kutmaymiz — void.
-  void analyzeUtelCall(call.id, audioUrl, companyId, ch?.external_number != null ? String(ch.external_number) : undefined);
+  void analyzeUtelCall(call.id, audioUrl, companyId, resolveClientNumber(ch) ?? undefined);
 }
 
 // Bitta UTel qo'ng'irog'ini tahlil qiladi: audio -> sales-ai (matn) ->
