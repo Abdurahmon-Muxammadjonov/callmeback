@@ -279,6 +279,28 @@ function isCoolingDown(id: string): boolean {
   return !!r && Date.now() < r.at;
 }
 
+// Hozir kutish rejimida turgan id'lar. Bular SO'ROVNING O'ZIDA chiqarib
+// tashlanadi — avval so'rov eng eski 40 qatorni olar va ular kutishda
+// bo'lsa, filtrdan keyin 0 qator qolib, ORQADAGI qo'ng'iroqlarga umuman
+// navbat kelmasdi (navbat "to'xtab qolgandek" ko'rinardi).
+function coolingIds(): string[] {
+  const now = Date.now();
+  const out: string[] = [];
+  for (const [id, r] of retryAfter) {
+    if (now < r.at) out.push(id);
+    else retryAfter.delete(id); // muddati o'tganini tozalab boramiz
+  }
+  return out;
+}
+
+// PostgREST uchun: .not('id', 'in', '(a,b,c)'). Ro'yxat juda uzun bo'lsa
+// so'rov URL'i haddan oshmasin uchun cheklaymiz.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function excludeCooling(q: any): any {
+  const ids = coolingIds().slice(0, 200);
+  return ids.length ? q.not('id', 'in', `(${ids.join(',')})`) : q;
+}
+
 function markAttempted(id: string): void {
   const prev = retryAfter.get(id);
   const delayMs = prev ? Math.min(prev.delayMs * 2, MAX_BACKOFF_MS) : BASE_BACKOFF_MS;
@@ -299,23 +321,23 @@ async function runQueueOnce(): Promise<number> {
   // ilike '%utel%' — FAQAT UTel qo'ng'iroqlari. Aks holda eski (boshqa
   // manbadagi) o'n minglab qo'ng'iroq ham shu navbatga tushib, Gemini
   // kvotasini bekorga yeb qo'yardi.
-  const { data: pending } = await supabase
+  const { data: pending } = await excludeCooling(supabase
     .from('calls')
     .select('id, transcript, transcript_segments, company_id')
     .not('transcript', 'is', null)
     .neq('status', 'done')
     .ilike('audio_url', '%utel%')
     .gte('created_at', QUEUE_SINCE)
-    .lt('created_at', cutoff)
+    .lt('created_at', cutoff))
     .order('created_at', { ascending: true })
     .limit(BATCH * 5);
-  const needAnalysis = (pending || [])
-    .filter((r) => typeof r.transcript === 'string' && r.transcript.trim() !== '')
-    .filter((r) => !isCoolingDown(r.id))
+  const needAnalysis = ((pending || []) as any[])
+    .filter((r: any) => typeof r.transcript === 'string' && r.transcript.trim() !== '')
+    .filter((r: any) => !isCoolingDown(r.id))
     .slice(0, BATCH);
   if (needAnalysis.length > 0) {
     console.log(`UTel navbat: ${needAnalysis.length} ta matn tahlilga (audiosiz).`);
-    await Promise.allSettled(needAnalysis.map(async (r) => {
+    await Promise.allSettled(needAnalysis.map(async (r: any) => {
       markAttempted(r.id);
       await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
       await reanalyzeTranscriptOnly(r as any);
@@ -325,26 +347,26 @@ async function runQueueOnce(): Promise<number> {
   // 2) Matnsizlar — to'liq quvur (audio -> matn -> tahlil).
   //    AUDIO_TOO_LARGE bo'lganlar tashlab ketiladi: qayta urinish befoyda
   //    va navbatni bloklaydi.
-  const { data, error } = await supabase
+  const { data, error } = await excludeCooling(supabase
     .from('calls')
     .select('id, audio_url, company_id, client_phone, error')
     .ilike('audio_url', '%utel%')
     .is('transcript', null)
     .neq('status', 'done')
     .gte('created_at', QUEUE_SINCE)
-    .lt('created_at', cutoff)
+    .lt('created_at', cutoff))
     .order('created_at', { ascending: true })
     .limit(BATCH * 5);
   if (error) { console.warn('UTel navbat so\'rovi xatosi:', error.message); return needAnalysis.length; }
-  const rows = (data || [])
-    .filter((r) => typeof r.audio_url === 'string' && r.audio_url.includes('utel'))
-    .filter((r) => !String(r.error || '').includes('AUDIO_TOO_LARGE'))
-    .filter((r) => !isCoolingDown(r.id))
+  const rows = ((data || []) as any[])
+    .filter((r: any) => typeof r.audio_url === 'string' && r.audio_url.includes('utel'))
+    .filter((r: any) => !String(r.error || '').includes('AUDIO_TOO_LARGE'))
+    .filter((r: any) => !isCoolingDown(r.id))
     .slice(0, BATCH);
   if (rows.length === 0) return needAnalysis.length;
 
   console.log(`UTel navbat: ${rows.length} ta audio tahlilga.`);
-  await Promise.allSettled(rows.map(async (r) => {
+  await Promise.allSettled(rows.map(async (r: any) => {
     markAttempted(r.id);
     await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
     await analyzeUtelCall(r.id, r.audio_url as string, r.company_id ?? null, r.client_phone ?? undefined);

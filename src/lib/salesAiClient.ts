@@ -87,8 +87,12 @@ function authHeader(): Record<string, string> {
 // Audioni URL'dan yuklab, sales-ai-front'ga multipart yuboradi. Qaytaradi: tahlil id.
 export async function submitAudioForAnalysis(audioUrl: string, clientName?: string): Promise<string> {
   // 1) UTel'dan audioni yuklab olamiz (auth'siz ochiladi — tekshirilgan).
+  // TIMEOUT majburiy: Node'ning fetch'ida standart timeout YO'Q. Timeoutsiz
+  // bitta osilib qolgan yuklash butun navbatni abadiy to'xtatib qo'yadi
+  // (2026-09-23'da shunga yaqin holat kuzatildi).
   const audioResp = await fetch(audioUrl, {
     headers: { 'User-Agent': 'Procell-Audio/1.0', Accept: 'audio/*,*/*' },
+    signal: AbortSignal.timeout(120_000),
   });
   if (!audioResp.ok) throw new Error(`Audio yuklab bo'lmadi: HTTP ${audioResp.status}`);
   const raw = Buffer.from(await audioResp.arrayBuffer());
@@ -118,6 +122,7 @@ export async function submitAudioForAnalysis(audioUrl: string, clientName?: stri
     method: 'POST',
     headers: { ...authHeader() },
     body: form,
+    signal: AbortSignal.timeout(120_000),
   });
   const body: any = await resp.json().catch(() => ({}));
   if (!resp.ok || !body?.id) {
@@ -134,7 +139,10 @@ export async function submitAudioForAnalysis(audioUrl: string, clientName?: stri
 
 // Bitta tahlil natijasini oladi (bir marta).
 export async function fetchAnalysisOnce(id: string): Promise<SalesAiResult> {
-  const resp = await fetch(`${BASE}/api/v1/calls/${id}`, { headers: { ...authHeader() } });
+  const resp = await fetch(`${BASE}/api/v1/calls/${id}`, {
+    headers: { ...authHeader() },
+    signal: AbortSignal.timeout(30_000),
+  });
   const body: any = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(`sales-ai GET xatosi: HTTP ${resp.status}`);
   const call = body?.call || {};
