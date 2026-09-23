@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { supabase, fetchAllRows } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 import { getCompanyManagerIds } from '../lib/companyScope';
-import { isMissingFunctionError, relationshipDynamicsInNode } from '../lib/analyticsFallback';
+import { relationshipDynamicsInNode } from '../lib/analyticsFallback';
 
 const router = Router();
 
@@ -53,18 +53,9 @@ router.get('/relationship-dynamics', requireAuth, async (req: CompanyAuthedReque
   try {
     const companyId = req.auth!.companyId as string;
     const platformId = typeof req.query.platform_id === 'string' && req.query.platform_id ? req.query.platform_id : null;
-    const managerIds = await getCompanyManagerIds(companyId);
-
-    const { data, error } = await supabase.rpc('calls_relationship_dynamics', { p_platform_id: platformId, p_manager_ids: managerIds });
-    if (error) {
-      // SQL (tenant_scoped_aggregates.sql) hali ishga tushirilmagan bo'lsa —
-      // bir xil tenant chegarasi bilan Node'da hisoblaymiz.
-      if (isMissingFunctionError(error)) {
-        return res.status(200).json({ success: true, data: await relationshipDynamicsInNode(managerIds, platformId), fallback: true });
-      }
-      return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
-    }
-
+    // Chegara company_id bo'yicha (analytics/overview bilan bir xil sabab):
+    // xodim bog'lanmagan qo'ng'iroqlar ham hisobga kirsin.
+    const data = await relationshipDynamicsInNode(companyId, platformId);
     return res.status(200).json({ success: true, data });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Relationship dynamics xatolik.' });

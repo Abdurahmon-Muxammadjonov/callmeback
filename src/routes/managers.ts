@@ -7,6 +7,31 @@ const router = Router();
 const VALID_STATUS = ['active', 'inactive', 'on_leave', 'flagged'];
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Qo'ng'iroqlar endi XODIM YARATMASDAN yoziladi (foydalanuvchi talabi
+// 2026-09-23) — PBX'dan kelgan operator ichki raqami calls.pbx_id'da
+// saqlanadi, manager_id esa bo'sh qolishi mumkin. Kompaniya o'sha ichki
+// raqamli xodimni qo'shganda (yoki xodimga pbx_id bergan/o'zgartirganda),
+// o'sha raqamga tegishli, hali hech kimga biriktirilmagan qo'ng'iroqlar
+// avtomatik shu xodimga bog'lanadi — qo'lda ishlash shart emas.
+async function linkCallsToManager(companyId: string, managerId: string, pbxId: unknown): Promise<number> {
+  const ext = typeof pbxId === 'string' ? pbxId.trim() : '';
+  if (!ext) return 0;
+  const { data, error } = await supabase
+    .from('calls')
+    .update({ manager_id: managerId })
+    .eq('company_id', companyId)
+    .eq('pbx_id', ext)
+    .is('manager_id', null)
+    .select('id');
+  if (error) {
+    console.warn(`Xodimga qo'ng'iroqlarni bog'lashda xato (pbx_id=${ext}):`, error.message);
+    return 0;
+  }
+  const n = (data || []).length;
+  if (n) console.log(`Xodim ${managerId} (ichki ${ext}) ga ${n} ta qo'ng'iroq bog'landi.`);
+  return n;
+}
+
 // XAVFSIZLIK TUZATISHI (production'da aniqlangan CRITICAL xato): bu router
 // avval requireAuth'siz va company_id filtrisiz edi — HAR QANDAY kishi
 // (login qilmasdan ham) BARCHA kompaniyalarning xodimlari (ism, status,
@@ -98,7 +123,8 @@ router.post('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =
       .select('*')
       .single();
     if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
-    return res.status(201).json({ success: true, data });
+    const linked = await linkCallsToManager(companyId, data.id, data.pbx_id);
+    return res.status(201).json({ success: true, data, linked_calls: linked });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to create manager.' });
   }
@@ -143,7 +169,8 @@ router.put('/:id', requireAuth, async (req: CompanyAuthedRequest, res: Response)
     const { data, error } = await supabase.from('managers').update(update).eq('id', id).select('*').maybeSingle();
     if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
     if (!data) return res.status(404).json({ success: false, error: 'Manager topilmadi.' });
-    return res.status(200).json({ success: true, data });
+    const linked = update.pbx_id !== undefined ? await linkCallsToManager(companyId, data.id, data.pbx_id) : 0;
+    return res.status(200).json({ success: true, data, linked_calls: linked });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to update manager.' });
   }

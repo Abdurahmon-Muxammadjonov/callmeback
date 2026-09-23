@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { supabase, fetchAllRows } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 import { getCompanyManagerIds } from '../lib/companyScope';
-import { isMissingFunctionError, popStatsInNode } from '../lib/analyticsFallback';
+import { popStatsInNode, overviewStatsInNode } from '../lib/analyticsFallback';
 
 const router = Router();
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -87,11 +87,12 @@ router.get('/overview', requireAuth, async (req: CompanyAuthedRequest, res: Resp
     // bu tekshirilmagan holda BOSHQA kompaniyaning statistikasini so'rash
     // imkonini berardi. Endi tenant chegarasi FAQAT autentifikatsiya
         // qilingan req.auth.companyId'dan hisoblanadi.
-    const managerIds = await getCompanyManagerIds(companyId);
-
-    const { data, error } = await supabase.rpc('calls_overview_stats', { p_manager_ids: managerIds });
-    if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
-
+    // DB funksiyasi (calls_overview_stats) manager_id massivi bo'yicha
+    // filtrlaydi — xodim bog'lanmagan qo'ng'iroqlarni TASHLAB yuboradi.
+    // Endi qo'ng'iroq xodim yaratmasdan yoziladi (operator raqami
+    // calls.pbx_id'da), shu sabab chegara company_id bo'yicha Node'da
+    // hisoblanadi: yangi audiolar darhol ko'rinadi.
+    const data = await overviewStatsInNode(companyId);
     return res.status(200).json({ success: true, data });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Overview hisoblashda xatolik.' });
@@ -228,18 +229,9 @@ router.get('/funnel', requireAuth, async (req: CompanyAuthedRequest, res: Respon
 router.get('/pop', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
     const companyId = req.auth!.companyId as string;
-    const platformId = typeof req.query.platform_id === 'string' && req.query.platform_id ? req.query.platform_id : null;
-    const managerIds = await getCompanyManagerIds(companyId);
-    const { data, error } = await supabase.rpc('calls_pop_stats', { p_platform_id: platformId, p_manager_ids: managerIds });
-    if (error) {
-      // supabase/tenant_scoped_aggregates.sql hali ishga tushirilmagan bo'lsa
-      // (DB funksiyasi p_manager_ids'ni bilmaydi) — xuddi shu tenant
-      // chegarasi bilan Node'da hisoblaymiz; dashboard bo'sh qolmaydi.
-      if (isMissingFunctionError(error)) {
-        return res.status(200).json({ success: true, data: await popStatsInNode(managerIds), fallback: true });
-      }
-      return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
-    }
+    // Overview bilan bir xil sabab: tenant chegarasi company_id (xodimsiz
+    // qo'ng'iroqlar ham kirsin). Oyna ~2 oy va 3 ustun — Node'da arzon.
+    const data = await popStatsInNode(companyId);
     return res.status(200).json({ success: true, data });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'PoP hisoblashda xatolik.' });

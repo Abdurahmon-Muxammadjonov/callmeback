@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { pbxAuthHeaders } from './audioAccess';
+import { withGeminiSlot } from './geminiLimiter';
 
 export interface CriteriaScore {
   title: string;
@@ -318,11 +319,14 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
     .filter(Boolean)
     .join('\n\n');
 
-  const maxAttempts = 4;
+  // maxAttempts 4 -> 6: 429 (daqiqalik limit) bo'lsa kutib qayta urinamiz,
+  // "failed" qilmaymiz. Har bir so'rov withGeminiSlot darvozasidan o'tadi —
+  // shu sababli 429 kamdan-kam uchraydi (qarang: lib/geminiLimiter.ts).
+  const maxAttempts = 6;
   let response: Awaited<ReturnType<typeof client.models.generateContent>> | undefined;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      response = await client.models.generateContent({
+      response = await withGeminiSlot(() => client.models.generateContent({
         model: ANALYZE_MODEL,
         contents: `Quyidagi qo'ng'iroq transkriptini tahlil qil:\n\n${transcript}`,
         config: {
@@ -330,7 +334,7 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
           responseMimeType: 'application/json',
           responseSchema: CALL_ANALYSIS_SCHEMA,
         },
-      });
+      }));
       break;
     } catch (error) {
       if (isRetryableGeminiError(error) && attempt < maxAttempts) {

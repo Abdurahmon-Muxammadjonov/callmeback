@@ -51,6 +51,12 @@ export async function submitAudioForAnalysis(audioUrl: string, clientName?: stri
   });
   const body: any = await resp.json().catch(() => ({}));
   if (!resp.ok || !body?.id) {
+    // 413 = fayl xizmat limitidan katta. Bu QAYTA URINSA HAM tuzalmaydi —
+    // maxsus belgi qo'yamiz, navbat (recoverUtelCalls) bunday qo'ng'iroqlarni
+    // qayta olmasin va boshqalarni bloklamasin.
+    if (resp.status === 413) {
+      throw new Error(`AUDIO_TOO_LARGE: audio sales-ai limitidan katta (${(buf.length / 1024 / 1024).toFixed(1)} MB).`);
+    }
     throw new Error(`sales-ai POST xatosi: HTTP ${resp.status} ${JSON.stringify(body).slice(0, 200)}`);
   }
   return String(body.id);

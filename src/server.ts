@@ -11,7 +11,7 @@ import companySectionsRouter from './routes/company-sections';
 import companyWebhooksRouter, { incomingRouter as webhooksIncomingRouter } from './routes/company-webhooks';
 import dashboardRouter from './routes/dashboard';
 import telegramWebhooksRouter from './routes/telegram-webhooks';
-import utelWebhookRouter, { recoverUtelCalls } from './routes/utel-webhook';
+import utelWebhookRouter, { startUtelWorker } from './routes/utel-webhook';
 import analyzeCallRouter, { recoverStuckCalls } from './routes/analyze-call';
 import managersRouter from './routes/managers';
 import criteriaRouter from './routes/criteria';
@@ -165,16 +165,11 @@ function startServer(port: number, isRetry = false): void {
     }, 5 * 60 * 1000);
     watchdog.unref(); // process'ni tirik ushlab turmasin
 
-    // UTel tahlil navbati — har 45 soniyada qotib qolgan/eski qo'ng'iroqlarni
-    // (sales-ai+Gemini) qayta ishlaydi. Webhook fon ishlovi uzilsa ham
-    // qo'ng'iroqlar YO'QOLMAYDI (processing'da yozilgan) va shu yerda
-    // tugatiladi — real platform uchun ishonchlilik. Eski failed'lar ham
-    // asta-sekin shu orqali tahlil qilinadi.
-    recoverUtelCalls().catch((e) => console.error('UTel recovery (boot) failed:', e?.message));
-    const utelRecovery = setInterval(() => {
-      recoverUtelCalls().catch((e) => console.error('UTel recovery failed:', e?.message));
-    }, 45 * 1000);
-    utelRecovery.unref();
+    // UTel tahlil navbati — TO'XTOVSIZ ishchi: bir to'plam tugashi bilan
+    // darhol keyingisini oladi (navbat bo'shaguncha). Webhook fon ishlovi
+    // uzilsa ham qo'ng'iroqlar YO'QOLMAYDI (processing'da yozilgan) va shu
+    // yerda tugatiladi. Eski failed'lar ham shu navbatdan o'tadi.
+    startUtelWorker();
 
     // amoCRM davriy sync — ulangan bo'lsa menejerlarni avtomatik yangilab turadi.
     // CRM_SYNC_MINUTES=0 bo'lsa o'chiriladi (default 10 daqiqa).

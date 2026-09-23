@@ -708,6 +708,13 @@ export async function recoverStuckCalls(opts: { includeFailed?: boolean } = {}):
       // audio_url o'qiladigan bo'lsin, manager bog'langan bo'lsin, va shu jarayonda
       // hozir ishlanayotgan bo'lmasin (dublikat ishlovni oldini olamiz).
       .filter((r: any) => typeof r.audio_url === 'string' && isValidHttpUrl(r.audio_url) && r.manager_id && !inFlightCalls.has(r.id))
+      // UTel qo'ng'iroqlariga TEGMAYMIZ: ular sales-ai (Whisper) + Gemini
+      // navbatida ishlanadi (routes/utel-webhook.ts -> startUtelWorker).
+      // Bu watchdog esa eski Aisha quvurini ishlatadi — Aisha kaliti
+      // ishlamaydi va u UTel qo'ng'iroqlarini "Aisha STT 403" bilan
+      // failed qilib, o'z navbatimiz bilan kurashayotgan edi (2026-09-23:
+      // 389 ta qo'ng'iroq aynan shundan yiqilgan).
+      .filter((r: any) => !String(r.audio_url).includes('utel'))
       .map((r: any) => ({ callId: r.id, audioUrl: r.audio_url, managerId: r.manager_id }));
 
     if (prepared.length === 0) return { recovered: 0, ids: [] };

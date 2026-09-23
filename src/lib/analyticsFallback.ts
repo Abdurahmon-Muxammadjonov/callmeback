@@ -47,12 +47,18 @@ const DAY = 24 * 60 * 60 * 1000;
 
 interface CallLite { created_at: string; duration: number | null; kpi_score: number | null; unanswered_count?: number | null; bad_leads_count?: number | null }
 
-async function loadCalls(managerIds: string[], since: Date, columns: string): Promise<CallLite[]> {
-  if (managerIds.length === 0) return [];
+// TENANT CHEGARASI: calls.company_id (avval manager_id ro'yxati edi).
+// Sabab (2026-09-23): endi qo'ng'iroq XODIM YARATMASDAN yoziladi — operator
+// ichki raqami calls.pbx_id'da turadi va xodim hali qo'shilmagan bo'lsa
+// manager_id NULL bo'ladi. Manager bo'yicha filtrlansa, bunday qo'ng'iroqlar
+// (ya'ni yangi kelayotgan audiolarning ko'pi) dashboard'da KO'RINMAY qolardi.
+// company_id esa har bir qo'ng'iroqda bor va aynan to'g'ri chegara.
+async function loadCalls(companyId: string, since: Date, columns: string): Promise<CallLite[]> {
+  if (!companyId) return [];
   // select(columns) dinamik satr bo'lgani uchun supabase-js qator tipini
   // chiqara olmaydi — shu sabab `as any`.
   return fetchAllRows<CallLite>((from, to) =>
-    supabase.from('calls').select(columns).in('manager_id', managerIds).gte('created_at', since.toISOString()).range(from, to) as any);
+    supabase.from('calls').select(columns).eq('company_id', companyId).gte('created_at', since.toISOString()).range(from, to) as any);
 }
 
 function agg(rows: CallLite[], from: Date, to?: Date) {
@@ -74,11 +80,11 @@ function popBlock(cur: ReturnType<typeof agg>, prev: ReturnType<typeof agg>) {
   };
 }
 
-export async function popStatsInNode(managerIds: string[]): Promise<Record<string, unknown>> {
+export async function popStatsInNode(companyId: string): Promise<Record<string, unknown>> {
   const now = new Date();
   const monthStart = startOfMonthUTC(now);
   const since = minusMonths(monthStart, 1);
-  const rows = await loadCalls(managerIds, since, 'created_at, duration, kpi_score');
+  const rows = await loadCalls(companyId, since, 'created_at, duration, kpi_score');
 
   const dayStart = startOfDayUTC(now);
   const weekStart = startOfWeekUTC(now);
@@ -91,11 +97,18 @@ export async function popStatsInNode(managerIds: string[]): Promise<Record<strin
   };
 }
 
-export async function relationshipDynamicsInNode(managerIds: string[], platformId: string | null): Promise<unknown[]> {
+// /analytics/overview — calls_overview_stats RPC'ning aynan shakli, lekin
+// tenant chegarasi company_id bo'yicha (RPC manager_id massivini kutadi va
+// xodimsiz qo'ng'iroqlarni tashlab yuborardi).
+export async function overviewStatsInNode(companyId: string): Promise<Record<string, unknown>> {
+  return popStatsInNode(companyId);
+}
+
+export async function relationshipDynamicsInNode(companyId: string, platformId: string | null): Promise<unknown[]> {
   const now = new Date();
   const today = startOfDayUTC(now);
   const since = minus(today, 13 * DAY);
-  let rows = await loadCalls(managerIds, since, 'created_at, duration, kpi_score, unanswered_count, bad_leads_count, platform_id');
+  let rows = await loadCalls(companyId, since, 'created_at, duration, kpi_score, unanswered_count, bad_leads_count, platform_id');
   if (platformId) rows = rows.filter((r: any) => r.platform_id === platformId);
 
   // kun -> {u, b}

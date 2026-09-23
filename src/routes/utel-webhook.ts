@@ -3,7 +3,7 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { supabase } from '../lib/supabase';
-import { getOrCreateManagerByPbxId, processTranscriptToCall } from './analyze-call';
+import { processTranscriptToCall } from './analyze-call';
 import { submitAudioForAnalysis, waitForAnalysis, isSalesAiConfigured } from '../lib/salesAiClient';
 
 // ============================================================================
@@ -46,6 +46,33 @@ const UTEL_DOMAIN_TO_COMPANY: Record<string, string> = {
   'api.utc381.utel.uz': '24823352-465e-43ea-913c-9f9d7270b9e9', // JAMALS INTERNATIONAL ACADEMY
 };
 
+// Operator (xodim) ichki raqamini aniqlaydi. UTel call_history'da src/dst
+// bo'ladi: OUTGOING'da src=operator (ichki, qisqa) / dst=mijoz (uzun),
+// INCOMING'da src=mijoz (uzun) / dst=operator. Ichki raqam har doim QISQA
+// (<=5 raqam), mijoz raqami uzun (9+). Shu sabab operator = src/dst dan
+// qisqasi. (Avval xato: har doim src olingan -> incoming'da mijoz raqami
+// "xodim" bo'lib yaratilib, soxta operatorlar paydo bo'lardi.)
+function resolveOperatorExt(ch: any): string {
+  const cands = [ch?.src, ch?.dst]
+    .map((x) => (x == null ? '' : String(x).trim()))
+    .filter(Boolean);
+  const internal = cands.find((x) => x.replace(/\D/g, '').length > 0 && x.replace(/\D/g, '').length <= 5);
+  return internal || '';
+}
+
+// Xodimni FAQAT qidiradi (yaratmaydi). Topilmasa null — qo'ng'iroq baribir
+// saqlanadi, keyin kompaniya xodimni qo'shsa bog'lanadi.
+async function findManagerByExt(companyId: string, ext: string): Promise<string | null> {
+  const { data } = await supabase
+    .from('managers')
+    .select('id')
+    .eq('company_id', companyId)
+    .eq('pbx_id', ext)
+    .limit(1)
+    .maybeSingle();
+  return data?.id ?? null;
+}
+
 function companyIdForDomain(domain?: unknown): string | null {
   if (typeof domain !== 'string' || !domain) return null;
   const host = domain.replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase().trim();
@@ -78,17 +105,14 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
   const { data: existing } = await supabase.from('calls').select('id').eq('crm_id', callId).limit(1).maybeSingle();
   if (existing?.id) { console.log(`UTel call_saved: ${callId} allaqachon mavjud — o'tkazib yuborildi.`); return; }
 
-  // Operator (ichki raqam src) JAMALS ichida topiladi/yaratiladi.
-  const src = ch?.src != null ? String(ch.src).trim() : '';
-  let managerId: string | null = null;
-  if (src) {
-    try {
-      const m = await getOrCreateManagerByPbxId(supabase, src, companyId);
-      managerId = m.id;
-    } catch (e: any) {
-      console.error(`UTel call_saved: operator (${src}) yaratib bo'lmadi:`, e?.message);
-    }
-  }
+  // Operator ichki raqami. XODIM YARATMAYMIZ (foydalanuvchi talabi
+  // 2026-09-23: "xodimni yaratma — faqat operatorlarning audiosi saqlansin").
+  // Ichki raqam qo'ng'iroqning o'ziga (calls.pbx_id) yoziladi; kompaniya
+  // xodimni o'zi qo'shganda, o'sha raqamli qo'ng'iroqlar unga bog'lanadi
+  // (routes/managers.ts -> backfill). Agar xodim ALLAQACHON qo'shilgan
+  // bo'lsa — shu yerda bog'laymiz.
+  const src = resolveOperatorExt(ch); // operator ichki raqami (src/dst dan qisqasi)
+  const managerId = src ? await findManagerByExt(companyId, src) : null;
 
   const typeName = String(ch?.type?.name || '').toLowerCase();
   const direction = typeName.includes('out') ? 'outgoing' : typeName.includes('in') ? 'incoming' : 'unknown';
@@ -104,6 +128,7 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
       audio_source_url: audioUrl,
       crm_id: callId,
       pbx_call_id: callId,
+      pbx_id: src || null, // operator ichki raqami (xodim qo'shilganda bog'lanadi)
       direction,
       client_phone: ch?.external_number != null ? String(ch.external_number) : null,
       duration: typeof ch?.duration === 'number' ? ch.duration : null,
@@ -149,14 +174,48 @@ export async function analyzeUtelCall(
         error: null,
       }).eq('id', rowId);
       console.log(`UTel analiz: matn bo'sh (row=${rowId}, status=${res.status})`);
-    } else {
-      // Matn bor -> Gemini bilan to'liq tahlil (KPI, izoh, mezonlar).
-      await processTranscriptToCall(supabase, rowId, res.fullText, res.dialog, companyId);
-      console.log(`UTel analiz done (row=${rowId}, so'z: ${res.wordsCount})`);
+      return;
     }
+
+    // MATNNI DARHOL SAQLAYMIZ. Avval matn faqat Gemini tahlili
+    // muvaffaqiyatli tugagandan keyin yozilardi — Gemini 429 (daqiqalik
+    // limit) bersa, STT natijasi yo'qolar va navbat audioni qaytadan
+    // yuklab, qaytadan matnga o'girardi (400+ qo'ng'iroq shu aylanada
+    // qotib qolgan). Endi matn saqlanadi: qayta urinish FAQAT tahlilni
+    // takrorlaydi — bir necha soniya, audiosiz.
+    await supabase.from('calls').update({
+      transcript: res.fullText,
+      transcript_segments: Array.isArray(res.dialog) ? res.dialog : [],
+      duration: res.durationSec ?? undefined,
+    }).eq('id', rowId);
+
+    await processTranscriptToCall(supabase, rowId, res.fullText, res.dialog, companyId);
+    console.log(`UTel analiz done (row=${rowId}, so'z: ${res.wordsCount})`);
   } catch (e: any) {
     console.error(`UTel analiz xatosi (row=${rowId}):`, e?.message || e);
     await supabase.from('calls').update({ status: 'failed', error: String(e?.message || e).slice(0, 500) }).eq('id', rowId).then(undefined, () => {});
+  }
+}
+
+// Matni ALLAQACHON bor qo'ng'iroq: faqat Gemini tahlilini qayta bajaramiz
+// (audio yuklanmaydi, STT takrorlanmaydi — bir necha soniya).
+async function reanalyzeTranscriptOnly(row: {
+  id: string;
+  transcript: string;
+  transcript_segments: unknown;
+  company_id: string | null;
+}): Promise<void> {
+  try {
+    await processTranscriptToCall(
+      supabase,
+      row.id,
+      row.transcript,
+      Array.isArray(row.transcript_segments) ? row.transcript_segments : [],
+      row.company_id,
+    );
+  } catch (e: any) {
+    console.error(`UTel qayta tahlil xatosi (row=${row.id}):`, e?.message || e);
+    await supabase.from('calls').update({ status: 'failed', error: String(e?.message || e).slice(0, 500) }).eq('id', row.id).then(undefined, () => {});
   }
 }
 
@@ -165,34 +224,93 @@ export async function analyzeUtelCall(
 // Shartlar: UTel audiosi (api.utc381.utel.uz) bor, transkript hali yo'q,
 // status done EMAS (processing/failed), 1 daqiqadan eski (yangi kelayotgani
 // bilan poyga qilmaslik uchun). Bir vaqtda cheklangan (parallel) ishlaymiz.
-let recoveryRunning = false;
-export async function recoverUtelCalls(): Promise<void> {
-  if (recoveryRunning || !isSalesAiConfigured()) return;
-  recoveryRunning = true;
-  try {
-    const cutoff = new Date(Date.now() - 60_000).toISOString();
-    const { data, error } = await supabase
-      .from('calls')
-      .select('id, audio_url, company_id, client_phone')
-      .not('audio_url', 'is', null)
-      .is('transcript', null)
-      .neq('status', 'done')
-      .lt('created_at', cutoff)
-      .order('created_at', { ascending: true })
-      .limit(4); // bir siklda 4 tadan — Railway resursini bosmaslik uchun
-    if (error) { console.warn('recoverUtelCalls query xatosi:', error.message); return; }
-    const rows = (data || []).filter((r) => typeof r.audio_url === 'string' && r.audio_url.includes('utel'));
-    if (rows.length === 0) return;
+// Bir siklda nechta qo'ng'iroq parallel ishlanadi.
+const BATCH = Math.max(1, Number(process.env.UTEL_BATCH || 6));
 
-    console.log(`recoverUtelCalls: ${rows.length} ta qo'ng'iroq qayta tahlilga olindi.`);
-    // 'processing' ga belgilab, parallel ishlaymiz (keyingi sikl bularni qayta olmaydi).
-    await Promise.allSettled(rows.map(async (r) => {
+// Navbatdan bitta to'plam olib ishlaydi. Qaytaradi: nechta ishlandi (0 =
+// navbat bo'sh). AVVAL matni bor qo'ng'iroqlar (ular tayyorga yaqin — faqat
+// tahlil kerak, bir necha soniya), KEYIN matnsizlari (to'liq STT).
+async function runQueueOnce(): Promise<number> {
+  const cutoff = new Date(Date.now() - 45_000).toISOString();
+
+  // 1) Matni bor, lekin tahlili tugamagan — eng tez yutuq.
+  // ilike '%utel%' — FAQAT UTel qo'ng'iroqlari. Aks holda eski (boshqa
+  // manbadagi) o'n minglab qo'ng'iroq ham shu navbatga tushib, Gemini
+  // kvotasini bekorga yeb qo'yardi.
+  const { data: pending } = await supabase
+    .from('calls')
+    .select('id, transcript, transcript_segments, company_id')
+    .not('transcript', 'is', null)
+    .neq('status', 'done')
+    .ilike('audio_url', '%utel%')
+    .lt('created_at', cutoff)
+    .order('created_at', { ascending: true })
+    .limit(BATCH);
+  const needAnalysis = (pending || []).filter((r) => typeof r.transcript === 'string' && r.transcript.trim() !== '');
+  if (needAnalysis.length > 0) {
+    console.log(`UTel navbat: ${needAnalysis.length} ta matn tahlilga (audiosiz).`);
+    await Promise.allSettled(needAnalysis.map(async (r) => {
       await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
-      await analyzeUtelCall(r.id, r.audio_url as string, r.company_id ?? null, r.client_phone ?? undefined);
+      await reanalyzeTranscriptOnly(r as any);
     }));
-  } finally {
-    recoveryRunning = false;
+    return needAnalysis.length;
   }
+
+  // 2) Matnsizlar — to'liq quvur (audio -> matn -> tahlil).
+  //    AUDIO_TOO_LARGE bo'lganlar tashlab ketiladi: qayta urinish befoyda
+  //    va navbatni bloklaydi.
+  const { data, error } = await supabase
+    .from('calls')
+    .select('id, audio_url, company_id, client_phone, error')
+    .ilike('audio_url', '%utel%')
+    .is('transcript', null)
+    .neq('status', 'done')
+    .lt('created_at', cutoff)
+    .order('created_at', { ascending: true })
+    .limit(BATCH * 3);
+  if (error) { console.warn('UTel navbat so\'rovi xatosi:', error.message); return 0; }
+  const rows = (data || [])
+    .filter((r) => typeof r.audio_url === 'string' && r.audio_url.includes('utel'))
+    .filter((r) => !String(r.error || '').includes('AUDIO_TOO_LARGE'))
+    .slice(0, BATCH);
+  if (rows.length === 0) return 0;
+
+  console.log(`UTel navbat: ${rows.length} ta audio tahlilga.`);
+  await Promise.allSettled(rows.map(async (r) => {
+    await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
+    await analyzeUtelCall(r.id, r.audio_url as string, r.company_id ?? null, r.client_phone ?? undefined);
+  }));
+  return rows.length;
+}
+
+// TO'XTOVSIZ ISHCHI (foydalanuvchi talabi 2026-09-23: "hammasini ketma-ket
+// audio tahlil qib srazu chiqarib ketsin"). Avval har 45 soniyada 4 tadan
+// olardi — orada server bekor turar, 400 ta navbat soatlab cho'zilardi.
+// Endi: to'plam tugashi bilan DARHOL keyingisi olinadi; navbat bo'shasa
+// 8 soniya kutib yana qaraydi. Tezlikni ikki narsa cheklaydi: BATCH
+// (parallel) va Gemini daqiqalik darvozasi (geminiLimiter).
+let workerStarted = false;
+export function startUtelWorker(): void {
+  if (workerStarted) return;
+  workerStarted = true;
+
+  void (async function loop() {
+    for (;;) {
+      try {
+        if (!isSalesAiConfigured()) {
+          await new Promise((r) => setTimeout(r, 30_000));
+          continue;
+        }
+        const processed = await runQueueOnce();
+        // Ish bo'lsa — darhol keyingisiga; bo'lmasa qisqa tanaffus.
+        if (processed === 0) await new Promise((r) => setTimeout(r, 8_000));
+      } catch (e: any) {
+        console.error('UTel navbat ishchisi xatosi:', e?.message || e);
+        await new Promise((r) => setTimeout(r, 10_000));
+      }
+    }
+  })();
+  console.log(`UTel navbat ishchisi ishga tushdi (bir vaqtda ${BATCH} ta).`);
 }
 
 function buildEntry(req: Request) {
