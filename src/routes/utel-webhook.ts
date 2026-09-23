@@ -237,6 +237,21 @@ async function reanalyzeTranscriptOnly(row: {
 // Bir siklda nechta qo'ng'iroq parallel ishlanadi.
 const BATCH = Math.max(1, Number(process.env.UTEL_BATCH || 4));
 
+// NAVBAT FAQAT SHU VAQTDAN KEYINGI QO'NG'IROQLARNI OLADI.
+// Foydalanuvchi talabi (2026-09-23): eski to'plangan ~590 ta audio qayta
+// ishlanmasin — "bekorga token sarflama", tahlil SHUNDAN KEYIN kelgan
+// qo'ng'iroqlardan boshlansin. UTEL_QUEUE_SINCE (ISO sana) Railway
+// o'zgaruvchisi shu chegarani belgilaydi; berilmasa — server ishga tushgan
+// vaqt (ya'ni eski hech narsa olinmaydi).
+//
+// DIQQAT: bu navbat (qayta tiklash) uchun. Webhook orqali ENDI kelayotgan
+// qo'ng'iroq baribir darhol tahlil qilinadi — u navbatdan o'tmaydi.
+const QUEUE_SINCE = (() => {
+  const raw = process.env.UTEL_QUEUE_SINCE;
+  const t = raw ? Date.parse(raw) : NaN;
+  return Number.isFinite(t) ? new Date(t).toISOString() : new Date().toISOString();
+})();
+
 // Yiqilgan qo'ng'iroqni DARHOL qayta urinmaymiz. Aks holda navbat eng eski
 // bir nechta qatorga yopishib qolardi: ular yiqilardi, keyingi siklda yana
 // o'shalar tanlanardi (tartib created_at bo'yicha) va YANGI audiolarga
@@ -279,6 +294,7 @@ async function runQueueOnce(): Promise<number> {
     .not('transcript', 'is', null)
     .neq('status', 'done')
     .ilike('audio_url', '%utel%')
+    .gte('created_at', QUEUE_SINCE)
     .lt('created_at', cutoff)
     .order('created_at', { ascending: true })
     .limit(BATCH * 5);
@@ -304,6 +320,7 @@ async function runQueueOnce(): Promise<number> {
     .ilike('audio_url', '%utel%')
     .is('transcript', null)
     .neq('status', 'done')
+    .gte('created_at', QUEUE_SINCE)
     .lt('created_at', cutoff)
     .order('created_at', { ascending: true })
     .limit(BATCH * 5);

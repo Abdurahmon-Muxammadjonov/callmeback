@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { supabase, withSchemaReloadRetry, fetchAllRows } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
+import { listVirtualOperators } from '../lib/virtualOperators';
 
 const router = Router();
 
@@ -60,7 +61,15 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
       const { calls, ...rest } = m;
       return { ...rest, call_count: Array.isArray(calls) && calls[0] ? Number(calls[0].count) : 0 };
     });
-    return res.status(200).json({ success: true, data: mapped });
+
+    // Bazada xodim sifatida yo'q, lekin haqiqatda gaplashgan operatorlarni
+    // ham qo'shamiz (calls.operator_ext dan dinamik). Shu sabab "Jamoa
+    // samaradorligi" xodim qo'shilmagan bo'lsa ham bo'sh turmaydi — kim
+    // gaplashgan bo'lsa, o'z ko'rsatkichlari bilan ko'rinadi.
+    // platform_id filtri berilgan bo'lsa qo'shmaymiz (virtual operatorda
+    // platforma tushunchasi yo'q).
+    const virtual = platformId ? [] : await listVirtualOperators(companyId);
+    return res.status(200).json({ success: true, data: [...mapped, ...virtual] });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to list managers.' });
   }

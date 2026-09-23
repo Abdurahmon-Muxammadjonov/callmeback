@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { Readable } from 'node:stream';
 import { supabase } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
+import { virtualManagerId } from '../lib/virtualOperators';
 import { signAudioToken, verifyAudioToken, pbxAuthHeaders, isSupabaseStorageUrl } from '../lib/audioAccess';
 
 const router = Router();
@@ -57,7 +58,7 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
 
     let query = supabase
       .from('calls')
-      .select('id, manager_id, platform_id, audio_url, duration, kpi_score, penalty_amount, bonus_amount, rop_comment, status, created_at, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count')
+      .select('id, manager_id, operator_ext, platform_id, audio_url, duration, kpi_score, penalty_amount, bonus_amount, rop_comment, status, created_at, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count')
       .eq('company_id', companyId)
       .order('created_at', { ascending: false })
       .limit(limit);
@@ -66,7 +67,18 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
 
     const { data, error } = await query;
     if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
-    const rows = (data || []).map((row: any) => withPlayableAudioUrl(row, companyId, req));
+    // Xodimga biriktirilmagan qo'ng'iroqda manager_id sifatida "virtual
+    // operator" id'si beriladi (ichki raqamdan hosil qilingan barqaror id) —
+    // shunda dashboard "Jamoa samaradorligi"da kim gaplashgani va uning
+    // ko'rsatkichlari DINAMIK ko'rinadi, bazaga soxta xodim yozmasdan.
+    // Qarang: lib/virtualOperators.ts, routes/managers.ts.
+    const rows = (data || []).map((row: any) => {
+      const withAudio = withPlayableAudioUrl(row, companyId, req);
+      if (!withAudio.manager_id && row.operator_ext) {
+        return { ...withAudio, manager_id: virtualManagerId(companyId, String(row.operator_ext)), manager_virtual: true };
+      }
+      return withAudio;
+    });
     return res.status(200).json({ success: true, count: rows.length, data: rows });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to list calls.' });
