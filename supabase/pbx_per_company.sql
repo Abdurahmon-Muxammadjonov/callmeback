@@ -45,4 +45,14 @@ alter table public.criteria
   add column if not exists company_id uuid references public.companies(id) on delete cascade;
 create index if not exists idx_criteria_company_id on public.criteria(company_id);
 
+-- 4) ESKI global unique'ni O'CHIRISH (2026-09-23 blocker): managers'da
+--    avval faqat pbx_id bo'yicha unique bor edi (uq_managers_pbx_id) — u
+--    bir xil ichki raqam (masalan "108") BUTUN bazada faqat BITTA
+--    kompaniyada bo'lishini majburlaydi. Multi-tenant'da har kompaniyaning
+--    o'z "108"i bo'lishi kerak; yuqoridagi (2-band) uq_managers_company_pbx
+--    shuni ta'minlaydi. Eski globalni olib tashlaymiz (index ham, constraint
+--    ham bo'lishi mumkin — ikkalasini ham `if exists` bilan).
+drop index if exists public.uq_managers_pbx_id;
+alter table public.managers drop constraint if exists uq_managers_pbx_id;
+
 notify pgrst, 'reload schema';
