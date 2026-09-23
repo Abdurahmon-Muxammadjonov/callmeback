@@ -116,38 +116,82 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
     return;
   }
 
-  // sales-ai-front (Whisper) bilan tahlil — Aisha/Gemini o'rniga (foydalanuvchi
-  // tanlovi). Sozlanmagan bo'lsa qo'ng'iroq 'processing' qolaveradi (audio bor).
+  // Tahlil (sales-ai + Gemini) fon rejimida — ISHONCHLILIK uchun: agar bu
+  // ishlov uzilib qolsa (deploy/restart/timeout), qo'ng'iroq 'processing'
+  // qoladi va recoverUtelCalls() uni keyin qayta oladi. Shu sabab bu yerda
+  // await qilib kutmaymiz — void.
+  void analyzeUtelCall(call.id, audioUrl, companyId, ch?.external_number != null ? String(ch.external_number) : undefined);
+}
+
+// Bitta UTel qo'ng'irog'ini tahlil qiladi: audio -> sales-ai (matn) ->
+// Gemini (tahlil) -> calls yangilanadi. Webhook (yangi qo'ng'iroq) va
+// recoverUtelCalls (qotib qolgan/eski) ikkalasi ham shu funksiyani ishlatadi.
+export async function analyzeUtelCall(
+  rowId: string,
+  audioUrl: string,
+  companyId: string | null,
+  clientName?: string,
+): Promise<void> {
   if (!isSalesAiConfigured()) {
-    console.warn('SALES_AI_API_KEY sozlanmagan — audio saqlandi, tahlil o\'tkazilmadi.');
+    console.warn('SALES_AI_API_KEY sozlanmagan — tahlil o\'tkazilmadi.');
     return;
   }
   try {
-    const clientName = ch?.external_number != null ? String(ch.external_number) : undefined;
     const jobId = await submitAudioForAnalysis(audioUrl, clientName);
     const res = await waitForAnalysis(jobId);
 
     if (res.status !== 'done' || !res.fullText) {
-      // Matn chiqmadi (masalan javobsiz qo'ng'iroq) — transkript/dialogni
-      // saqlaymiz, tahlilsiz done qilamiz (Gemini uchun matn yo'q).
+      // Matn yo'q (javobsiz/bo'sh) — dialogni saqlab, tahlilsiz done.
       await supabase.from('calls').update({
         transcript: res.fullText || null,
         transcript_segments: Array.isArray(res.dialog) ? res.dialog : [],
         status: 'done',
         error: null,
-      }).eq('id', call.id);
-      console.log(`UTel call_saved -> sales-ai: matn bo'sh (call_id=${callId}, status=${res.status})`);
+      }).eq('id', rowId);
+      console.log(`UTel analiz: matn bo'sh (row=${rowId}, status=${res.status})`);
     } else {
-      // Matn bor — sales-ai transkriptini (va dialog segmentlarini) Gemini
-      // bilan tahlil qilib, calls qatorini to'liq to'ldiramiz (KPI, izoh,
-      // sentiment, mezonlar...). Foydalanuvchi arxitekturasi: matn sales-ai,
-      // tahlil Gemini.
-      await processTranscriptToCall(supabase, call.id, res.fullText, res.dialog, companyId);
-      console.log(`UTel call_saved -> sales-ai+Gemini done (call_id=${callId}, so'z: ${res.wordsCount})`);
+      // Matn bor -> Gemini bilan to'liq tahlil (KPI, izoh, mezonlar).
+      await processTranscriptToCall(supabase, rowId, res.fullText, res.dialog, companyId);
+      console.log(`UTel analiz done (row=${rowId}, so'z: ${res.wordsCount})`);
     }
   } catch (e: any) {
-    console.error(`UTel call_saved sales-ai xatosi (call_id=${callId}):`, e?.message || e);
-    await supabase.from('calls').update({ status: 'failed', error: String(e?.message || e).slice(0, 500) }).eq('id', call.id).then(undefined, () => {});
+    console.error(`UTel analiz xatosi (row=${rowId}):`, e?.message || e);
+    await supabase.from('calls').update({ status: 'failed', error: String(e?.message || e).slice(0, 500) }).eq('id', rowId).then(undefined, () => {});
+  }
+}
+
+// Qotib qolgan / eski qo'ng'iroqlarni qayta tahlil qiladi (ISHONCHLILIK +
+// eski failed'larni tuzatish). Har N soniyada server.ts chaqiradi.
+// Shartlar: UTel audiosi (api.utc381.utel.uz) bor, transkript hali yo'q,
+// status done EMAS (processing/failed), 1 daqiqadan eski (yangi kelayotgani
+// bilan poyga qilmaslik uchun). Bir vaqtda cheklangan (parallel) ishlaymiz.
+let recoveryRunning = false;
+export async function recoverUtelCalls(): Promise<void> {
+  if (recoveryRunning || !isSalesAiConfigured()) return;
+  recoveryRunning = true;
+  try {
+    const cutoff = new Date(Date.now() - 60_000).toISOString();
+    const { data, error } = await supabase
+      .from('calls')
+      .select('id, audio_url, company_id, client_phone')
+      .not('audio_url', 'is', null)
+      .is('transcript', null)
+      .neq('status', 'done')
+      .lt('created_at', cutoff)
+      .order('created_at', { ascending: true })
+      .limit(4); // bir siklda 4 tadan — Railway resursini bosmaslik uchun
+    if (error) { console.warn('recoverUtelCalls query xatosi:', error.message); return; }
+    const rows = (data || []).filter((r) => typeof r.audio_url === 'string' && r.audio_url.includes('utel'));
+    if (rows.length === 0) return;
+
+    console.log(`recoverUtelCalls: ${rows.length} ta qo'ng'iroq qayta tahlilga olindi.`);
+    // 'processing' ga belgilab, parallel ishlaymiz (keyingi sikl bularni qayta olmaydi).
+    await Promise.allSettled(rows.map(async (r) => {
+      await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
+      await analyzeUtelCall(r.id, r.audio_url as string, r.company_id ?? null, r.client_phone ?? undefined);
+    }));
+  } finally {
+    recoveryRunning = false;
   }
 }
 
