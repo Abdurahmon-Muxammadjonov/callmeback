@@ -9,7 +9,7 @@ import { pipeline } from 'node:stream/promises';
 import { pbxAuthHeaders } from './audioAccess';
 import { withGeminiSlot } from './geminiLimiter';
 import { analyzeWithOpenAi, isOpenAiAnalyzerConfigured } from './openaiAnalyzer';
-import { buildScriptRules } from './evaluationScript';
+import { buildScriptRules, annotateMistakeLines, scoreFromCriteria, rewriteBallText } from './evaluationScript';
 
 export interface CriteriaScore {
   title: string;
@@ -334,6 +334,13 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
       '   1) Qaysi skript ishlatilgani va ball: "(Yangi lid) Ball 8.2/10." yoki "(Eski baza) Ball 6.5/10."',
       '   2) "Kuchli tomoni:" — operator nimani YAXSHI qilgani, aniq dalil bilan. Masalan: "mijozni qiziqtirdi va maqsadini aniqladi, probniyga shanba 14:00 ga yozdirdi", "narxni aniq aytdi va e\'tirozga dalil bilan javob berdi". Ball baland bo\'lsa — aynan NIMA uchun balandligi shu yerda ko\'rinsin.',
       '   3) "Yaxshilash kerak:" — nima qilinmagani. Hammasi bajarilgan bo\'lsa: "Yaxshilash kerak: sezilarli kamchilik yo\'q."',
+      '   4) Oxirida ALOHIDA QATORDAN boshlab "XATOLAR:" bo\'limi. 100 dan past ball olgan HAR BIR band uchun bitta qator yozing, AYNAN shu formatda:',
+      '      XATOLAR:',
+      '      - <Band nomi>: <operator aynan nimani qilmadi yoki so\'ramadi>',
+      '      Masalan:',
+      '      - Probniyga chaqirish: bepul probniy darsga umuman taklif qilmadi, vaqt varianti berilmadi',
+      '      - Ehtiyojni aniqlash: muddatni (qachongacha topshirishi kerakligini) so\'ramadi',
+      '      Bu MIJOZNING emas, SOTUVCHINING xatosi bo\'lsin — skriptda bor-u, operator bajarmagan narsa. Hech qanday kamchilik bo\'lmasa: "XATOLAR: yo\'q".',
       'Har ikkala qism ham HAR DOIM bo\'lsin — past ballda ham kuchli tomonini toping, baland ballda ham nima yaxshilash mumkinligini yozing. Umumiy gap ("yaxshi ishladi") yozmang, faqat transkriptdagi aniq dalil.',
       'Namuna: "(Yangi lid) Ball 8.2/10. Kuchli tomoni: mijozning maqsadini va muddatini aniqladi, kursni foyda tilida tushuntirdi va probniyga shanba 14:00 ga yozdirib, joyini band qildi. Yaxshilash kerak: tariflar orasidagi farq aytilmadi va yopiq kanalga qo\'shish taklif qilinmadi."',
     ].join('\n'),
@@ -426,13 +433,31 @@ function normalizeAnalysisJson(text: string, source: string): CallAnalysis {
   const clampScore = (v: unknown): number => Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
   const intMin0 = (v: unknown): number => Math.max(0, Math.round(Number(v) || 0));
 
+  const criteria: CriteriaScore[] = Array.isArray(parsed.criteria_scores)
+    ? parsed.criteria_scores
+        .filter((c): c is CriteriaScore => !!c && typeof c.title === 'string' && c.title.trim() !== '')
+        .map((c) => ({
+          title: c.title,
+          category: typeof c.category === 'string' ? c.category : null,
+          score: clampScore(c.score),
+        }))
+    : [];
+
+  // BALL BANDLARDAN hisoblanadi (model arifmetikasiga tayanmaymiz) — shunda
+  // "ball 7.5" va xatolardagi minuslar bir-biriga mos keladi.
+  const computed = scoreFromCriteria(criteria);
+  const kpi = computed ?? clampScore(parsed.kpi_score);
+  const evaluation = typeof parsed.operator_evaluation === 'string'
+    ? rewriteBallText(annotateMistakeLines(parsed.operator_evaluation, criteria), kpi)
+    : '';
+
   return {
     sentiment,
     client_mood: typeof parsed.client_mood === 'string' ? parsed.client_mood : '',
-    operator_evaluation: typeof parsed.operator_evaluation === 'string' ? parsed.operator_evaluation : '',
+    operator_evaluation: evaluation,
     deal_closed: Boolean(parsed.deal_closed),
     summary: typeof parsed.summary === 'string' ? parsed.summary : '',
-    kpi_score: clampScore(parsed.kpi_score),
+    kpi_score: kpi,
     client_info: typeof parsed.client_info === 'string' ? parsed.client_info : '',
     final_agreement: typeof parsed.final_agreement === 'string' ? parsed.final_agreement : '',
     next_steps: Array.isArray(parsed.next_steps)
@@ -443,15 +468,7 @@ function normalizeAnalysisJson(text: string, source: string): CallAnalysis {
           .filter((r): r is LostReason => !!r && typeof r.reason_text === 'string' && r.reason_text.trim() !== '')
           .map((r) => ({ reason_text: r.reason_text }))
       : [],
-    criteria_scores: Array.isArray(parsed.criteria_scores)
-      ? parsed.criteria_scores
-          .filter((c): c is CriteriaScore => !!c && typeof c.title === 'string' && c.title.trim() !== '')
-          .map((c) => ({
-            title: c.title,
-            category: typeof c.category === 'string' ? c.category : null,
-            score: clampScore(c.score),
-          }))
-      : [],
+    criteria_scores: criteria,
     // Har doim kamida 1 ta qo'ng'iroq deb hisoblanadi — audit qilinayotgan
     // audioning o'zi allaqachon bitta suhbatning dalili.
     total_calls: Math.max(1, intMin0(parsed.total_calls)),

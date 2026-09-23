@@ -22,7 +22,7 @@ const JSON_SHAPE = `Javobni FAQAT quyidagi JSON obyekt sifatida qaytar (boshqa m
 {
   "sentiment": "positive" | "negative" | "neutral",
   "client_mood": "mijoz kayfiyati haqida qisqa izoh",
-  "operator_evaluation": "menejerning ishi, ohangi, professionalligi tahlili",
+  "operator_evaluation": "MAJBURIY format, ichida \\n bilan qatorlar: \"(Yangi lid) Ball 7.5/10. Kuchli tomoni: <aniq dalil>. Yaxshilash kerak: <aniq dalil>.\\nXATOLAR:\\n- <Band nomi>: <sotuvchi nimani qilmadi/so'ramadi>\\n- <Band nomi>: <...>\" — XATOLAR bo'limi 100 dan past ball olgan HAR BIR band uchun bitta qator bo'lishi SHART; kamchilik bo'lmasa \"XATOLAR: yo'q\"",
   "deal_closed": true | false,
   "summary": "suhbatning 3-4 jumlalik xulosasi",
   "kpi_score": 0-100 butun son,

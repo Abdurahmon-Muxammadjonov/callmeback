@@ -251,6 +251,121 @@ export const REACTIVATION_SCRIPT: ScriptStage[] = [
   },
 ];
 
+// Bandlar nomini solishtirish uchun.
+function normTitle(s: string): string {
+  return s.toLowerCase().replace(/^\s*\d+[b.)]*\s*/i, '').replace(/[^a-zа-яo'`ʻʻ\s]/gi, '').trim();
+}
+
+function matchStage(title: string): ScriptStage | undefined {
+  const b = normTitle(title);
+  return [...FRESH_LEAD_SCRIPT, ...REACTIVATION_SCRIPT].find((st) => {
+    const a = normTitle(st.title);
+    return a === b || a.startsWith(b.slice(0, 12)) || b.startsWith(a.slice(0, 12));
+  });
+}
+
+// UMUMIY BALLNI BANDLARDAN HISOBLAYDI (0-100), skript bandlari topilsa.
+//
+// NEGA: model kpi_score'ni bandlardan mustaqil qo'yardi va raqamlar
+// to'g'ri kelmasdi — masalan ball 7.5 bo'lsa-yu, bandlardan yo'qotilgan
+// ball yig'indisi 3.7 chiqardi ("nega 7.5?" degan savol javobsiz qolardi).
+// Endi ball = Σ(band og'irligi × band foizi). Model faqat bandlarni
+// baholaydi, arifmetikani biz qilamiz.
+export function scoreFromCriteria(criteriaScores: Array<{ title: string; score: number }>): number | null {
+  if (!criteriaScores.length) return null;
+  let total = 0;
+  let covered = 0;
+  for (const cs of criteriaScores) {
+    const stage = matchStage(cs.title);
+    if (!stage) continue;
+    const pct = Math.max(0, Math.min(100, Number(cs.score) || 0));
+    total += (stage.points * pct) / 100;
+    covered += stage.points;
+  }
+  // Bandlarning kamida 60% og'irligi topilmasa — modelning ballini qoldiramiz.
+  if (covered < 60) return null;
+  // Ba'zi bandlar tushib qolsa, bor bandlar ulushiga moslab normallaymiz.
+  const normalized = covered >= 95 ? total : (total / covered) * 100;
+  return Math.max(0, Math.min(100, Math.round(normalized)));
+}
+
+// Izoh matnidagi "Ball X.X/10" ni haqiqiy ball bilan almashtiradi.
+export function rewriteBallText(evaluation: string, kpi0to100: number): string {
+  const ten = (kpi0to100 / 10).toFixed(1);
+  if (/Ball\s*[\d.,]+\s*\/\s*10/i.test(evaluation)) {
+    return evaluation.replace(/Ball\s*[\d.,]+\s*\/\s*10/i, `Ball ${ten}/10`);
+  }
+  return evaluation;
+}
+
+// "XATOLAR:" bo'limidagi har bir qatorga necha ball yo'qotilganini qo'shadi.
+//
+// Modelga arifmetikani ishonib bo'lmaydi, shu sabab MINUS backendda
+// hisoblanadi: band og'irligi × (100 − olingan foiz) / 100. Model faqat
+// "qaysi bandda nimani qilmagani" matnini beradi.
+// Natija: "− 2.0 · Probniyga chaqirish: bepul darsga taklif qilmadi".
+// Frontend shu "−" bilan boshlanadigan qatorlarni QIZIL qilib ko'rsatadi.
+export function annotateMistakeLines(
+  evaluation: string,
+  criteriaScores: Array<{ title: string; score: number }>,
+): string {
+  if (!evaluation || !evaluation.includes('XATOLAR')) return evaluation;
+
+  const norm = (s: string) => s.toLowerCase().replace(/^\s*\d+[b.)]*\s*/i, '').replace(/[^a-zа-яo'`ʻʻ\s]/gi, '').trim();
+  const allStages = [...FRESH_LEAD_SCRIPT, ...REACTIVATION_SCRIPT];
+
+  // Band nomi -> yo'qotilgan ball (o'sha qo'ng'iroqdagi haqiqiy ballardan).
+  const lost = new Map<string, number>();
+  for (const cs of criteriaScores) {
+    const stage = allStages.find((st) => {
+      const a = norm(st.title);
+      const b = norm(cs.title);
+      return a === b || a.startsWith(b.slice(0, 12)) || b.startsWith(a.slice(0, 12));
+    });
+    if (!stage) continue;
+    const pct = Math.max(0, Math.min(100, Number(cs.score) || 0));
+    const minus = (stage.points * (100 - pct)) / 1000; // 10 ballik tizimda
+    if (minus >= 0.05) lost.set(norm(cs.title), minus);
+  }
+
+  const mentioned = new Set<string>();
+  const out = evaluation
+    .split('\n')
+    .map((line) => {
+      const m = line.match(/^\s*[-–—•]\s*([^:]+):\s*(.+)$/);
+      if (!m) return line;
+      const label = m[1].trim();
+      const key = norm(label);
+      let minus: number | undefined = lost.get(key);
+      let hitKey = key;
+      if (minus === undefined) {
+        for (const [k, v] of lost) {
+          if (k.startsWith(key.slice(0, 12)) || key.startsWith(k.slice(0, 12))) { minus = v; hitKey = k; break; }
+        }
+      }
+      if (minus !== undefined) mentioned.add(hitKey);
+      return minus === undefined
+        ? `− ${label}: ${m[2].trim()}`
+        : `− ${minus.toFixed(1)} · ${label}: ${m[2].trim()}`;
+    });
+
+  // Model ba'zi bandlarni tilga olmay ketadi. Ball yo'qotilgan HAR BIR band
+  // ro'yxatda bo'lishi shart — aks holda "ball nega tushdi?" degan savol
+  // javobsiz qoladi. Qolganlarini shu yerda qo'shamiz.
+  const missing = [...lost.entries()]
+    .filter(([k]) => !mentioned.has(k))
+    .sort((a, b) => b[1] - a[1]);
+  if (missing.length) {
+    const titleOf = (key: string) =>
+      criteriaScores.find((c) => norm(c.title) === key)?.title.replace(/^\s*\d+[b.)]*\s*/i, '') || key;
+    for (const [k, v] of missing) {
+      out.push(`− ${v.toFixed(1)} · ${titleOf(k)}: to'liq bajarilmadi`);
+    }
+  }
+
+  return out.join('\n');
+}
+
 // Ikkala skript ham bitta matnda beriladi; AI avval turini aniqlaydi.
 export function buildScriptRules(): string {
   const stageBlock = (stages: ScriptStage[]): string[] => {
