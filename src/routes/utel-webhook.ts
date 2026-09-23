@@ -246,7 +246,7 @@ async function reanalyzeTranscriptOnly(row: {
 // status done EMAS (processing/failed), 1 daqiqadan eski (yangi kelayotgani
 // bilan poyga qilmaslik uchun). Bir vaqtda cheklangan (parallel) ishlaymiz.
 // Bir siklda nechta qo'ng'iroq parallel ishlanadi.
-const BATCH = Math.max(1, Number(process.env.UTEL_BATCH || 4));
+const BATCH = Math.max(1, Number(process.env.UTEL_BATCH || 8));
 
 // NAVBAT FAQAT SHU VAQTDAN KEYINGI QO'NG'IROQLARNI OLADI.
 // Foydalanuvchi talabi (2026-09-23): eski to'plangan ~590 ta audio qayta
