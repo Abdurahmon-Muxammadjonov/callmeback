@@ -341,8 +341,8 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
       '  • bad_leads_count — SIFATSIZ lid. Faqat shu hollarda 1 qiling: (a) qo\'ng\'iroqni ko\'tarmadi/javob bermadi, (b) noto\'g\'ri yoki tasodifiy raqam, (c) mijoz umuman qiziqmadi va suhbatni darhol tugatdi, (d) spam/reklama qo\'ng\'irog\'i, (e) mijoz mos emas (masalan xizmat ko\'rsatilmaydigan joy yoki yosh). Oddiy "hozir vaqtim yo\'q, keyin gaplashamiz" — sifatsiz lid EMAS.',
       '  • bad_leads_count > 0 bo\'lsa, lost_reasons massiviga SABABINI qisqa yozing (masalan: "Qo\'ng\'iroqni ko\'tarmadi", "Noto\'g\'ri raqam", "Qiziqish bildirmadi", "Spam qo\'ng\'iroq", "Mos kelmaydigan mijoz"). Sababsiz qoldirmang.',
       '  • new_leads_count — birinchi marta gaplashilayotgan, xizmatga qiziqish bildirgan yangi mijoz bo\'lsa 1.',
-      '  • sent_to_dealer_count — mijoz O\'QUV MARKAZIGA (ofisga) kelishga taklif/da\'vat qilingan bo\'lsa 1 qiling. Masalan: "kelib ko\'ring", "manzilimizga tashrif buyuring", "sinov darsiga keling", "ertaga kutamiz" kabi taklif bo\'lsa. (Bu maydon nomi eski — avtosalon bilan aloqasi yo\'q.)',
-      '  • closed_deals_count — mijoz ro\'yxatdan o\'tgan, to\'lov qilgan yoki kursga yozilishga aniq rozi bo\'lgan bo\'lsa 1.',
+      '  • sent_to_dealer_count — mijoz PROBNIY (bepul sinov) darsga yoki markazga kelishga taklif qilingan VA mijoz rozilik bildirgan bo\'lsa 1 qiling ("shanba kelaman", "joyimni band qiling"). Faqat taklif aytilib, mijoz rozi bo\'lmagan bo\'lsa — 0. (Maydon nomi eski — avtosalon bilan aloqasi yo\'q.)',
+      '  • closed_deals_count — mijoz joyni band qilgan, oldindan to\'lov qilgan yoki tarifni tanlab kursga yozilishga aniq rozi bo\'lgan bo\'lsa 1.',
     ].join('\n'),
     extraRules,
   ]
