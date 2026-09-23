@@ -8,7 +8,7 @@ const VALID_STATUS = ['active', 'inactive', 'on_leave', 'flagged'];
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Qo'ng'iroqlar endi XODIM YARATMASDAN yoziladi (foydalanuvchi talabi
-// 2026-09-23) — PBX'dan kelgan operator ichki raqami calls.pbx_id'da
+// 2026-09-23) — PBX'dan kelgan operator ichki raqami calls.operator_ext'da
 // saqlanadi, manager_id esa bo'sh qolishi mumkin. Kompaniya o'sha ichki
 // raqamli xodimni qo'shganda (yoki xodimga pbx_id bergan/o'zgartirganda),
 // o'sha raqamga tegishli, hali hech kimga biriktirilmagan qo'ng'iroqlar
@@ -20,11 +20,14 @@ async function linkCallsToManager(companyId: string, managerId: string, pbxId: u
     .from('calls')
     .update({ manager_id: managerId })
     .eq('company_id', companyId)
-    .eq('pbx_id', ext)
+    .eq('operator_ext', ext)
     .is('manager_id', null)
     .select('id');
   if (error) {
-    console.warn(`Xodimga qo'ng'iroqlarni bog'lashda xato (pbx_id=${ext}):`, error.message);
+    // Ustun hali qo'shilmagan bo'lsa — jim o'tamiz (xodim baribir yaratiladi).
+    if (!/operator_ext/i.test(error.message || '')) {
+      console.warn(`Xodimga qo'ng'iroqlarni bog'lashda xato (ichki ${ext}):`, error.message);
+    }
     return 0;
   }
   const n = (data || []).length;

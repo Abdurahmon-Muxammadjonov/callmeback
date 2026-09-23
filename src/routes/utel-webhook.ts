@@ -119,23 +119,33 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
 
   // Qo'ng'iroq qatorini DARHOL yozamiz (status=processing) — audio dashboard'da
   // ko'rinadi/eshitiladi; matn+tahlil sales-ai-front'dan kelgach yangilanadi.
-  const { data: call, error: insErr } = await supabase
-    .from('calls')
-    .insert({
-      company_id: companyId,
-      manager_id: managerId,
-      audio_url: audioUrl,
-      audio_source_url: audioUrl,
-      crm_id: callId,
-      pbx_call_id: callId,
-      pbx_id: src || null, // operator ichki raqami (xodim qo'shilganda bog'lanadi)
-      direction,
-      client_phone: ch?.external_number != null ? String(ch.external_number) : null,
-      duration: typeof ch?.duration === 'number' ? ch.duration : null,
-      status: 'processing',
-    })
-    .select('id')
-    .single();
+  //
+  // DIQQAT: operator ichki raqami calls.pbx_id'ga YOZILMAYDI — o'sha ustunda
+  // UNIQUE cheklov bor (uq_calls_pbx_id, ya'ni u PBX qo'ng'iroq ID'si uchun).
+  // U yerga ichki raqam yozilsa, bitta operatorning IKKINCHI qo'ng'irog'i
+  // "duplicate key" bilan saqlanmay qolardi. Ichki raqam alohida
+  // operator_ext ustunida (supabase/add_operator_ext.sql).
+  const baseRow: Record<string, unknown> = {
+    company_id: companyId,
+    manager_id: managerId,
+    audio_url: audioUrl,
+    audio_source_url: audioUrl,
+    crm_id: callId,
+    pbx_call_id: callId,
+    direction,
+    client_phone: ch?.external_number != null ? String(ch.external_number) : null,
+    duration: typeof ch?.duration === 'number' ? ch.duration : null,
+    status: 'processing',
+  };
+
+  let insert = await supabase.from('calls').insert({ ...baseRow, operator_ext: src || null }).select('id').single();
+  if (insert.error && /operator_ext/i.test(insert.error.message || '')) {
+    // SQL hali ishga tushirilmagan (ustun yo'q) — qo'ng'iroq baribir
+    // saqlansin, faqat ichki raqamsiz.
+    console.warn('calls.operator_ext ustuni yo\'q — supabase/add_operator_ext.sql ishga tushirilsin.');
+    insert = await supabase.from('calls').insert(baseRow).select('id').single();
+  }
+  const { data: call, error: insErr } = insert;
   if (insErr || !call) {
     console.error(`UTel call_saved: calls insert xatosi (call_id=${callId}):`, insErr?.message);
     return;
