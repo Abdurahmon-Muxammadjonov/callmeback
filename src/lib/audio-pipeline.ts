@@ -313,10 +313,38 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
   const systemPrompt = [
     'Siz tajribali call-center QA analitikisiz. Berilgan qo\'ng\'iroq transkriptini chuqur va diqqat bilan tahlil qiling.',
     'Barcha matn maydonlarini (client_mood, operator_evaluation, summary, client_info, final_agreement, next_steps, lost_reasons) o\'zbek tilida yozing.',
-    'kpi_score — menejerning shu qo\'ng\'iroqdagi umumiy ish sifatini 0-100 oralig\'ida real baholang (faqat 0 yoki 100 emas, transkript mazmuniga qarab farqlansin).',
+    // KPI SHAFFOF BO'LSIN (foydalanuvchi savoli 2026-09-23: "nimaga qarab
+    // KPI beryapti?"). Avval faqat "umumiy sifatni 0-100 baholang" deyilardi —
+    // ball qaysi asosda chiqqani na modelga, na foydalanuvchiga ayon edi.
+    // Endi aniq bandlar va ularning ulushi beriladi, va ball SABABI
+    // operator_evaluation'da (dashboard'dagi "ROP izohi") yoziladi.
+    [
+      'kpi_score — menejerning shu qo\'ng\'iroqdagi ishini 0-100 oralig\'ida baholang. Quyidagi 6 band bo\'yicha baholang va ularni qo\'shib umumiy ball chiqaring:',
+      '  1) Salomlashish va o\'zini/kompaniyani tanishtirish — 10 ball',
+      '  2) Mijoz ehtiyojini aniqlash (ochiq savollar berish, tinglash) — 25 ball',
+      '  3) Mahsulot/xizmat va narxni aniq taqdim etish — 20 ball',
+      '  4) E\'tiroz va savollar bilan ishlash (shubhaga javob berish) — 20 ball',
+      '  5) Keyingi qadamni aniq belgilash (uchrashuv, qayta aloqa, kelishuv) — 15 ball',
+      '  6) Muloqot madaniyati: ohang, xushmuomalalik, aniq nutq — 10 ball',
+      'Band bajarilmagan bo\'lsa — o\'sha ballni bermang. Qo\'ng\'iroq juda qisqa yoki mijoz darhol rad etgan bo\'lsa, bu menejerning aybi bo\'lmasligi mumkin — shuni hisobga oling.',
+    ].join('\n'),
+    'operator_evaluation — KPI balli NEGA aynan shunday chiqqanini QISQA (2-3 gap) va ANIQ yozing: qaysi bandlar bajarildi, qaysilari bajarilmadi. Umumiy gap ("yaxshi ishladi") emas, aniq dalil bilan yozing. Masalan: "Ball 65. Salomlashdi va ehtiyojni aniqladi, narxni aytdi. Lekin e\'tirozga javob bermadi va keyingi qadam belgilanmadi."',
     'criteria_scores massivini FAQAT quyida "QO\'SHIMCHA DINAMIK QOIDALAR" berilgan bo\'lsa to\'ldiring — har bir faol qoida uchun alohida ball bering. Qoidalar berilmagan bo\'lsa, criteria_scores bo\'sh massiv ([]) bo\'lsin.',
     'Agar bitim yopilmagan bo\'lsa, lost_reasons massivida sababini yozing; yopilgan bo\'lsa — bo\'sh massiv.',
     'total_calls, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count — transkriptni diqqat bilan o\'qib, ULARNI HAQIQIY sanoqqa asoslab to\'ldiring (taxmin qilib to\'ldirmang). Odatda bitta audio = bitta qo\'ng\'iroq (total_calls=1), lekin transkriptda bir nechta alohida suhbat/qo\'ng\'iroq ketma-ket ketgan bo\'lsa, shularning barchasini sanang. incoming_count + outgoing_count yig\'indisi total_calls\'ga teng bo\'lishi kerak.',
+
+    // Hisoblash qoidalari ANIQ bo'lsin (foydalanuvchi talabi 2026-09-23).
+    // Avval bu ko'rsatkichlar ta'rifsiz edi va model ularni o'zicha
+    // talqin qilardi. Bu — O'QUV MARKAZI (avtosalon emas).
+    [
+      'Quyidagi ko\'rsatkichlarni SHU ta\'riflar bo\'yicha aniq hisoblang:',
+      '  • unanswered_count — qo\'ng\'iroq ko\'tarilmagan yoki suhbat boshlanmagan (javob yo\'q, darhol uzilgan, avtojavob). Suhbat bo\'lmasa bu 1.',
+      '  • bad_leads_count — SIFATSIZ lid. Faqat shu hollarda 1 qiling: (a) qo\'ng\'iroqni ko\'tarmadi/javob bermadi, (b) noto\'g\'ri yoki tasodifiy raqam, (c) mijoz umuman qiziqmadi va suhbatni darhol tugatdi, (d) spam/reklama qo\'ng\'irog\'i, (e) mijoz mos emas (masalan xizmat ko\'rsatilmaydigan joy yoki yosh). Oddiy "hozir vaqtim yo\'q, keyin gaplashamiz" — sifatsiz lid EMAS.',
+      '  • bad_leads_count > 0 bo\'lsa, lost_reasons massiviga SABABINI qisqa yozing (masalan: "Qo\'ng\'iroqni ko\'tarmadi", "Noto\'g\'ri raqam", "Qiziqish bildirmadi", "Spam qo\'ng\'iroq", "Mos kelmaydigan mijoz"). Sababsiz qoldirmang.',
+      '  • new_leads_count — birinchi marta gaplashilayotgan, xizmatga qiziqish bildirgan yangi mijoz bo\'lsa 1.',
+      '  • sent_to_dealer_count — mijoz O\'QUV MARKAZIGA (ofisga) kelishga taklif/da\'vat qilingan bo\'lsa 1 qiling. Masalan: "kelib ko\'ring", "manzilimizga tashrif buyuring", "sinov darsiga keling", "ertaga kutamiz" kabi taklif bo\'lsa. (Bu maydon nomi eski — avtosalon bilan aloqasi yo\'q.)',
+      '  • closed_deals_count — mijoz ro\'yxatdan o\'tgan, to\'lov qilgan yoki kursga yozilishga aniq rozi bo\'lgan bo\'lsa 1.',
+    ].join('\n'),
     extraRules,
   ]
     .filter(Boolean)
