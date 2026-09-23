@@ -243,8 +243,9 @@ router.get('/pop', requireAuth, async (req: CompanyAuthedRequest, res: Response)
 // talabi 2026-09-23: "1 kunda necha minut umumiy gaplashganini hamma
 // audionikini yozsin, 3 soniyami 40 soniyami farqi yo'q").
 //
-// Shu sabab BU YERDA hech qanday filtr yo'q: qo'ng'iroq tahlil qilinganmi,
-// matni bormi, qisqami — hammasining davomiyligi qo'shiladi.
+// Qo'ng'iroq tahlil qilinganmi, matni bormi, qisqami — farqi yo'q,
+// hammasining davomiyligi qo'shiladi. LEKIN egasi aniqlanmagan
+// (operatorsiz) qo'ng'iroqlar hisobga olinmaydi.
 //
 // Kun chegarasi TOSHKENT vaqti bo'yicha (ish kuni 09:00-23:00 shu
 // mintaqada) — UTC bo'yicha bo'lsa, kechki qo'ng'iroqlar ertangi kunga
@@ -267,6 +268,10 @@ router.get('/daily-minutes', requireAuth, async (req: CompanyAuthedRequest, res:
           .select('created_at, duration, manager_id, operator_ext')
           .eq('company_id', companyId)
           .gte('created_at', since)
+          // FAQAT OPERATOR QO'NG'IROQLARI (foydalanuvchi talabi 2026-09-23):
+          // egasi aniqlanmagan ("noma'lum") audiolar hisobga OLINMAYDI —
+          // hisobotda faqat kim gaplashgani aniq bo'lgan qo'ng'iroqlar turadi.
+          .or('operator_ext.not.is.null,manager_id.not.is.null')
           .range(from, to)),
       supabase.from('managers').select('id, name, pbx_id').eq('company_id', companyId),
     ]);
