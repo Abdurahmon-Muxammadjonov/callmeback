@@ -3,7 +3,7 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { supabase } from '../lib/supabase';
-import { getOrCreateManagerByPbxId } from './analyze-call';
+import { getOrCreateManagerByPbxId, processTranscriptToCall } from './analyze-call';
 import { submitAudioForAnalysis, waitForAnalysis, isSalesAiConfigured } from '../lib/salesAiClient';
 
 // ============================================================================
@@ -127,25 +127,24 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
     const jobId = await submitAudioForAnalysis(audioUrl, clientName);
     const res = await waitForAnalysis(jobId);
 
-    const update: Record<string, unknown> = {
-      transcript: res.fullText || null,
-      transcript_segments: Array.isArray(res.dialog) ? res.dialog : [],
-      status: res.status === 'done' ? 'done' : 'failed',
-      error: res.status === 'done' ? null : `sales-ai status: ${res.status}`,
-    };
-    // analysis strukturasi haqiqiy (gaplashilgan) qo'ng'iroqda aniqlanadi —
-    // shu sabab moslashuvchan map: bor bo'lgan maydonlarni olamiz, xomini
-    // client_info'ga saqlaymiz (yo'qolmasin, keyin aniq map qilamiz).
-    const a = res.analysis;
-    if (a && typeof a === 'object') {
-      const score = (a as any).score ?? (a as any).kpi_score ?? (a as any).kpi;
-      if (typeof score === 'number') update.kpi_score = score;
-      const summary = (a as any).summary ?? (a as any).comment ?? (a as any).rop_comment;
-      if (typeof summary === 'string' && summary) update.rop_comment = summary;
-      update.client_info = a;
+    if (res.status !== 'done' || !res.fullText) {
+      // Matn chiqmadi (masalan javobsiz qo'ng'iroq) — transkript/dialogni
+      // saqlaymiz, tahlilsiz done qilamiz (Gemini uchun matn yo'q).
+      await supabase.from('calls').update({
+        transcript: res.fullText || null,
+        transcript_segments: Array.isArray(res.dialog) ? res.dialog : [],
+        status: 'done',
+        error: null,
+      }).eq('id', call.id);
+      console.log(`UTel call_saved -> sales-ai: matn bo'sh (call_id=${callId}, status=${res.status})`);
+    } else {
+      // Matn bor — sales-ai transkriptini (va dialog segmentlarini) Gemini
+      // bilan tahlil qilib, calls qatorini to'liq to'ldiramiz (KPI, izoh,
+      // sentiment, mezonlar...). Foydalanuvchi arxitekturasi: matn sales-ai,
+      // tahlil Gemini.
+      await processTranscriptToCall(supabase, call.id, res.fullText, res.dialog, companyId);
+      console.log(`UTel call_saved -> sales-ai+Gemini done (call_id=${callId}, so'z: ${res.wordsCount})`);
     }
-    await supabase.from('calls').update(update).eq('id', call.id);
-    console.log(`UTel call_saved -> sales-ai: ${res.status} (call_id=${callId}, so'z: ${res.wordsCount})`);
   } catch (e: any) {
     console.error(`UTel call_saved sales-ai xatosi (call_id=${callId}):`, e?.message || e);
     await supabase.from('calls').update({ status: 'failed', error: String(e?.message || e).slice(0, 500) }).eq('id', call.id).then(undefined, () => {});

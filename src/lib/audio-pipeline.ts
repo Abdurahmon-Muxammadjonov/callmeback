@@ -299,7 +299,7 @@ function extractGeminiRetryDelayMs(error: unknown, fallbackMs: number): number {
 }
 
 // Gemini — Aisha bergan transkriptni qo'ng'iroq tahlil skripti (mezonlari) bo'yicha baholaydi.
-async function analyzeTranscript(transcript: string, extraRules = ''): Promise<CallAnalysis> {
+export async function analyzeTranscript(transcript: string, extraRules = ''): Promise<CallAnalysis> {
   if (!process.env.GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY yo\'q.');
   }

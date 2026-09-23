@@ -4,7 +4,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { unlink, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { processLocalAudio, processLongAudio } from '../lib/audio-pipeline';
+import { processLocalAudio, processLongAudio, analyzeTranscript } from '../lib/audio-pipeline';
 import { fetchAllRows } from '../lib/supabase';
 import { isSectionUnlocked } from '../lib/companySections';
 import { getCompanySettings } from '../lib/companySettings';
@@ -762,6 +762,41 @@ export async function backfillPendingUnlockCalls(supabase: SupabaseClient, compa
 
 // Batch payload'ni validatsiya qilib, qatorlarni 'processing' bilan yaratadi va
 // 202 javob uchun ma'lumot qaytaradi. Tahlil fon rejimida davom etadi.
+// UTel oqimi uchun (2026-09-23): audio->matn TASHQI xizmatда (sales-ai-front,
+// Whisper) bajariladi; bu funksiya TAYYOR transkriptni Gemini bilan tahlil
+// qilib (Aisha STT'siz), calls qatorini to'ldiradi — foydalanuvchi tanlagan
+// arxitektura ("ovoz->matn sales-ai, matn tahlili Gemini"). Mantiq
+// processOneBatchCall bilan bir xil, faqat auditCall(audio) o'rniga
+// analyzeTranscript(matn).
+export async function processTranscriptToCall(
+  supabase: SupabaseClient,
+  callId: string,
+  transcript: string,
+  dialogSegments: unknown[],
+  companyId: string | null,
+): Promise<void> {
+  const activeCriteria = await fetchActiveCriteria(supabase, companyId);
+  const extraRules = buildDynamicRules(activeCriteria);
+  const analysis = await analyzeTranscript(transcript, extraRules);
+  // cast: audio-pipeline'ning CallAnalysis'i va bu yerdagi AuditResult
+  // LostReason tipi bir oz farq qiladi (count maydoni) — normalizeAuditResult
+  // baribir barcha maydonlarni normalize/default qiladi, shu sabab xavfsiz.
+  const audit = normalizeAuditResult({
+    ...analysis,
+    transcript,
+    transcript_segments: Array.isArray(dialogSegments) ? (dialogSegments as any) : [],
+  } as any);
+  const fin = computeCriteriaFinancials(audit.criteria_scores, activeCriteria);
+  audit.penalty_amount = fin.penalty_amount;
+  audit.bonus_amount = fin.bonus_amount;
+  const { error } = await supabase
+    .from('calls')
+    .update({ ...callRowFields(audit), status: 'done', error: null })
+    .eq('id', callId);
+  if (error) throw new Error(error.message);
+  await Promise.allSettled(childWritePromises(supabase, callId, audit));
+}
+
 export async function enqueueBatchCalls(items: BatchCallItem[], supabase: SupabaseClient): Promise<{ status: number; body: any }> {
   if (!Array.isArray(items) || items.length === 0) {
     return { status: 400, body: { success: false, error: 'calls bo\'sh massiv bo\'lmasligi kerak.' } };
