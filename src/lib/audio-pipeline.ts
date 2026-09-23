@@ -8,6 +8,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { pbxAuthHeaders } from './audioAccess';
 import { withGeminiSlot } from './geminiLimiter';
+import { analyzeWithOpenAi, isOpenAiAnalyzerConfigured } from './openaiAnalyzer';
 
 export interface CriteriaScore {
   title: string;
@@ -301,11 +302,13 @@ function extractGeminiRetryDelayMs(error: unknown, fallbackMs: number): number {
 
 // Gemini — Aisha bergan transkriptni qo'ng'iroq tahlil skripti (mezonlari) bo'yicha baholaydi.
 export async function analyzeTranscript(transcript: string, extraRules = ''): Promise<CallAnalysis> {
-  if (!process.env.GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY yo\'q.');
+  // Tahlil modeli: OPENAI_API_KEY berilgan bo'lsa GPT-4o-mini (Gemini free
+  // tier daqiqalik limitiga urilib navbatni to'xtatib qo'ygani uchun —
+  // 2026-09-23), aks holda eski Gemini yo'li.
+  const useOpenAi = isOpenAiAnalyzerConfigured();
+  if (!useOpenAi && !process.env.GEMINI_API_KEY) {
+    throw new Error('Tahlil kaliti yo\'q: OPENAI_API_KEY yoki GEMINI_API_KEY kerak.');
   }
-
-  const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
   const systemPrompt = [
     'Siz tajribali call-center QA analitikisiz. Berilgan qo\'ng\'iroq transkriptini chuqur va diqqat bilan tahlil qiling.',
@@ -318,6 +321,13 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
   ]
     .filter(Boolean)
     .join('\n\n');
+
+  if (useOpenAi) {
+    const raw = await analyzeWithOpenAi(systemPrompt, transcript);
+    return normalizeAnalysisJson(raw, 'OpenAI');
+  }
+
+  const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
   // maxAttempts 4 -> 6: 429 (daqiqalik limit) bo'lsa kutib qayta urinamiz,
   // "failed" qilmaymiz. Har bir so'rov withGeminiSlot darvozasidan o'tadi —
@@ -354,12 +364,25 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
   if (!text) {
     throw new Error('Gemini javobi bo\'sh qaytdi.');
   }
+  return normalizeAnalysisJson(text, 'Gemini');
+}
 
-  const parsed = JSON.parse(text) as Partial<CallAnalysis>;
-  const sentiment = parsed.sentiment;
-  if (sentiment !== 'positive' && sentiment !== 'negative' && sentiment !== 'neutral') {
-    throw new Error('Gemini JSON sentiment maydoni noto\'g\'ri.');
+// Model qaytargan JSON'ni tekshiradi va CallAnalysis'ga keltiradi.
+// Gemini ham, OpenAI ham shu yerdan o'tadi — maydon nomlari/chegaralari
+// bir xil bo'lsin (dashboard ikkala holatda ham bir xil ishlaydi).
+function normalizeAnalysisJson(text: string, source: string): CallAnalysis {
+  let parsed: Partial<CallAnalysis>;
+  try {
+    parsed = JSON.parse(text) as Partial<CallAnalysis>;
+  } catch {
+    throw new Error(`${source} JSON javobini o'qib bo'lmadi.`);
   }
+
+  // sentiment noto'g'ri bo'lsa butun tahlilni tashlab yubormaymiz —
+  // qolgan maydonlar foydali; neytral deb olamiz.
+  const s = parsed.sentiment;
+  const sentiment: CallAnalysis['sentiment'] =
+    s === 'positive' || s === 'negative' || s === 'neutral' ? s : 'neutral';
 
   const clampScore = (v: unknown): number => Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
   const intMin0 = (v: unknown): number => Math.max(0, Math.round(Number(v) || 0));

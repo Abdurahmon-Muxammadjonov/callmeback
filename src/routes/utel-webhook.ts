@@ -235,7 +235,33 @@ async function reanalyzeTranscriptOnly(row: {
 // status done EMAS (processing/failed), 1 daqiqadan eski (yangi kelayotgani
 // bilan poyga qilmaslik uchun). Bir vaqtda cheklangan (parallel) ishlaymiz.
 // Bir siklda nechta qo'ng'iroq parallel ishlanadi.
-const BATCH = Math.max(1, Number(process.env.UTEL_BATCH || 6));
+const BATCH = Math.max(1, Number(process.env.UTEL_BATCH || 4));
+
+// Yiqilgan qo'ng'iroqni DARHOL qayta urinmaymiz. Aks holda navbat eng eski
+// bir nechta qatorga yopishib qolardi: ular yiqilardi, keyingi siklda yana
+// o'shalar tanlanardi (tartib created_at bo'yicha) va YANGI audiolarga
+// navbat umuman kelmasdi — production'da aynan shunday bo'ldi (55 ta matn
+// qayta-qayta urinilib, Gemini kvotasini yeb turdi). Endi har urinishdan
+// keyin qator vaqtincha chetga qo'yiladi (5 daqiqa, har safar ikki barobar,
+// ko'pi bilan 1 soat).
+const retryAfter = new Map<string, { at: number; delayMs: number }>();
+const BASE_BACKOFF_MS = 5 * 60_000;
+const MAX_BACKOFF_MS = 60 * 60_000;
+
+function isCoolingDown(id: string): boolean {
+  const r = retryAfter.get(id);
+  return !!r && Date.now() < r.at;
+}
+
+function markAttempted(id: string): void {
+  const prev = retryAfter.get(id);
+  const delayMs = prev ? Math.min(prev.delayMs * 2, MAX_BACKOFF_MS) : BASE_BACKOFF_MS;
+  retryAfter.set(id, { at: Date.now() + delayMs, delayMs });
+}
+
+function markSucceeded(id: string): void {
+  retryAfter.delete(id);
+}
 
 // Navbatdan bitta to'plam olib ishlaydi. Qaytaradi: nechta ishlandi (0 =
 // navbat bo'sh). AVVAL matni bor qo'ng'iroqlar (ular tayyorga yaqin — faqat
@@ -255,15 +281,18 @@ async function runQueueOnce(): Promise<number> {
     .ilike('audio_url', '%utel%')
     .lt('created_at', cutoff)
     .order('created_at', { ascending: true })
-    .limit(BATCH);
-  const needAnalysis = (pending || []).filter((r) => typeof r.transcript === 'string' && r.transcript.trim() !== '');
+    .limit(BATCH * 5);
+  const needAnalysis = (pending || [])
+    .filter((r) => typeof r.transcript === 'string' && r.transcript.trim() !== '')
+    .filter((r) => !isCoolingDown(r.id))
+    .slice(0, BATCH);
   if (needAnalysis.length > 0) {
     console.log(`UTel navbat: ${needAnalysis.length} ta matn tahlilga (audiosiz).`);
     await Promise.allSettled(needAnalysis.map(async (r) => {
+      markAttempted(r.id);
       await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
       await reanalyzeTranscriptOnly(r as any);
     }));
-    return needAnalysis.length;
   }
 
   // 2) Matnsizlar — to'liq quvur (audio -> matn -> tahlil).
@@ -277,20 +306,22 @@ async function runQueueOnce(): Promise<number> {
     .neq('status', 'done')
     .lt('created_at', cutoff)
     .order('created_at', { ascending: true })
-    .limit(BATCH * 3);
-  if (error) { console.warn('UTel navbat so\'rovi xatosi:', error.message); return 0; }
+    .limit(BATCH * 5);
+  if (error) { console.warn('UTel navbat so\'rovi xatosi:', error.message); return needAnalysis.length; }
   const rows = (data || [])
     .filter((r) => typeof r.audio_url === 'string' && r.audio_url.includes('utel'))
     .filter((r) => !String(r.error || '').includes('AUDIO_TOO_LARGE'))
+    .filter((r) => !isCoolingDown(r.id))
     .slice(0, BATCH);
-  if (rows.length === 0) return 0;
+  if (rows.length === 0) return needAnalysis.length;
 
   console.log(`UTel navbat: ${rows.length} ta audio tahlilga.`);
   await Promise.allSettled(rows.map(async (r) => {
+    markAttempted(r.id);
     await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
     await analyzeUtelCall(r.id, r.audio_url as string, r.company_id ?? null, r.client_phone ?? undefined);
   }));
-  return rows.length;
+  return needAnalysis.length + rows.length;
 }
 
 // TO'XTOVSIZ ISHCHI (foydalanuvchi talabi 2026-09-23: "hammasini ketma-ket
