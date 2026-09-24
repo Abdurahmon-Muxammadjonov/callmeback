@@ -494,12 +494,13 @@ router.get('/daily-summary', requireAuth, async (req: CompanyAuthedRequest, res:
       calls: number; seconds: number; analyzed: number; scored: number; scoreSum: number;
       incoming: number; outgoing: number; invited: number; closed: number;
       badLeads: number; unanswered: number; leadPhones: Set<string>; leads: number;
+      lowScore: number; // ball < 5 (10 ballikda) — "diqqat talab qiladi"
     }
     const byDay = new Map<string, DayAgg>();
     const blank = (): DayAgg => ({
       calls: 0, seconds: 0, analyzed: 0, scored: 0, scoreSum: 0,
       incoming: 0, outgoing: 0, invited: 0, closed: 0,
-      badLeads: 0, unanswered: 0, leadPhones: new Set(), leads: 0,
+      badLeads: 0, unanswered: 0, leadPhones: new Set(), leads: 0, lowScore: 0,
     });
 
     for (const r of rows) {
@@ -508,7 +509,11 @@ router.get('/daily-summary', requireAuth, async (req: CompanyAuthedRequest, res:
       a.calls += 1;
       a.seconds += Math.max(0, Number(r.duration) || 0);
       if (r.transcript) a.analyzed += 1;
-      if (Number(r.kpi_score) > 0) { a.scored += 1; a.scoreSum += Number(r.kpi_score); }
+      if (Number(r.kpi_score) > 0) {
+        a.scored += 1;
+        a.scoreSum += Number(r.kpi_score);
+        if (Number(r.kpi_score) < 50) a.lowScore += 1; // 10 ballikda 5 dan past
+      }
       // Yo'nalish — PBX bergan haqiqiy qiymat.
       if (r.direction === 'incoming') a.incoming += 1;
       else if (r.direction === 'outgoing') a.outgoing += 1;
@@ -531,6 +536,7 @@ router.get('/daily-summary', requireAuth, async (req: CompanyAuthedRequest, res:
       analyzed: a.analyzed,
       scored: a.scored,
       avg_score: a.scored ? Math.round(a.scoreSum / a.scored) : 0, // 0-100
+      low_score: a.lowScore,
       incoming: a.incoming,
       outgoing: a.outgoing,
       leads: a.leadPhones.size + a.leads,
