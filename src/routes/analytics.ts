@@ -546,4 +546,80 @@ router.get('/daily-summary', requireAuth, async (req: CompanyAuthedRequest, res:
   }
 });
 
+// ============================================================================
+// GET /analytics/analysis-status?date=YYYY-MM-DD
+// TAHLIL HOLATI — nechta qo'ng'iroq tahlil qilindi, nechtasi qilinmadi va
+// NEGA. Foydalanuvchi talabi 2026-09-25.
+//
+// Tahlil qilingan = ball qo'yilgan (haqiqiy sotuv suhbati baholangan).
+// Qilinmagan = qolgani; sababi dropped_reason'da ("Javobsiz", "Kunlik
+// limitdan oshdi", "Aloqa sifati yomon", "Sotuv suhbati emas" ...).
+// ============================================================================
+router.get('/analysis-status', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
+  try {
+    const companyId = req.auth!.companyId as string;
+    const date = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)
+      ? req.query.date
+      : dayKeyTashkent(new Date().toISOString());
+    const from = new Date(`${date}T00:00:00+05:00`).toISOString();
+    const to = new Date(`${date}T23:59:59.999+05:00`).toISOString();
+
+    const rows = await fetchAllRows<any>((f, t) =>
+      supabase.from('calls')
+        .select('id, created_at, duration, kpi_score, dropped_reason, operator_ext, transcript')
+        .eq('company_id', companyId).gte('created_at', from).lte('created_at', to).range(f, t));
+
+    const analyzed = rows.filter((r) => Number(r.kpi_score) > 0);
+    const notAnalyzed = rows.filter((r) => !(Number(r.kpi_score) > 0));
+
+    const reasons = new Map<string, { count: number; seconds: number }>();
+    for (const r of notAnalyzed) {
+      const key = String(r.dropped_reason || 'Sabab yozilmagan');
+      const cur = reasons.get(key) || { count: 0, seconds: 0 };
+      cur.count += 1;
+      cur.seconds += Math.max(0, Number(r.duration) || 0);
+      reasons.set(key, cur);
+    }
+
+    // Operatorlar kesimi — kim limitga yetgani ko'rinsin.
+    const byOp = new Map<string, { analyzed: number; skipped: number; analyzedSec: number; limitHit: boolean }>();
+    for (const r of rows) {
+      const ext = String(r.operator_ext || '—');
+      const a = byOp.get(ext) || { analyzed: 0, skipped: 0, analyzedSec: 0, limitHit: false };
+      if (Number(r.kpi_score) > 0) { a.analyzed += 1; a.analyzedSec += Math.max(0, Number(r.duration) || 0); }
+      else a.skipped += 1;
+      if (r.dropped_reason === 'Kunlik limitdan oshdi') a.limitHit = true;
+      byOp.set(ext, a);
+    }
+
+    const sec = (list: any[]) => list.reduce((s, r) => s + Math.max(0, Number(r.duration) || 0), 0);
+
+    return res.status(200).json({
+      success: true,
+      date,
+      data: {
+        total: rows.length,
+        analyzed: analyzed.length,
+        analyzed_minutes: Math.round((sec(analyzed) / 60) * 10) / 10,
+        not_analyzed: notAnalyzed.length,
+        not_analyzed_minutes: Math.round((sec(notAnalyzed) / 60) * 10) / 10,
+        reasons: [...reasons.entries()]
+          .sort((a, b) => b[1].count - a[1].count)
+          .map(([reason, v]) => ({ reason, count: v.count, minutes: Math.round((v.seconds / 60) * 10) / 10 })),
+        operators: [...byOp.entries()]
+          .sort((a, b) => b[1].analyzed - a[1].analyzed)
+          .map(([ext, v]) => ({
+            operator: ext === '—' ? 'Aniqlanmagan' : `Operator ${ext}`,
+            analyzed: v.analyzed,
+            skipped: v.skipped,
+            analyzed_minutes: Math.round((v.analyzedSec / 60) * 10) / 10,
+            limit_reached: v.limitHit,
+          })),
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Tahlil holatini hisoblashda xatolik.' });
+  }
+});
+
 export default router;

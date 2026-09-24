@@ -65,6 +65,28 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
     if (managerId) query = query.eq('manager_id', managerId);
     if (platformId) query = query.eq('platform_id', platformId);
 
+    // TAHLIL HOLATI bo'yicha filtr (2026-09-25): "Tahlil holati" bo'limida
+    // tahlil qilinganlar / qilinmaganlar audiolarini alohida ko'rish uchun.
+    //   ?analyzed=true  — ball qo'yilganlar
+    //   ?analyzed=false — qolganlari
+    //   ?reason=...     — qilinmaganlarni sababi bo'yicha
+    //   ?date=YYYY-MM-DD — Toshkent kuni bo'yicha
+    const analyzed = typeof req.query.analyzed === 'string' ? req.query.analyzed : undefined;
+    if (analyzed === 'true') query = query.gt('kpi_score', 0);
+    else if (analyzed === 'false') query = query.or('kpi_score.is.null,kpi_score.eq.0');
+
+    const reason = typeof req.query.reason === 'string' && req.query.reason ? req.query.reason : undefined;
+    if (reason) {
+      query = reason === 'Sabab yozilmagan' ? query.is('dropped_reason', null) : query.eq('dropped_reason', reason);
+    }
+
+    const date = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date) ? req.query.date : undefined;
+    if (date) {
+      query = query
+        .gte('created_at', new Date(`${date}T00:00:00+05:00`).toISOString())
+        .lte('created_at', new Date(`${date}T23:59:59.999+05:00`).toISOString());
+    }
+
     const { data, error } = await query;
     if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
     // Xodimga biriktirilmagan qo'ng'iroqda manager_id sifatida "virtual
