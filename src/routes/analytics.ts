@@ -462,4 +462,88 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
   }
 });
 
+// ============================================================================
+// GET /analytics/daily-summary?days=30
+// KUNLIK YAKUNIY KO'RSATKICHLAR — dashboardning asosiy raqamlari shu yerdan.
+//
+// NEGA (2026-09-24): frontend analitikani /api/calls ro'yxatidan hisoblardi,
+// u esa ko'pi bilan 200 qator qaytaradi. Kuniga 1300 qo'ng'iroq kelganda
+// oyna ichida faqat OXIRGI 200 tasi qolar va yangi qo'ng'iroq kelgani sari
+// eski qatorlar tushib ketib, ko'rsatkichlar KAMAYIB borardi ("ertalab 5
+// edi, hozir 2"). Endi hisob serverda, BARCHA qatorlar bo'yicha.
+//
+// Kiruvchi/chiquvchi AI taxminidan emas, PBX bergan haqiqiy "direction"
+// maydonidan olinadi (AI transkriptdan taxmin qilar va chiquvchilarni
+// kiruvchi deb ko'rsatardi).
+//
+// Lidlar mijoz raqami bo'yicha TAKRORLANMAYDI: bitta mijoz kuni bo'yi
+// besh marta gaplashsa ham — bitta lid.
+// ============================================================================
+router.get('/daily-summary', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
+  try {
+    const companyId = req.auth!.companyId as string;
+    const days = Math.min(120, Math.max(1, parseInt(String(req.query.days || '30'), 10) || 30));
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    const rows = await fetchAllRows<any>((from, to) =>
+      supabase.from('calls')
+        .select('created_at, duration, direction, kpi_score, transcript, client_phone, operator_ext, manager_id, new_leads_count, sent_to_dealer_count, closed_deals_count, bad_leads_count, unanswered_count')
+        .eq('company_id', companyId).gte('created_at', since).range(from, to));
+
+    interface DayAgg {
+      calls: number; seconds: number; analyzed: number; scored: number; scoreSum: number;
+      incoming: number; outgoing: number; invited: number; closed: number;
+      badLeads: number; unanswered: number; leadPhones: Set<string>; leads: number;
+    }
+    const byDay = new Map<string, DayAgg>();
+    const blank = (): DayAgg => ({
+      calls: 0, seconds: 0, analyzed: 0, scored: 0, scoreSum: 0,
+      incoming: 0, outgoing: 0, invited: 0, closed: 0,
+      badLeads: 0, unanswered: 0, leadPhones: new Set(), leads: 0,
+    });
+
+    for (const r of rows) {
+      const d = dayKeyTashkent(r.created_at);
+      const a = byDay.get(d) || blank();
+      a.calls += 1;
+      a.seconds += Math.max(0, Number(r.duration) || 0);
+      if (r.transcript) a.analyzed += 1;
+      if (Number(r.kpi_score) > 0) { a.scored += 1; a.scoreSum += Number(r.kpi_score); }
+      // Yo'nalish — PBX bergan haqiqiy qiymat.
+      if (r.direction === 'incoming') a.incoming += 1;
+      else if (r.direction === 'outgoing') a.outgoing += 1;
+      a.invited += Number(r.sent_to_dealer_count) || 0;
+      a.closed += Number(r.closed_deals_count) || 0;
+      a.badLeads += Number(r.bad_leads_count) || 0;
+      a.unanswered += Number(r.unanswered_count) || 0;
+      // Lid — mijoz bo'yicha takrorlanmaydi (raqam bo'lmasa qo'ng'iroq bo'yicha).
+      if (Number(r.new_leads_count) > 0) {
+        const phone = String(r.client_phone || '').trim();
+        if (phone) a.leadPhones.add(phone); else a.leads += 1;
+      }
+      byDay.set(d, a);
+    }
+
+    const data = [...byDay.entries()].sort((x, y) => y[0].localeCompare(x[0])).map(([date, a]) => ({
+      date,
+      calls: a.calls,
+      minutes: Math.round((a.seconds / 60) * 10) / 10,
+      analyzed: a.analyzed,
+      scored: a.scored,
+      avg_score: a.scored ? Math.round(a.scoreSum / a.scored) : 0, // 0-100
+      incoming: a.incoming,
+      outgoing: a.outgoing,
+      leads: a.leadPhones.size + a.leads,
+      invited: a.invited,
+      closed: a.closed,
+      bad_leads: a.badLeads,
+      unanswered: a.unanswered,
+    }));
+
+    return res.status(200).json({ success: true, data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Kunlik yakun hisoblashda xatolik.' });
+  }
+});
+
 export default router;
