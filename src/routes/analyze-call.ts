@@ -844,9 +844,22 @@ export async function processTranscriptToCall(
   const fin = computeCriteriaFinancials(audit.criteria_scores, activeCriteria);
   audit.penalty_amount = fin.penalty_amount;
   audit.bonus_amount = fin.bonus_amount;
+
+  // BALL 0 CHIQQAN SUHBAT — bu "yomon ishladi" degani emas: odatda ichki
+  // suhbat (xodimlar o'zaro), mijoz darhol uzgan yoki sotuvga aloqasi
+  // bo'lmagan gap. Uni oddiy "0.0" deb qoldirsak, xodim nohaq ayblangandek
+  // ko'rinadi. Shuning uchun aniq belgilab qo'yamiz (2026-09-25).
+  let extraFields: Record<string, unknown> = {};
+  if (audit.kpi_score === 0) {
+    audit.rop_comment = String(audit.rop_comment || '').replace(/^\((Yangi lid|Eski baza)\)\s*Ball\s*0[.,]0\/10\.?\s*/i, '(Baholanmadi) ');
+    if (!/^\(Baholanmadi\)/.test(audit.rop_comment)) {
+      audit.rop_comment = `(Baholanmadi) ${audit.rop_comment}`;
+    }
+    extraFields = { dropped_reason: 'Sotuv suhbati emas' };
+  }
   const { error } = await supabase
     .from('calls')
-    .update({ ...callRowFields(audit), status: 'done', error: null })
+    .update({ ...callRowFields(audit), ...extraFields, status: 'done', error: null })
     .eq('id', callId);
   if (error) throw new Error(error.message);
   await Promise.allSettled(childWritePromises(supabase, callId, audit));
