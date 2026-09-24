@@ -205,6 +205,8 @@ export async function analyzeUtelCall(
     console.warn('SALES_AI_API_KEY sozlanmagan — tahlil o\'tkazilmadi.');
     return;
   }
+  // Operatorning kunlik tahlil limiti to'lgan bo'lsa — to'xtaymiz.
+  if (!(await passesDailyLimit(rowId))) return;
   try {
     const jobId = await submitAudioForAnalysis(audioUrl, clientName);
     const res = await waitForAnalysis(jobId);
@@ -264,6 +266,7 @@ async function reanalyzeTranscriptOnly(row: {
   transcript_segments: unknown;
   company_id: string | null;
 }): Promise<void> {
+  if (!(await passesDailyLimit(row.id))) return;
   try {
     await processTranscriptToCall(
       supabase,
@@ -283,6 +286,78 @@ async function reanalyzeTranscriptOnly(row: {
 // Shartlar: UTel audiosi (api.utc381.utel.uz) bor, transkript hali yo'q,
 // status done EMAS (processing/failed), 1 daqiqadan eski (yangi kelayotgani
 // bilan poyga qilmaslik uchun). Bir vaqtda cheklangan (parallel) ishlaymiz.
+// ============================================================================
+// OPERATOR KUNLIK TAHLIL LIMITI (foydalanuvchi talabi 2026-09-25)
+//
+// Har bir operatorga kuniga CHEKLANGAN hajmda audio tahlil qilinadi
+// (standart 1 soat). Limit to'lgach, o'sha operatorning keyingi
+// qo'ng'iroqlari SAQLANADI (audio yo'qolmaydi, eshitib bo'ladi), lekin
+// matnga o'girilmaydi va baholanmaydi — "Kunlik limitdan oshdi" deb
+// belgilanadi va "Audio yozuvlar" bo'limida shunday ko'rinadi.
+//
+// Limitga FAQAT tahlil qilingan audio hisoblanadi: limit tufayli
+// o'tkazib yuborilganlar hisobni oshirmaydi.
+//
+// Sozlash: OPERATOR_DAILY_AUDIO_LIMIT_SEC (soniyada, 0 = limitsiz).
+// ============================================================================
+const OPERATOR_DAILY_LIMIT_SEC = Math.max(0, Number(process.env.OPERATOR_DAILY_AUDIO_LIMIT_SEC ?? 3600));
+export const LIMIT_REASON = 'Kunlik limitdan oshdi';
+
+function tashkentDayBounds(atIso: string): { from: string; to: string } {
+  const key = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tashkent', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(atIso));
+  return {
+    from: new Date(`${key}T00:00:00+05:00`).toISOString(),
+    to: new Date(`${key}T23:59:59.999+05:00`).toISOString(),
+  };
+}
+
+// Operatorning o'sha kuni TAHLIL QILINGAN audiosi (soniyada).
+async function analyzedSecondsToday(companyId: string, ext: string, atIso: string): Promise<number> {
+  const { from, to } = tashkentDayBounds(atIso);
+  const { data } = await supabase
+    .from('calls')
+    .select('duration, dropped_reason, transcript, kpi_score')
+    .eq('company_id', companyId)
+    .eq('operator_ext', ext)
+    .gte('created_at', from)
+    .lte('created_at', to)
+    .limit(2000);
+  return (data || [])
+    // Limit tufayli o'tkazib yuborilganlar hisobga kirmaydi.
+    .filter((r: any) => r.dropped_reason !== LIMIT_REASON)
+    // Faqat haqiqatan ishlov berilganlar (matn olingan yoki baholangan).
+    .filter((r: any) => r.transcript || Number(r.kpi_score) > 0 || r.dropped_reason)
+    .reduce((s: number, r: any) => s + Math.max(0, Number(r.duration) || 0), 0);
+}
+
+// Qo'ng'iroqni tahlil qilsa bo'ladimi? Bo'lmasa — belgilab, false qaytaradi.
+async function passesDailyLimit(rowId: string): Promise<boolean> {
+  if (!OPERATOR_DAILY_LIMIT_SEC) return true;
+  const { data: row } = await supabase
+    .from('calls')
+    .select('company_id, operator_ext, duration, created_at')
+    .eq('id', rowId)
+    .maybeSingle();
+  const ext = String(row?.operator_ext || '').trim();
+  if (!row?.company_id || !ext) return true; // operator noma'lum — limit qo'llanmaydi
+
+  const used = await analyzedSecondsToday(row.company_id, ext, row.created_at);
+  if (used < OPERATOR_DAILY_LIMIT_SEC) return true;
+
+  const limitMin = Math.round(OPERATOR_DAILY_LIMIT_SEC / 60);
+  await supabase.from('calls').update({
+    status: 'done',
+    error: null,
+    dropped_reason: LIMIT_REASON,
+    summary: `Operator ${ext} uchun kunlik tahlil limiti (${limitMin} daqiqa) to'lgan.`,
+    rop_comment: `(Baholanmadi) ${LIMIT_REASON}. Operator ${ext} bugun ${Math.round(used / 60)} daqiqa audio tahlil qilingan — kunlik limit ${limitMin} daqiqa. Audio saqlangan, eshitish mumkin.`,
+  }).eq('id', rowId);
+  console.log(`UTel: operator ${ext} kunlik limitdan oshdi (${Math.round(used / 60)}/${limitMin} daq) — row=${rowId} tahlil qilinmadi.`);
+  return false;
+}
+
 // Bir siklda nechta qo'ng'iroq parallel ishlanadi.
 const BATCH = Math.max(1, Number(process.env.UTEL_BATCH || 8));
 
