@@ -7,6 +7,7 @@ import { processTranscriptToCall } from './analyze-call';
 import { submitAudioForAnalysis, waitForAnalysis, isSalesAiConfigured } from '../lib/salesAiClient';
 import { isWorkTime, workWindowLabel } from '../lib/workHours';
 import { probeWavDurationSec } from '../lib/audioDuration';
+import { classifyShortCall } from '../lib/openaiAnalyzer';
 
 // ============================================================================
 // UTel (utc381.utel.uz) — O'zbek virtual PBX / bulutli telefoniya webhook.
@@ -208,15 +209,28 @@ export async function analyzeUtelCall(
     const jobId = await submitAudioForAnalysis(audioUrl, clientName);
     const res = await waitForAnalysis(jobId);
 
-    if (res.status !== 'done' || !res.fullText) {
-      // Matn yo'q (javobsiz/bo'sh) — dialogni saqlab, tahlilsiz done.
+    // HAR BIR QO'NG'IROQDA YO BALL, YO SABAB BO'LSIN (foydalanuvchi talabi
+    // 2026-09-24). Suhbat bo'lmagan yoki juda qisqa qo'ng'iroqda sotuv
+    // skriptini baholash ma'nosiz — ball 0 bo'lib qolar va "tahlil
+    // qilinmagan"dek ko'rinardi. Endi bunday qo'ng'iroq ham TAHLIL
+    // qilinadi: sababi aniqlanadi ("Aloqa sifati yomon", "Javobsiz",
+    // "Noto'g'ri raqam" ...) va izohga yoziladi.
+    const text = res.fullText || '';
+    const SHORT_LIMIT = 250; // belgidan qisqa = to'liq suhbat emas
+    if (res.status !== 'done' || text.trim().length < SHORT_LIMIT) {
+      const { data: row } = await supabase.from('calls').select('duration').eq('id', rowId).maybeSingle();
+      const dur = Number(row?.duration) || 0;
+      const { category, note } = await classifyShortCall(text, dur);
       await supabase.from('calls').update({
-        transcript: res.fullText || null,
+        transcript: text || null,
         transcript_segments: Array.isArray(res.dialog) ? res.dialog : [],
+        rop_comment: `(Baholanmadi) ${category}. ${note}`,
+        dropped_reason: category,
+        summary: note,
         status: 'done',
         error: null,
       }).eq('id', rowId);
-      console.log(`UTel analiz: matn bo'sh (row=${rowId}, status=${res.status})`);
+      console.log(`UTel analiz: qisqa/suhbatsiz — ${category} (row=${rowId}, ${text.length} belgi)`);
       return;
     }
 
@@ -227,14 +241,14 @@ export async function analyzeUtelCall(
     // qotib qolgan). Endi matn saqlanadi: qayta urinish FAQAT tahlilni
     // takrorlaydi — bir necha soniya, audiosiz.
     const upd: Record<string, unknown> = {
-      transcript: res.fullText,
+      transcript: text,
       transcript_segments: Array.isArray(res.dialog) ? res.dialog : [],
     };
     // STT xizmati davomiylikni bilsa — shuni yozamiz (UTel 0 yuborgan bo'lishi mumkin).
     if (Number(res.durationSec) > 0) upd.duration = Math.round(Number(res.durationSec));
     await supabase.from('calls').update(upd).eq('id', rowId);
 
-    await processTranscriptToCall(supabase, rowId, res.fullText, res.dialog, companyId);
+    await processTranscriptToCall(supabase, rowId, text, res.dialog, companyId);
     console.log(`UTel analiz done (row=${rowId}, so'z: ${res.wordsCount})`);
   } catch (e: any) {
     console.error(`UTel analiz xatosi (row=${rowId}):`, e?.message || e);

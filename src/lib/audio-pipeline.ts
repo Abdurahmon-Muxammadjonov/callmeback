@@ -332,9 +332,10 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
     [
       'operator_evaluation — ball NEGA aynan shunday chiqqanini yozing. Format QAT\'IY, uch qismdan iborat:',
       '   1) Qaysi skript ishlatilgani va ball: "(Yangi lid) Ball 8.2/10." yoki "(Eski baza) Ball 6.5/10."',
-      '   2) "Kuchli tomoni:" — operator nimani YAXSHI qilgani, aniq dalil bilan. Masalan: "mijozni qiziqtirdi va maqsadini aniqladi, probniyga shanba 14:00 ga yozdirdi", "narxni aniq aytdi va e\'tirozga dalil bilan javob berdi". Ball baland bo\'lsa — aynan NIMA uchun balandligi shu yerda ko\'rinsin.',
-      '   3) "Yaxshilash kerak:" — nima qilinmagani. Hammasi bajarilgan bo\'lsa: "Yaxshilash kerak: sezilarli kamchilik yo\'q."',
-      '   4) Oxirida ALOHIDA QATORDAN boshlab "XATOLAR:" bo\'limi. 100 dan past ball olgan HAR BIR band uchun bitta qator yozing, AYNAN shu formatda:',
+      '   2) "Natija:" — suhbatda AYNAN NIMA bo\'lgani, bir-ikki gapda, sodda tilda. Mijoz nima dedi va nimaga kelishildi. Masalan: "Operator xushmuomala gaplashdi, mijoz o\'quv markazga kelishga rozi bo\'ldi, shanba 14:00 ga kelishildi." yoki "Mijoz narxni so\'radi, hozir vaqti yo\'qligini aytib, keyinroq o\'zi xabar berishini so\'radi." Bu qator izohni o\'qigan odam qo\'ng\'iroqni ochmasdan nima bo\'lganini tushunishi uchun.',
+      '   3) "Kuchli tomoni:" — operator nimani YAXSHI qilgani, aniq dalil bilan. Masalan: "mijozni qiziqtirdi va maqsadini aniqladi, probniyga shanba 14:00 ga yozdirdi", "narxni aniq aytdi va e\'tirozga dalil bilan javob berdi". Ball baland bo\'lsa — aynan NIMA uchun balandligi shu yerda ko\'rinsin.',
+      '   4) "Yaxshilash kerak:" — nima qilinmagani. Hammasi bajarilgan bo\'lsa: "Yaxshilash kerak: sezilarli kamchilik yo\'q."',
+      '   5) Oxirida ALOHIDA QATORDAN boshlab "XATOLAR:" bo\'limi. 100 dan past ball olgan HAR BIR band uchun bitta qator yozing, AYNAN shu formatda:',
       '      XATOLAR:',
       '      - <Band nomi>: <operator aynan nimani qilmadi yoki so\'ramadi>',
       '      Masalan:',
@@ -342,7 +343,7 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
       '      - Ehtiyojni aniqlash: muddatni (qachongacha topshirishi kerakligini) so\'ramadi',
       '      Bu MIJOZNING emas, SOTUVCHINING xatosi bo\'lsin — skriptda bor-u, operator bajarmagan narsa. Hech qanday kamchilik bo\'lmasa: "XATOLAR: yo\'q".',
       'Har ikkala qism ham HAR DOIM bo\'lsin — past ballda ham kuchli tomonini toping, baland ballda ham nima yaxshilash mumkinligini yozing. Umumiy gap ("yaxshi ishladi") yozmang, faqat transkriptdagi aniq dalil.',
-      'Namuna: "(Yangi lid) Ball 8.2/10. Kuchli tomoni: mijozning maqsadini va muddatini aniqladi, kursni foyda tilida tushuntirdi va probniyga shanba 14:00 ga yozdirib, joyini band qildi. Yaxshilash kerak: tariflar orasidagi farq aytilmadi va yopiq kanalga qo\'shish taklif qilinmadi."',
+      'Namuna: "(Yangi lid) Ball 8.2/10. Natija: Mijoz qizi uchun SAT kursini so\'radi, operator narx va jadvalni tushuntirdi, mijoz shanba probniyga kelishga rozi bo\'ldi. Kuchli tomoni: mijozning maqsadini va muddatini aniqladi, kursni foyda tilida tushuntirdi va probniyga shanba 14:00 ga yozdirib, joyini band qildi. Yaxshilash kerak: tariflar orasidagi farq aytilmadi va yopiq kanalga qo\'shish taklif qilinmadi."',
     ].join('\n'),
     // criteria_scores endi skript bandlari bilan to'ldiriladi (avval
     // "faqat dinamik qoidalar bo'lsa" deyilardi va mezonsiz kompaniyada

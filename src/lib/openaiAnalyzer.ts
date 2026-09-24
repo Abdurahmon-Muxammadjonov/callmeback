@@ -22,7 +22,7 @@ const JSON_SHAPE = `Javobni FAQAT quyidagi JSON obyekt sifatida qaytar (boshqa m
 {
   "sentiment": "positive" | "negative" | "neutral",
   "client_mood": "mijoz kayfiyati haqida qisqa izoh",
-  "operator_evaluation": "MAJBURIY format, ichida \\n bilan qatorlar: \"(Yangi lid) Ball 7.5/10. Kuchli tomoni: <aniq dalil>. Yaxshilash kerak: <aniq dalil>.\\nXATOLAR:\\n- <Band nomi>: <sotuvchi nimani qilmadi/so'ramadi>\\n- <Band nomi>: <...>\" — XATOLAR bo'limi 100 dan past ball olgan HAR BIR band uchun bitta qator bo'lishi SHART; kamchilik bo'lmasa \"XATOLAR: yo'q\"",
+  "operator_evaluation": "MAJBURIY format, ichida \\n bilan qatorlar: \"(Yangi lid) Ball 7.5/10. Natija: <suhbatda nima bo'ldi, mijoz nima dedi, nimaga kelishildi — 1-2 gap>. Kuchli tomoni: <aniq dalil>. Yaxshilash kerak: <aniq dalil>.\\nXATOLAR:\\n- <Band nomi>: <sotuvchi nimani qilmadi/so'ramadi>\\n- <Band nomi>: <...>\" — XATOLAR bo'limi 100 dan past ball olgan HAR BIR band uchun bitta qator bo'lishi SHART; kamchilik bo'lmasa \"XATOLAR: yo'q\"",
   "deal_closed": true | false,
   "summary": "suhbatning 3-4 jumlalik xulosasi",
   "kpi_score": 0-100 butun son,
@@ -42,6 +42,70 @@ const JSON_SHAPE = `Javobni FAQAT quyidagi JSON obyekt sifatida qaytar (boshqa m
 }`;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// QISQA QO'NG'IROQLAR uchun yengil tasniflagich.
+//
+// NEGA (2026-09-24): "Alo? Alo, eshitilmayapti" kabi qo'ng'iroqlarda sotuv
+// skriptini baholashdan ma'no yo'q — ball 0 bo'lib qolar va foydalanuvchi
+// "nega tahlil qilinmagan?" deb o'ylardi. Endi ular ham baholanadi, lekin
+// boshqacha: SABABI aniqlanadi ("Aloqa sifati yomon", "Javobsiz" va h.k.)
+// va qo'ng'iroq izohiga yoziladi. Prompt kichkina — skript yuborilmaydi,
+// shu sabab arzon va tez.
+export const SHORT_CALL_CATEGORIES = [
+  'Javobsiz',
+  'Aloqa sifati yomon',
+  'Mijoz go\'shakni qo\'ydi',
+  'Noto\'g\'ri raqam',
+  'Keyinroq qayta qo\'ng\'iroq',
+  'Qisqa suhbat',
+] as const;
+
+export async function classifyShortCall(
+  transcript: string,
+  durationSec: number,
+): Promise<{ category: string; note: string }> {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) return { category: 'Qisqa suhbat', note: 'Suhbat juda qisqa.' };
+
+  const system = [
+    'Siz call-center qo\'ng\'iroqlarini tasniflaysiz. Qo\'ng\'iroq juda qisqa yoki suhbat bo\'lmagan.',
+    `Quyidagi toifalardan AYNAN bittasini tanlang: ${SHORT_CALL_CATEGORIES.join(' | ')}`,
+    'Izohlar:',
+    '  - "Aloqa sifati yomon" — "alo, alo", "eshitilmayapti", "ovoz kelmayapti", uzuq-yuluq gaplar.',
+    '  - "Javobsiz" — hech kim gapirmagan yoki faqat jiringlagan.',
+    '  - "Mijoz go\'shakni qo\'ydi" — mijoz javob berib, darhol uzgan.',
+    '  - "Noto\'g\'ri raqam" — mijoz "adashdingiz", "bunday odam yo\'q" degan.',
+    '  - "Keyinroq qayta qo\'ng\'iroq" — mijoz "bandman, keyin gaplashamiz" degan.',
+    '  - "Qisqa suhbat" — yuqoridagilarga to\'g\'ri kelmasa.',
+    'JSON qaytaring: {"category": "<toifa>", "note": "<bir gapda o\'zbekcha izoh, nima bo\'lganini ayting>"}',
+  ].join('\n');
+
+  try {
+    const resp = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: MODEL,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: `Qo'ng'iroq davomiyligi: ${durationSec} soniya.\nTranskript:\n${transcript || '(matn yo\'q — nutq aniqlanmadi)'}` },
+        ],
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const json: any = await resp.json();
+    const parsed = JSON.parse(json?.choices?.[0]?.message?.content || '{}');
+    const category = SHORT_CALL_CATEGORIES.includes(parsed.category) ? parsed.category : 'Qisqa suhbat';
+    const note = typeof parsed.note === 'string' && parsed.note.trim() ? parsed.note.trim() : 'Suhbat juda qisqa.';
+    return { category, note };
+  } catch (e: any) {
+    console.warn('Qisqa qo\'ng\'iroqni tasniflashda xato:', e?.message || e);
+    return { category: 'Qisqa suhbat', note: 'Suhbat juda qisqa.' };
+  }
+}
 
 // Tahlilni bajaradi va modelning XOM JSON matnini qaytaradi.
 export async function analyzeWithOpenAi(systemPrompt: string, transcript: string): Promise<string> {
