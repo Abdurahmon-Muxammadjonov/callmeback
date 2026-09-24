@@ -4,6 +4,8 @@ import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAut
 import { getCompanyManagerIds } from '../lib/companyScope';
 import { popStatsInNode, overviewStatsInNode } from '../lib/analyticsFallback';
 import { buildCoaching } from '../lib/coaching';
+import { getCompanySettings } from '../lib/companySettings';
+import { dayBounds, isHhMm, tashkentDay, tashkentHm, tashkentHour } from '../lib/tashkentTime';
 
 const router = Router();
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -485,43 +487,58 @@ router.get('/daily-summary', requireAuth, async (req: CompanyAuthedRequest, res:
     const days = Math.min(120, Math.max(1, parseInt(String(req.query.days || '30'), 10) || 30));
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
+    // "until=HH:MM" — kunning FAQAT shu vaqtgacha bo'lgan qismi. Delta shu
+    // bilan hisoblanadi: bugun 10:17 da bo'lsa, kecha ham 10:17 gacha
+    // olinadi. Aks holda kun boshida har doim "-100%" chiqardi.
+    const until = isHhMm(req.query.until) ? (req.query.until as string) : null;
+
+    // Uzun qo'ng'iroq chegarasi — "KPI normalari"dan (standart 60 s).
+    const settings = await getCompanySettings(supabase, companyId);
+    const longSec = Math.max(1, Number(settings.qualified_call_seconds) || 60);
+
     const rows = await fetchAllRows<any>((from, to) =>
       supabase.from('calls')
-        .select('created_at, duration, direction, kpi_score, transcript, client_phone, operator_ext, manager_id, new_leads_count, sent_to_dealer_count, closed_deals_count, bad_leads_count, unanswered_count')
+        .select('created_at, duration, direction, kpi_score, transcript, client_phone, operator_ext, manager_id, new_leads_count, sent_to_dealer_count, closed_deals_count, bad_leads_count, unanswered_count, penalty_amount, bonus_amount')
         .eq('company_id', companyId).gte('created_at', since).range(from, to));
 
     interface DayAgg {
       calls: number; seconds: number; analyzed: number; scored: number; scoreSum: number;
       incoming: number; outgoing: number; invited: number; closed: number;
       badLeads: number; unanswered: number; leadPhones: Set<string>; leads: number;
-      lowScore: number; // ball < 5 (10 ballikda) — "diqqat talab qiladi"
+      lowScore: number; longCalls: number; operatorCalls: number;
+      penalty: number; bonus: number;
     }
-    const byDay = new Map<string, DayAgg>();
     const blank = (): DayAgg => ({
       calls: 0, seconds: 0, analyzed: 0, scored: 0, scoreSum: 0,
       incoming: 0, outgoing: 0, invited: 0, closed: 0,
-      badLeads: 0, unanswered: 0, leadPhones: new Set(), leads: 0, lowScore: 0,
+      badLeads: 0, unanswered: 0, leadPhones: new Set(), leads: 0,
+      lowScore: 0, longCalls: 0, operatorCalls: 0, penalty: 0, bonus: 0,
     });
 
+    const byDay = new Map<string, DayAgg>();
     for (const r of rows) {
-      const d = dayKeyTashkent(r.created_at);
+      if (until && tashkentHm(r.created_at) > until) continue;
+      const d = tashkentDay(r.created_at);
       const a = byDay.get(d) || blank();
+      const sec = Math.max(0, Number(r.duration) || 0);
       a.calls += 1;
-      a.seconds += Math.max(0, Number(r.duration) || 0);
+      a.seconds += sec;
+      if (sec >= longSec) a.longCalls += 1;
+      if (r.operator_ext || r.manager_id) a.operatorCalls += 1;
+      a.penalty += Math.max(0, Number(r.penalty_amount) || 0);
+      a.bonus += Math.max(0, Number(r.bonus_amount) || 0);
       if (r.transcript) a.analyzed += 1;
       if (Number(r.kpi_score) > 0) {
         a.scored += 1;
         a.scoreSum += Number(r.kpi_score);
         if (Number(r.kpi_score) < 50) a.lowScore += 1; // 10 ballikda 5 dan past
       }
-      // Yo'nalish — PBX bergan haqiqiy qiymat.
       if (r.direction === 'incoming') a.incoming += 1;
       else if (r.direction === 'outgoing') a.outgoing += 1;
       a.invited += Number(r.sent_to_dealer_count) || 0;
       a.closed += Number(r.closed_deals_count) || 0;
       a.badLeads += Number(r.bad_leads_count) || 0;
       a.unanswered += Number(r.unanswered_count) || 0;
-      // Lid — mijoz bo'yicha takrorlanmaydi (raqam bo'lmasa qo'ng'iroq bo'yicha).
       if (Number(r.new_leads_count) > 0) {
         const phone = String(r.client_phone || '').trim();
         if (phone) a.leadPhones.add(phone); else a.leads += 1;
@@ -532,11 +549,13 @@ router.get('/daily-summary', requireAuth, async (req: CompanyAuthedRequest, res:
     const data = [...byDay.entries()].sort((x, y) => y[0].localeCompare(x[0])).map(([date, a]) => ({
       date,
       calls: a.calls,
+      operator_calls: a.operatorCalls,
       minutes: Math.round((a.seconds / 60) * 10) / 10,
       analyzed: a.analyzed,
       scored: a.scored,
       avg_score: a.scored ? Math.round(a.scoreSum / a.scored) : 0, // 0-100
       low_score: a.lowScore,
+      long_calls: a.longCalls,
       incoming: a.incoming,
       outgoing: a.outgoing,
       leads: a.leadPhones.size + a.leads,
@@ -544,14 +563,83 @@ router.get('/daily-summary', requireAuth, async (req: CompanyAuthedRequest, res:
       closed: a.closed,
       bad_leads: a.badLeads,
       unanswered: a.unanswered,
+      penalty_sum: Math.round(a.penalty),
+      bonus_sum: Math.round(a.bonus),
     }));
 
-    return res.status(200).json({ success: true, data });
+    return res.status(200).json({ success: true, data, long_call_seconds: longSec, until });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Kunlik yakun hisoblashda xatolik.' });
   }
 });
 
+// ============================================================================
+// GET /analytics/hourly?date=YYYY-MM-DD[&operator_ext=]
+// SOATLIK KESIM — 0 dan 23 gacha HAR BIR soat uchun qator (qo'ng'iroq
+// bo'lmagan soat ham nol bilan qaytadi).
+//
+// Uchta blok shu ma'lumotdan ishlaydi: Boshqaruv panelidagi "Vaqt
+// intervallari", Solishtirish panelidagi "Soatlar bo'yicha" grafigi va
+// kun ichidagi taqsimotni ko'rish. Kun va soat Asia/Tashkent bo'yicha.
+// ============================================================================
+router.get('/hourly', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
+  try {
+    const companyId = req.auth!.companyId as string;
+    const date = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)
+      ? req.query.date
+      : tashkentDay(new Date());
+    const operatorExt = typeof req.query.operator_ext === 'string' && req.query.operator_ext.trim()
+      ? req.query.operator_ext.trim()
+      : null;
+
+    const settings = await getCompanySettings(supabase, companyId);
+    const longSec = Math.max(1, Number(settings.qualified_call_seconds) || 60);
+    const { from, to } = dayBounds(date);
+
+    const rows = await fetchAllRows<any>((f, t) => {
+      let q = supabase.from('calls')
+        .select('created_at, duration, kpi_score, transcript, operator_ext, manager_id')
+        .eq('company_id', companyId).gte('created_at', from).lte('created_at', to);
+      if (operatorExt) q = q.eq('operator_ext', operatorExt);
+      return q.range(f, t);
+    });
+
+    const hours = Array.from({ length: 24 }, (_, hour) => ({
+      hour, calls: 0, operator_calls: 0, long_calls: 0, analyzed: 0, talk_seconds: 0,
+    }));
+
+    for (const r of rows) {
+      const h = hours[tashkentHour(r.created_at)];
+      if (!h) continue;
+      const sec = Math.max(0, Number(r.duration) || 0);
+      h.calls += 1;
+      h.talk_seconds += sec;
+      if (sec >= longSec) h.long_calls += 1;
+      if (r.operator_ext || r.manager_id) h.operator_calls += 1;
+      if (r.transcript || Number(r.kpi_score) > 0) h.analyzed += 1;
+    }
+
+    return res.status(200).json({ success: true, date, long_call_seconds: longSec, data: hours });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Soatlik kesimni hisoblashda xatolik.' });
+  }
+});
+
+// ============================================================================
+// GET /analytics/staff-stats?date=YYYY-MM-DD
+// XODIMLAR STATISTIKASI — har bir operatorning kunlik ko'rsatkichi, kuchsiz
+// tomonlari (AYB) va ularni tuzatish uchun TAVSIYA.
+//
+// Maqsad (foydalanuvchi talabi 2026-09-24): "sotuvchining aybini topib,
+// sotuvga yordam berish". Shuning uchun har operator uchun:
+//   - kunlik ball (10 ballik), qo'ng'iroq soni, gaplashgan vaqti
+//   - skript bandlari bo'yicha o'rtacha foiz (eng kuchsizi birinchi)
+//   - qisqa "Ayblar" ro'yxati va "Tavsiya" ro'yxati (GPT yozadi, lekin
+//     FAQAT haqiqiy raqamlar va o'sha kunning xato qatorlari asosida)
+//
+// Kun TOSHKENT vaqti bo'yicha; kun tugagach (23:00) raqamlar o'zgarmaydi.
+// Natija 30 daqiqaga keshlanadi — har sahifa ochilganda GPT chaqirilmasin.
+// ============================================================================
 // ============================================================================
 // GET /analytics/analysis-status?date=YYYY-MM-DD
 // TAHLIL HOLATI — nechta qo'ng'iroq tahlil qilindi, nechtasi qilinmadi va
