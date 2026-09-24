@@ -51,6 +51,9 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
     const managerId = typeof req.query.manager_id === 'string' ? req.query.manager_id : undefined;
     const platformId = typeof req.query.platform_id === 'string' && req.query.platform_id ? req.query.platform_id : undefined;
     const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
+    // Sahifalash — "Audio yozuvlar" eksporti uchun (10 000 qatorgacha).
+    // Faqat siljish, boshqa mantiq o'zgarmaydi.
+    const offset = Math.max(0, parseInt(String(req.query.offset || '0'), 10) || 0);
 
     if (managerId && !UUID_REGEX.test(managerId)) {
       return res.status(400).json({ success: false, error: "manager_id yaroqli UUID bo'lishi kerak." });
@@ -61,7 +64,7 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
       .select('id, manager_id, operator_ext, direction, platform_id, audio_url, duration, kpi_score, penalty_amount, bonus_amount, rop_comment, dropped_reason, status, created_at, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count')
       .eq('company_id', companyId)
       .order('created_at', { ascending: false })
-      .limit(limit);
+      .range(offset, offset + limit - 1);
     if (managerId) query = query.eq('manager_id', managerId);
     if (platformId) query = query.eq('platform_id', platformId);
 
