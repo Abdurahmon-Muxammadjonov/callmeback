@@ -5,6 +5,7 @@ import { unlink, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { processLocalAudio, processLongAudio, analyzeTranscript } from '../lib/audio-pipeline';
+import type { ScriptStage } from '../lib/evaluationScript';
 import { fetchAllRows } from '../lib/supabase';
 import { isSectionUnlocked } from '../lib/companySections';
 import { getCompanySettings } from '../lib/companySettings';
@@ -125,18 +126,50 @@ async function fetchActiveCriteria(supabase: SupabaseClient, companyId: string |
   // baholaydi. company_id=NULL (legacy PBX) uchun global (NULL) mezonlar.
   let q = supabase
     .from('criteria')
-    .select('title, description, penalty_amount, category, type')
+    .select('title, description, penalty_amount, category, type, weight')
     .eq('is_active', true);
   q = companyId ? q.eq('company_id', companyId) : q.is('company_id', null);
   const { data, error } = await q;
   if (error || !data) return [];
-  return data.map((c) => ({
+  return data.map((c: any) => ({
+    weight: Number(c.weight) || 0,
     title: String(c.title || ''),
     description: String(c.description || ''),
     penalty_amount: Number(c.penalty_amount) || 0,
     category: c.category ?? null,
     type: (c.type === 'Jarima' || c.type === 'Bonus') ? c.type : 'Majburiy',
   }));
+}
+
+// Kompaniya mezonlari ichidan SKRIPT bandlarini ajratadi.
+//
+// Skript dashboardda ham ko'rinishi kerak (foydalanuvchi talabi 2026-09-24):
+// u "Mezonlar" bo'limida kategoriyasi "Skript: Yangi lid" / "Skript: Eski
+// baza" bo'lgan qatorlar sifatida turadi. Shu qatorlar TOPILSA — AI aynan
+// o'shalar bo'yicha baholaydi (ya'ni dashboarddan tahrirlash ishlaydi);
+// topilmasa, tizimning o'z skripti (lib/evaluationScript.ts) ishlatiladi.
+//
+// Bu qatorlar "QO'SHIMCHA DINAMIK QOIDALAR" ro'yxatiga QO'SHILMAYDI —
+// aks holda skript promptda ikki marta ketardi.
+function splitScriptCriteria(criteria: ActiveCriterion[]): {
+  script?: { fresh: ScriptStage[]; reactivation: ScriptStage[] };
+  extra: ActiveCriterion[];
+} {
+  const isScript = (c: ActiveCriterion) => /^skript/i.test(String(c.category || ''));
+  const toStage = (c: ActiveCriterion): ScriptStage => ({
+    key: c.title.toLowerCase().replace(/\s+/g, '_').slice(0, 40),
+    title: c.title,
+    points: Math.max(1, Math.round(Number((c as any).weight) || 10)),
+    checks: String(c.description || '').split('\n').map((x) => x.replace(/^[-•\s]+/, '').trim()).filter(Boolean),
+  });
+
+  const scriptRows = criteria.filter(isScript);
+  const extra = criteria.filter((c) => !isScript(c));
+  if (scriptRows.length === 0) return { extra };
+
+  const fresh = scriptRows.filter((c) => !/eski\s*baza/i.test(String(c.category))).map(toStage);
+  const reactivation = scriptRows.filter((c) => /eski\s*baza/i.test(String(c.category))).map(toStage);
+  return { script: { fresh, reactivation }, extra };
 }
 
 function buildDynamicRules(criteria: ActiveCriterion[]): string {
@@ -783,16 +816,31 @@ export async function processTranscriptToCall(
   companyId: string | null,
 ): Promise<void> {
   const activeCriteria = await fetchActiveCriteria(supabase, companyId);
-  const extraRules = buildDynamicRules(activeCriteria);
-  const analysis = await analyzeTranscript(transcript, extraRules);
+  const { script, extra } = splitScriptCriteria(activeCriteria);
+  const extraRules = buildDynamicRules(extra);
+  const analysis = await analyzeTranscript(transcript, extraRules, script);
   // cast: audio-pipeline'ning CallAnalysis'i va bu yerdagi AuditResult
   // LostReason tipi bir oz farq qiladi (count maydoni) — normalizeAuditResult
   // baribir barcha maydonlarni normalize/default qiladi, shu sabab xavfsiz.
   const audit = normalizeAuditResult({
     ...analysis,
+    // MUHIM: AuditResult'da izoh maydoni "rop_comment", CallAnalysis'da esa
+    // "operator_evaluation". Ko'chirilmagani uchun tahlil izohi (ball sababi
+    // va XATOLAR ro'yxati) bazaga UMUMAN yozilmay qolardi — dashboardda
+    // "Izoh berilmagan" ko'rinardi (2026-09-24 aniqlandi).
+    rop_comment: analysis.operator_evaluation,
     transcript,
     transcript_segments: Array.isArray(dialogSegments) ? (dialogSegments as any) : [],
   } as any);
+
+  // Qayta tahlil qilinsa, eski bog'liq qatorlar qolib ketmasin — aks holda
+  // skript bandlari ikki-uch marta takrorlanib ko'rinardi.
+  await Promise.allSettled([
+    supabase.from('conversions').delete().eq('call_id', callId),
+    supabase.from('lost_reasons').delete().eq('call_id', callId),
+    supabase.from('call_criteria_scores').delete().eq('call_id', callId),
+  ]);
+
   const fin = computeCriteriaFinancials(audit.criteria_scores, activeCriteria);
   audit.penalty_amount = fin.penalty_amount;
   audit.bonus_amount = fin.bonus_amount;

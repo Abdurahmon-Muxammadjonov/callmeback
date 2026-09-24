@@ -256,9 +256,9 @@ function normTitle(s: string): string {
   return s.toLowerCase().replace(/^\s*\d+[b.)]*\s*/i, '').replace(/[^a-zа-яo'`ʻʻ\s]/gi, '').trim();
 }
 
-function matchStage(title: string): ScriptStage | undefined {
+function matchStage(title: string, stages?: ScriptStage[]): ScriptStage | undefined {
   const b = normTitle(title);
-  return [...FRESH_LEAD_SCRIPT, ...REACTIVATION_SCRIPT].find((st) => {
+  return (stages && stages.length ? stages : [...FRESH_LEAD_SCRIPT, ...REACTIVATION_SCRIPT]).find((st) => {
     const a = normTitle(st.title);
     return a === b || a.startsWith(b.slice(0, 12)) || b.startsWith(a.slice(0, 12));
   });
@@ -271,12 +271,15 @@ function matchStage(title: string): ScriptStage | undefined {
 // ball yig'indisi 3.7 chiqardi ("nega 7.5?" degan savol javobsiz qolardi).
 // Endi ball = Σ(band og'irligi × band foizi). Model faqat bandlarni
 // baholaydi, arifmetikani biz qilamiz.
-export function scoreFromCriteria(criteriaScores: Array<{ title: string; score: number }>): number | null {
+export function scoreFromCriteria(
+  criteriaScores: Array<{ title: string; score: number }>,
+  stages?: ScriptStage[],
+): number | null {
   if (!criteriaScores.length) return null;
   let total = 0;
   let covered = 0;
   for (const cs of criteriaScores) {
-    const stage = matchStage(cs.title);
+    const stage = matchStage(cs.title, stages);
     if (!stage) continue;
     const pct = Math.max(0, Math.min(100, Number(cs.score) || 0));
     total += (stage.points * pct) / 100;
@@ -308,6 +311,7 @@ export function rewriteBallText(evaluation: string, kpi0to100: number): string {
 export function annotateMistakeLines(
   evaluation: string,
   criteriaScores: Array<{ title: string; score: number }>,
+  stages?: ScriptStage[],
 ): string {
   if (!evaluation || !evaluation.includes('XATOLAR')) return evaluation;
 
@@ -367,7 +371,13 @@ export function annotateMistakeLines(
 }
 
 // Ikkala skript ham bitta matnda beriladi; AI avval turini aniqlaydi.
-export function buildScriptRules(): string {
+//
+// fresh/reactivation berilsa — O'SHALAR ishlatiladi. Bu kompaniya
+// dashboarddagi "Mezonlar" bo'limida skriptni tahrirlasa, baholash ham
+// o'sha tahrirlangan variant bo'yicha ketishi uchun (2026-09-24).
+export function buildScriptRules(fresh?: ScriptStage[], reactivation?: ScriptStage[]): string {
+  const FRESH = fresh && fresh.length ? fresh : FRESH_LEAD_SCRIPT;
+  const REACT = reactivation && reactivation.length ? reactivation : REACTIVATION_SCRIPT;
   const stageBlock = (stages: ScriptStage[]): string[] => {
     const out: string[] = [];
     for (const st of stages) {
@@ -401,10 +411,10 @@ export function buildScriptRules(): string {
     '',
     '════════ (A) YANGI LID SKRIPTI ════════',
     '',
-    ...stageBlock(FRESH_LEAD_SCRIPT),
+    ...stageBlock(FRESH),
     '════════ (B) ESKI BAZANI QAYTA JONLANTIRISH SKRIPTI ════════',
     '',
-    ...stageBlock(REACTIVATION_SCRIPT),
+    ...stageBlock(REACT),
     'kpi_score — TANLANGAN skript bandlari ballarining YIG\'INDISI (0-100).',
     'criteria_scores — tanlangan skriptning har bir bandi uchun bitta element: {title: band nomi, category: "Skript", score: o\'sha band necha foiz bajarilgani (0-100)}.',
     'Qo\'ng\'iroq javobsiz qolgan yoki suhbat umuman bo\'lmagan bo\'lsa — kpi_score 0 va criteria_scores bo\'sh massiv.',

@@ -9,7 +9,7 @@ import { pipeline } from 'node:stream/promises';
 import { pbxAuthHeaders } from './audioAccess';
 import { withGeminiSlot } from './geminiLimiter';
 import { analyzeWithOpenAi, isOpenAiAnalyzerConfigured } from './openaiAnalyzer';
-import { buildScriptRules, annotateMistakeLines, scoreFromCriteria, rewriteBallText } from './evaluationScript';
+import { buildScriptRules, annotateMistakeLines, scoreFromCriteria, rewriteBallText, type ScriptStage } from './evaluationScript';
 
 export interface CriteriaScore {
   title: string;
@@ -302,7 +302,13 @@ function extractGeminiRetryDelayMs(error: unknown, fallbackMs: number): number {
 }
 
 // Gemini — Aisha bergan transkriptni qo'ng'iroq tahlil skripti (mezonlari) bo'yicha baholaydi.
-export async function analyzeTranscript(transcript: string, extraRules = ''): Promise<CallAnalysis> {
+export async function analyzeTranscript(
+  transcript: string,
+  extraRules = '',
+  // Kompaniya skripti (dashboarddagi "Mezonlar"dan). Berilmasa — tizimning
+  // o'z skripti ishlatiladi (lib/evaluationScript.ts).
+  script?: { fresh: ScriptStage[]; reactivation: ScriptStage[] },
+): Promise<CallAnalysis> {
   // Tahlil modeli: OPENAI_API_KEY berilgan bo'lsa GPT-4o-mini (Gemini free
   // tier daqiqalik limitiga urilib navbatni to'xtatib qo'ygani uchun —
   // 2026-09-23), aks holda eski Gemini yo'li.
@@ -319,7 +325,7 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
     // ball qaysi asosda chiqqani na modelga, na foydalanuvchiga ayon edi.
     // Endi aniq bandlar va ularning ulushi beriladi, va ball SABABI
     // operator_evaluation'da (dashboard'dagi "ROP izohi") yoziladi.
-    buildScriptRules(),
+    buildScriptRules(script?.fresh, script?.reactivation),
     // Platformada ball 10 BALLIK tizimda ko'rsatiladi (foydalanuvchi talabi
     // 2026-09-23). kpi_score maydoni texnik sabablarga ko'ra 0-100 bo'lib
     // qoladi (baza ustuni), lekin izohda ball 10 ballik ko'rinishda yoziladi:
@@ -341,7 +347,8 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
       '      Masalan:',
       '      - Probniyga chaqirish: bepul probniy darsga umuman taklif qilmadi, vaqt varianti berilmadi',
       '      - Ehtiyojni aniqlash: muddatni (qachongacha topshirishi kerakligini) so\'ramadi',
-      '      Bu MIJOZNING emas, SOTUVCHINING xatosi bo\'lsin — skriptda bor-u, operator bajarmagan narsa. Hech qanday kamchilik bo\'lmasa: "XATOLAR: yo\'q".',
+      '      AGAR operator NOTO\'G\'RI GAPIRGAN bo\'lsa (skriptga zid gap aytgan, qo\'pol javob bergan, narxni erta aytgan, mijozni bo\'lgan) — o\'sha gapni QO\'SHTIRNOQ ichida qisqa keltiring va nimasi xato ekanini ayting. Masalan: "- Taqdimot: narxni darrov aytdi (\'narxi 3 million\') — avval ehtiyojni so\'rash kerak edi" yoki "- Muloqot: mijozning gapini bo\'ldi (\'shoshilyapman, qisqa qilaylik\')".',
+      '      Bu MIJOZNING emas, SOTUVCHINING xatosi bo\'lsin — skriptda bor-u, operator bajarmagan yoki noto\'g\'ri aytgan narsa. Hech qanday kamchilik bo\'lmasa: "XATOLAR: yo\'q".',
       'Har ikkala qism ham HAR DOIM bo\'lsin — past ballda ham kuchli tomonini toping, baland ballda ham nima yaxshilash mumkinligini yozing. Umumiy gap ("yaxshi ishladi") yozmang, faqat transkriptdagi aniq dalil.',
       'Namuna: "(Yangi lid) Ball 8.2/10. Natija: Mijoz qizi uchun SAT kursini so\'radi, operator narx va jadvalni tushuntirdi, mijoz shanba probniyga kelishga rozi bo\'ldi. Kuchli tomoni: mijozning maqsadini va muddatini aniqladi, kursni foyda tilida tushuntirdi va probniyga shanba 14:00 ga yozdirib, joyini band qildi. Yaxshilash kerak: tariflar orasidagi farq aytilmadi va yopiq kanalga qo\'shish taklif qilinmadi."',
     ].join('\n'),
@@ -369,9 +376,11 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
     .filter(Boolean)
     .join('\n\n');
 
+  const allStages = script ? [...script.fresh, ...script.reactivation] : undefined;
+
   if (useOpenAi) {
     const raw = await analyzeWithOpenAi(systemPrompt, transcript);
-    return normalizeAnalysisJson(raw, 'OpenAI');
+    return normalizeAnalysisJson(raw, 'OpenAI', allStages);
   }
 
   const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -411,13 +420,13 @@ export async function analyzeTranscript(transcript: string, extraRules = ''): Pr
   if (!text) {
     throw new Error('Gemini javobi bo\'sh qaytdi.');
   }
-  return normalizeAnalysisJson(text, 'Gemini');
+  return normalizeAnalysisJson(text, 'Gemini', allStages);
 }
 
 // Model qaytargan JSON'ni tekshiradi va CallAnalysis'ga keltiradi.
 // Gemini ham, OpenAI ham shu yerdan o'tadi — maydon nomlari/chegaralari
 // bir xil bo'lsin (dashboard ikkala holatda ham bir xil ishlaydi).
-function normalizeAnalysisJson(text: string, source: string): CallAnalysis {
+function normalizeAnalysisJson(text: string, source: string, stages?: ScriptStage[]): CallAnalysis {
   let parsed: Partial<CallAnalysis>;
   try {
     parsed = JSON.parse(text) as Partial<CallAnalysis>;
@@ -446,10 +455,10 @@ function normalizeAnalysisJson(text: string, source: string): CallAnalysis {
 
   // BALL BANDLARDAN hisoblanadi (model arifmetikasiga tayanmaymiz) — shunda
   // "ball 7.5" va xatolardagi minuslar bir-biriga mos keladi.
-  const computed = scoreFromCriteria(criteria);
+  const computed = scoreFromCriteria(criteria, stages);
   const kpi = computed ?? clampScore(parsed.kpi_score);
   const evaluation = typeof parsed.operator_evaluation === 'string'
-    ? rewriteBallText(annotateMistakeLines(parsed.operator_evaluation, criteria), kpi)
+    ? rewriteBallText(annotateMistakeLines(parsed.operator_evaluation, criteria, stages), kpi)
     : '';
 
   return {

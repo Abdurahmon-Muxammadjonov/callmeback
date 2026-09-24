@@ -3,6 +3,7 @@ import { supabase, fetchAllRows } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 import { getCompanyManagerIds } from '../lib/companyScope';
 import { popStatsInNode, overviewStatsInNode } from '../lib/analyticsFallback';
+import { buildCoaching } from '../lib/coaching';
 
 const router = Router();
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -326,6 +327,138 @@ router.get('/daily-minutes', requireAuth, async (req: CompanyAuthedRequest, res:
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Kunlik daqiqalarni hisoblashda xatolik.' });
+  }
+});
+
+// ============================================================================
+// GET /analytics/staff-stats?date=YYYY-MM-DD
+// XODIMLAR STATISTIKASI — har bir operatorning kunlik ko'rsatkichi, kuchsiz
+// tomonlari (AYB) va ularni tuzatish uchun TAVSIYA.
+//
+// Maqsad (foydalanuvchi talabi 2026-09-24): "sotuvchining aybini topib,
+// sotuvga yordam berish". Shuning uchun har operator uchun:
+//   - kunlik ball (10 ballik), qo'ng'iroq soni, gaplashgan vaqti
+//   - skript bandlari bo'yicha o'rtacha foiz (eng kuchsizi birinchi)
+//   - qisqa "Ayblar" ro'yxati va "Tavsiya" ro'yxati (GPT yozadi, lekin
+//     FAQAT haqiqiy raqamlar va o'sha kunning xato qatorlari asosida)
+//
+// Kun TOSHKENT vaqti bo'yicha; kun tugagach (23:00) raqamlar o'zgarmaydi.
+// Natija 30 daqiqaga keshlanadi — har sahifa ochilganda GPT chaqirilmasin.
+// ============================================================================
+const staffStatsCache = new Map<string, { at: number; data: unknown }>();
+const STAFF_STATS_TTL_MS = 30 * 60 * 1000;
+
+router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
+  try {
+    const companyId = req.auth!.companyId as string;
+    const today = dayKeyTashkent(new Date().toISOString());
+    const date = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)
+      ? req.query.date
+      : today;
+
+    const cacheKey = `${companyId}::${date}`;
+    const hit = staffStatsCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < STAFF_STATS_TTL_MS) {
+      return res.status(200).json({ success: true, date, data: hit.data, cached: true });
+    }
+
+    // Kun chegarasi: Toshkent kuni -> UTC oraliq (UTC+5).
+    const from = new Date(`${date}T00:00:00+05:00`).toISOString();
+    const to = new Date(`${date}T23:59:59.999+05:00`).toISOString();
+
+    const [calls, managers] = await Promise.all([
+      fetchAllRows<any>((f, t) =>
+        supabase.from('calls')
+          .select('id, duration, kpi_score, rop_comment, dropped_reason, transcript, manager_id, operator_ext')
+          .eq('company_id', companyId).gte('created_at', from).lte('created_at', to)
+          .or('operator_ext.not.is.null,manager_id.not.is.null')
+          .range(f, t)),
+      supabase.from('managers').select('id, name').eq('company_id', companyId),
+    ]);
+
+    const nameById = new Map<string, string>();
+    for (const m of managers.data || []) nameById.set(m.id, m.name);
+
+    // Skript bandlari bo'yicha ballar (call_criteria_scores) — bo'laklab olamiz.
+    const ids = calls.map((c) => c.id);
+    const stageRows: Array<{ call_id: string; title: string; score: number }> = [];
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data } = await supabase.from('call_criteria_scores')
+        .select('call_id, title, score').in('call_id', ids.slice(i, i + 200));
+      stageRows.push(...((data || []) as any[]));
+    }
+    const stagesByCall = new Map<string, Array<{ title: string; score: number }>>();
+    for (const s of stageRows) {
+      stagesByCall.set(s.call_id, [...(stagesByCall.get(s.call_id) || []), { title: s.title, score: Number(s.score) || 0 }]);
+    }
+
+    // Operator bo'yicha yig'amiz.
+    interface Agg {
+      key: string; name: string; calls: number; seconds: number;
+      scores: number[]; stages: Map<string, number[]>; mistakes: string[];
+      reasons: Map<string, number>;
+    }
+    const byOp = new Map<string, Agg>();
+    for (const c of calls) {
+      const key = c.manager_id || `ext:${c.operator_ext}`;
+      const name = c.manager_id ? nameById.get(c.manager_id) || 'Xodim' : `Operator ${c.operator_ext}`;
+      const a: Agg = byOp.get(key) || {
+        key, name, calls: 0, seconds: 0,
+        scores: [] as number[],
+        stages: new Map<string, number[]>(),
+        mistakes: [] as string[],
+        reasons: new Map<string, number>(),
+      };
+      a.calls += 1;
+      a.seconds += Math.max(0, Number(c.duration) || 0);
+      if (Number(c.kpi_score) > 0) a.scores.push(Number(c.kpi_score));
+      for (const st of stagesByCall.get(c.id) || []) {
+        a.stages.set(st.title, [...(a.stages.get(st.title) || []), st.score]);
+      }
+      // Izohdagi "− X · Band: nima qilmadi" qatorlari — aniq dalil sifatida.
+      for (const line of String(c.rop_comment || '').split('\n')) {
+        if (line.trim().startsWith('−') && a.mistakes.length < 40) a.mistakes.push(line.trim());
+      }
+      if (c.dropped_reason) a.reasons.set(c.dropped_reason, (a.reasons.get(c.dropped_reason) || 0) + 1);
+      byOp.set(key, a);
+    }
+
+    const avg = (arr: number[]) => (arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : 0);
+
+    const result = await Promise.all([...byOp.values()]
+      .sort((x, y) => y.calls - x.calls)
+      .map(async (a) => {
+        const stages = [...a.stages.entries()]
+          .map(([title, arr]) => ({ title, pct: Math.round(avg(arr)) }))
+          .sort((x, y) => x.pct - y.pct); // eng kuchsizi birinchi
+        const avgScore = Math.round(avg(a.scores));
+        const { faults, advice } = await buildCoaching(a.name, {
+          calls: a.calls,
+          minutes: Math.round((a.seconds / 60) * 10) / 10,
+          avgScore,
+          scoredCalls: a.scores.length,
+          stages,
+          mistakes: a.mistakes.slice(0, 12),
+          reasons: [...a.reasons.entries()].map(([r, n]) => `${r} (${n} ta)`),
+        });
+        return {
+          key: a.key,
+          name: a.name,
+          calls: a.calls,
+          minutes: Math.round((a.seconds / 60) * 10) / 10,
+          scored_calls: a.scores.length,
+          avg_score: avgScore,          // 0-100 (frontend 10 ballikka bo'ladi)
+          stages,
+          faults,
+          advice,
+          reasons: [...a.reasons.entries()].sort((x, y) => y[1] - x[1]).map(([reason, count]) => ({ reason, count })),
+        };
+      }));
+
+    staffStatsCache.set(cacheKey, { at: Date.now(), data: result });
+    return res.status(200).json({ success: true, date, data: result, cached: false });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Xodimlar statistikasida xatolik.' });
   }
 });
 
