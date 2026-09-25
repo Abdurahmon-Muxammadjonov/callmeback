@@ -347,6 +347,42 @@ router.get('/daily-minutes', requireAuth, async (req: CompanyAuthedRequest, res:
 // Kun TOSHKENT vaqti bo'yicha; kun tugagach (23:00) raqamlar o'zgarmaydi.
 // Natija 30 daqiqaga keshlanadi — har sahifa ochilganda GPT chaqirilmasin.
 // ============================================================================
+// ============================================================================
+// HISOBOT KESHI (2026-09-25)
+//
+// daily-summary va hourly agregatsiyani Node'da bajaradi, ya'ni kunlik
+// qatorlarni bazadan tortadi. Kuniga 1300+ qo'ng'iroq kelayotgani uchun
+// 30 kunlik so'rov 3000+ qator bo'lib qoldi (o'lchandi: ~3.2 s), va
+// dashboard bir sahifada bir necha marta chaqiradi.
+//
+// Shu sabab natija QISQA muddat keshlanadi. Ma'lumot sekin o'zgaradi
+// (qo'ng'iroq tahlili 20-30 soniya davom etadi), sahifalar esa har
+// 20-60 soniyada o'zi yangilanadi — shuning uchun 60 soniyalik kesh
+// ko'rinishni eskirtirmaydi.
+//
+// Kesh kaliti KOMPANIYA bilan boshlanadi — boshqa tenant ma'lumoti
+// hech qachon boshqasiga ko'rinmaydi.
+// ============================================================================
+const reportCache = new Map<string, { at: number; body: unknown }>();
+const REPORT_TTL_MS = 60_000;
+
+function cachedReport(key: string): unknown | null {
+  const hit = reportCache.get(key);
+  if (hit && Date.now() - hit.at < REPORT_TTL_MS) return hit.body;
+  if (hit) reportCache.delete(key);
+  return null;
+}
+
+function putReport(key: string, body: unknown): unknown {
+  reportCache.set(key, { at: Date.now(), body });
+  // Kesh cheksiz o'smasin (ko'p kompaniya + ko'p sana).
+  if (reportCache.size > 200) {
+    const oldest = [...reportCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) reportCache.delete(oldest[0]);
+  }
+  return body;
+}
+
 const staffStatsCache = new Map<string, { at: number; data: unknown }>();
 const STAFF_STATS_TTL_MS = 30 * 60 * 1000;
 
@@ -492,6 +528,10 @@ router.get('/daily-summary', requireAuth, async (req: CompanyAuthedRequest, res:
     // olinadi. Aks holda kun boshida har doim "-100%" chiqardi.
     const until = isHhMm(req.query.until) ? (req.query.until as string) : null;
 
+    const cacheKey = `daily:${companyId}:${days}:${until ?? ''}`;
+    const cached = cachedReport(cacheKey);
+    if (cached) return res.status(200).json(cached);
+
     // Uzun qo'ng'iroq chegarasi — "KPI normalari"dan (standart 60 s).
     const settings = await getCompanySettings(supabase, companyId);
     const longSec = Math.max(1, Number(settings.qualified_call_seconds) || 60);
@@ -567,7 +607,7 @@ router.get('/daily-summary', requireAuth, async (req: CompanyAuthedRequest, res:
       bonus_sum: Math.round(a.bonus),
     }));
 
-    return res.status(200).json({ success: true, data, long_call_seconds: longSec, until });
+    return res.status(200).json(putReport(cacheKey, { success: true, data, long_call_seconds: longSec, until }));
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Kunlik yakun hisoblashda xatolik.' });
   }
@@ -591,6 +631,10 @@ router.get('/hourly', requireAuth, async (req: CompanyAuthedRequest, res: Respon
     const operatorExt = typeof req.query.operator_ext === 'string' && req.query.operator_ext.trim()
       ? req.query.operator_ext.trim()
       : null;
+
+    const cacheKey = `hourly:${companyId}:${date}:${operatorExt ?? ''}`;
+    const cached = cachedReport(cacheKey);
+    if (cached) return res.status(200).json(cached);
 
     const settings = await getCompanySettings(supabase, companyId);
     const longSec = Math.max(1, Number(settings.qualified_call_seconds) || 60);
@@ -619,7 +663,7 @@ router.get('/hourly', requireAuth, async (req: CompanyAuthedRequest, res: Respon
       if (r.transcript || Number(r.kpi_score) > 0) h.analyzed += 1;
     }
 
-    return res.status(200).json({ success: true, date, long_call_seconds: longSec, data: hours });
+    return res.status(200).json(putReport(cacheKey, { success: true, date, long_call_seconds: longSec, data: hours }));
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Soatlik kesimni hisoblashda xatolik.' });
   }
@@ -658,6 +702,10 @@ router.get('/analysis-status', requireAuth, async (req: CompanyAuthedRequest, re
     const from = new Date(`${date}T00:00:00+05:00`).toISOString();
     const to = new Date(`${date}T23:59:59.999+05:00`).toISOString();
 
+    const cacheKey = `status:${companyId}:${date}`;
+    const cached = cachedReport(cacheKey);
+    if (cached) return res.status(200).json(cached);
+
     const rows = await fetchAllRows<any>((f, t) =>
       supabase.from('calls')
         .select('id, created_at, duration, kpi_score, dropped_reason, operator_ext, transcript')
@@ -688,7 +736,7 @@ router.get('/analysis-status', requireAuth, async (req: CompanyAuthedRequest, re
 
     const sec = (list: any[]) => list.reduce((s, r) => s + Math.max(0, Number(r.duration) || 0), 0);
 
-    return res.status(200).json({
+    return res.status(200).json(putReport(cacheKey, {
       success: true,
       date,
       data: {
@@ -710,7 +758,7 @@ router.get('/analysis-status', requireAuth, async (req: CompanyAuthedRequest, re
             limit_reached: v.limitHit,
           })),
       },
-    });
+    }));
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Tahlil holatini hisoblashda xatolik.' });
   }
