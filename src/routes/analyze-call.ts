@@ -515,12 +515,24 @@ async function uploadAudioToStorage(
 }
 
 // calls jadvalining ustun qiymatlari (yakka va batch rejim uchun umumiy).
+//
+// DAVOMIYLIK NEGA SHARTLI YOZILADI (2026-09-27):
+// audit.duration GPT javobidan keladi, GPT esa "duration" maydonini
+// qaytarmaydi -> normalizeAuditResult uni 0 qiladi. Natijada HAR QAYTA
+// TAHLIL calls.duration ni 0 ga tushirardi: qo'ng'iroq bazada bor, audio
+// eshitiladi, lekin gaplashilgan vaqt yo'qolardi (kunlik daqiqalar,
+// operator statistikasi va kunlik limit hisobi buzilardi).
+//
+// Bu 2026-09-24 da "432 ta qo'ng'iroqda davomiylik 0" holatining ham
+// ildiz sababi edi — o'sha paytda ma'lumot to'ldirilgan, sabab esa
+// topilmagan. Endi: 0 bo'lsa ustun UMUMAN yozilmaydi, ya'ni mavjud
+// haqiqiy qiymat (UTel yoki audiodan o'lchangan) saqlanadi.
 function callRowFields(audit: AuditResult) {
   return {
     total_calls: audit.total_calls,
     incoming_count: audit.incoming_count,
     outgoing_count: audit.outgoing_count,
-    duration: audit.duration,
+    ...(audit.duration > 0 ? { duration: audit.duration } : {}),
     unanswered_count: audit.unanswered_count,
     bad_leads_count: audit.bad_leads_count,
     new_leads_count: audit.new_leads_count,
