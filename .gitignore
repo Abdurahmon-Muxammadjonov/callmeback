@@ -44,3 +44,6 @@ next-env.d.ts
 
 # build output
 dist/
+
+# Navbatga qaytarish skriptining zaxira fayllari (mijoz ma'lumoti — repoga tushmasin)
+requeue-backup-*.json
