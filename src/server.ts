@@ -2,6 +2,7 @@ import './env';
 
 import express from 'express';
 import cors from 'cors';
+import { timing } from './middleware/timing';
 import { execSync } from 'node:child_process';
 
 import usersRouter from './routes/users';
@@ -23,6 +24,9 @@ import shiftsRouter from './routes/shifts';
 import crmRouter, { runScheduledCrmSync } from './routes/crm';
 
 const app = express();
+
+// O'LCHASH: har so'rovning vaqti va DB so'rovlari soni (1-bosqich).
+app.use(timing);
 const allowedOrigins = [
   'https://procell.uz',
   'https://www.procell.uz',

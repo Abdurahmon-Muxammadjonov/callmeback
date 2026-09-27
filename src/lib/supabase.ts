@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { countDbQuery } from '../middleware/timing';
 
 let supabaseClient: SupabaseClient | null = null;
 
@@ -31,7 +32,17 @@ export const supabase = new Proxy({} as SupabaseClient, {
   get(_target, prop, receiver) {
     const client = getSupabaseClient();
     const value = Reflect.get(client, prop, receiver);
-    if (typeof value === 'function') return value.bind(client);
+    if (typeof value === 'function') {
+      // O'LCHASH: har bir .from()/.rpc() chaqiruvi bitta DB so'rovi deb
+      // sanaladi (middleware/timing.ts log'ida "db=N" bo'lib chiqadi).
+      if (prop === 'from' || prop === 'rpc') {
+        return (...args: unknown[]) => {
+          countDbQuery();
+          return (value as (...a: unknown[]) => unknown).apply(client, args);
+        };
+      }
+      return value.bind(client);
+    }
     return value;
   },
   set(_target, prop, value) {
