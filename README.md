@@ -86,6 +86,11 @@ emas — Railway manbani umuman ololmagan. Tekshirish tartibi:
 5. Shundan keyin ham yiqilsa — vaqtincha `railway up`, keyin 1-banddagi
    qoidaga ko'ra `main` ga push.
 
+> Tarix: 2026-09-27 da Railway'ning GitHub ulanishi eskirib qolgan edi —
+> push deploy'ni qo'zg'atardi, lekin Railway hamon eski commit'ni
+> (`ede2354`) olib, loglarsiz yiqilardi. Yuqoridagi 4-qadam (Disconnect →
+> Connect) tuzatdi.
+
 ## Ma'lum xatarlar
 
 - **STT bo'sh matn qaytarishi.** sales-ai-front xato yuz berganda HTTP
