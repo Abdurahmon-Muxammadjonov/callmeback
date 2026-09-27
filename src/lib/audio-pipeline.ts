@@ -492,6 +492,30 @@ export async function analyzeTranscript(
 // Model qaytargan JSON'ni tekshiradi va CallAnalysis'ga keltiradi.
 // Gemini ham, OpenAI ham shu yerdan o'tadi — maydon nomlari/chegaralari
 // bir xil bo'lsin (dashboard ikkala holatda ham bir xil ishlaydi).
+// ARZIMAS LAHZALARNI KODDA FILTRLAYMIZ (2026-09-27)
+//
+// Promptda taqiq bor, lekin model ba'zan baribir yozadi — jonli sinovda
+// "Operator o'zini tanishtirdi" o'tib ketdi. Prompt — maslahat, filtr —
+// kafolat. Shuning uchun har suhbatda bo'ladigan va qarorga ta'sir
+// qilmaydigan lahzalar shu yerda tashlab yuboriladi.
+//
+// DIQQAT: ro'yxat TOR bo'lishi kerak. "Operator narxlar haqida ma'lumot
+// berdi" — narx muhokamasi, u KERAKLI lahza va bu yerga tushmasligi shart.
+const TRIVIAL_MOMENT_RE = [
+  /salomlash/i,
+  /o['’]?zini\s+tanishtir/i,
+  /tanishtirish/i,
+  /suhbat\s+(boshlandi|tugadi|yakunlandi)/i,
+  /qo['’]?ng['’]?iroq\s+(boshlandi|tugadi)/i,
+  /mijoz\s+javob\s+berdi/i,
+  /mijoz\s+o['’]?z\s+fikr/i,
+  /xayrlash/i,
+];
+
+export function isTrivialMoment(label: string): boolean {
+  return TRIVIAL_MOMENT_RE.some((re) => re.test(label));
+}
+
 function normalizeAnalysisJson(text: string, source: string, stages?: ScriptStage[]): CallAnalysis {
   let parsed: Partial<CallAnalysis>;
   try {
@@ -548,6 +572,8 @@ function normalizeAnalysisJson(text: string, source: string, stages?: ScriptStag
     key_moments: Array.isArray((parsed as any).key_moments)
       ? ((parsed as any).key_moments as any[])
           .filter((k) => k && typeof k.label === 'string' && k.label.trim() !== '' && Number.isFinite(Number(k.time)))
+          // Har suhbatda bo'ladigan arzimas lahzalar tashlab yuboriladi.
+          .filter((k) => !isTrivialMoment(String(k.label)))
           // Prompt 3-6 ta so'raydi; model ko'proq bersa eng boshidagi
           // 6 tasi olinadi (ular vaqt bo'yicha tartiblangan bo'ladi).
           .slice(0, 6)
