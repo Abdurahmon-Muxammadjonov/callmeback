@@ -44,3 +44,26 @@ export function workWindowLabel(): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${pad(START_HOUR)}:00–${pad(END_HOUR)}:00 (${TZ})`;
 }
+
+// ---------------------------------------------------------------------------
+// TOSHKENT KUNI (2026-09-27)
+//
+// Kunlik limit BUGUNGI jonli yuklamani cheklash uchun. O'tgan kundagi
+// qo'ng'iroqni qayta tahlil qilishda u ma'nosiz — o'sha kunning byudjeti
+// allaqachon sarflangan, ya'ni hamma narsa "limitdan oshdi" bo'lib
+// qaytardi (2026-09-27 da aynan shunday bo'ldi).
+// ---------------------------------------------------------------------------
+
+/** Berilgan vaqtning Toshkentdagi kuni: "YYYY-MM-DD". */
+export function tashkentDayKey(at: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(at);
+}
+
+/** Shu ISO vaqt Toshkent bo'yicha BUGUNGI kunga to'g'ri keladimi? */
+export function isTodayTashkent(iso: string, now: Date = new Date()): boolean {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return false;
+  return tashkentDayKey(new Date(t)) === tashkentDayKey(now);
+}

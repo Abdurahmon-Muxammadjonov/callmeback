@@ -125,7 +125,7 @@ for (const [k, v] of Object.entries(byReason).sort((a, b) => b[1] - a[1])) {
   console.log(`  ${String(v).padStart(5)}  ${k}`);
 }
 console.log('\nO\'zgarish: status -> \'requeued\' (limitdan ozod, past ustuvorlik);'
-  + '\n           dropped_reason / rop_comment / summary / error -> null;'
+  + '\n           dropped_reason / summary / error -> null, rop_comment -> \'\' (NOT NULL);'
   + '\n           audio_url, duration, client_phone TEGILMAYDI.');
 
 if (!rows.length) { console.log('\nTozalash kerak qator yo\'q.\n'); process.exit(0); }
@@ -141,9 +141,12 @@ if (!APPLY) {
   process.exit(0);
 }
 
+// DIQQAT: calls.rop_comment ustuni NOT NULL — unga null yozib bo'lmaydi
+// (23502). Bo'sh satr qo'yamiz; tahlil tugagach backend uni qaytadan
+// to'ldiradi.
 const CLEAR = {
   status: REQUEUED_STATUS,
-  dropped_reason: null, rop_comment: null, summary: null, error: null,
+  dropped_reason: null, rop_comment: '', summary: null, error: null,
 };
 const ids = rows.map((r) => r.id);
 let done = 0;

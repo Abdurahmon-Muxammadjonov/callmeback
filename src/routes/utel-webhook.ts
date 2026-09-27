@@ -9,7 +9,7 @@ import {
   recordOutcome, isPaused as isSttPaused, shouldProbe, markProbed,
   maybeAlertAdmin, countsTowardHealth, SUSPECT_STATUS, logHealthConfig,
 } from '../lib/sttHealth';
-import { isWorkTime, workWindowLabel } from '../lib/workHours';
+import { isWorkTime, workWindowLabel, isTodayTashkent } from '../lib/workHours';
 import { probeWavDurationSec } from '../lib/audioDuration';
 import { classifyShortCall } from '../lib/openaiAnalyzer';
 
@@ -204,13 +204,14 @@ export async function analyzeUtelCall(
   audioUrl: string,
   companyId: string | null,
   clientName?: string,
+  opts: { skipDailyLimit?: boolean } = {},
 ): Promise<void> {
   if (!isSalesAiConfigured()) {
     console.warn('SALES_AI_API_KEY sozlanmagan — tahlil o\'tkazilmadi.');
     return;
   }
   // Operatorning kunlik tahlil limiti to'lgan bo'lsa — to'xtaymiz.
-  if (!(await passesDailyLimit(rowId))) return;
+  if (!(await passesDailyLimit(rowId, opts.skipDailyLimit))) return;
   try {
     // Qo'ng'iroq davomiyligini oldindan olamiz: kutish budjeti shunga qarab
     // belgilanadi va pastdagi "ishonchlilik tekshiruvi" uchun ham kerak.
@@ -409,8 +410,14 @@ async function analyzedSecondsToday(companyId: string, ext: string, atIso: strin
 export const REQUEUED_STATUS = 'requeued';
 
 // Qo'ng'iroqni tahlil qilsa bo'ladimi? Bo'lmasa — belgilab, false qaytaradi.
-async function passesDailyLimit(rowId: string): Promise<boolean> {
-  if (!OPERATOR_DAILY_LIMIT_SEC) return true;
+//
+// skipLimit: qayta navbatga qo'yilgan ESKI qo'ng'iroq uchun navbat aniq
+// beradi. NEGA KERAK: navbat analyzeUtelCall'dan OLDIN status='processing'
+// yozadi va 'requeued' belgisini o'chirib tashlaydi — shuning uchun faqat
+// status'ga tayanib bo'lmaydi (2026-09-27 da aynan shu sababdan 49 ta
+// qo'ng'iroq yana "Kunlik limitdan oshdi" bo'lib qaytdi).
+async function passesDailyLimit(rowId: string, skipLimit = false): Promise<boolean> {
+  if (!OPERATOR_DAILY_LIMIT_SEC || skipLimit) return true;
   const { data: row } = await supabase
     .from('calls')
     .select('company_id, operator_ext, duration, created_at, status')
@@ -418,6 +425,11 @@ async function passesDailyLimit(rowId: string): Promise<boolean> {
     .maybeSingle();
   // Qayta navbatdagi eski qo'ng'iroq — kunlik limit qo'llanmaydi.
   if (row?.status === REQUEUED_STATUS) return true;
+  // CHIDAMLI ZAXIRA: kunlik limit BUGUNGI jonli yuklamani cheklash uchun.
+  // O'tgan kunlardagi qo'ng'iroqni qayta tahlil qilishda u ma'nosiz —
+  // o'sha kunning byudjeti allaqachon sarflangan. Bu tekshiruv status
+  // o'chirilsa ham (restart, 'processing') ishlaydi.
+  if (row?.created_at && !isTodayTashkent(row.created_at)) return true;
   const ext = String(row?.operator_ext || '').trim();
   if (!row?.company_id || !ext) return true; // operator noma'lum — limit qo'llanmaydi
 
@@ -612,12 +624,14 @@ async function runQueueOnce(): Promise<number> {
 
   const live = await selectQueue(false, BATCH);
   if (live === null) return needAnalysis.length;
-  let rows = live;
+  // Har qatorga manbasini yozib qo'yamiz: status keyin 'processing'ga
+  // o'zgaradi, shuning uchun bu belgi XOTIRADA saqlanishi kerak.
+  let rows = live.map((r: any) => ({ ...r, __requeued: false }));
   // Jonli qo'ng'iroqlar to'plamni to'ldirmasa — qolgan joyga eskilarini olamiz.
   if (rows.length < BATCH) {
     const old = await selectQueue(true, BATCH - rows.length);
     if (old?.length) {
-      rows = [...rows, ...old];
+      rows = [...rows, ...old.map((r: any) => ({ ...r, __requeued: true }))];
       console.log(`UTel navbat: ${live.length} jonli + ${old.length} qayta navbatdagi.`);
     }
   }
@@ -633,7 +647,10 @@ async function runQueueOnce(): Promise<number> {
     inFlight.add(r.id);
     try {
       await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
-      await analyzeUtelCall(r.id, r.audio_url as string, r.company_id ?? null, r.client_phone ?? undefined);
+      await analyzeUtelCall(
+        r.id, r.audio_url as string, r.company_id ?? null, r.client_phone ?? undefined,
+        { skipDailyLimit: r.__requeued === true },
+      );
     } finally {
       inFlight.delete(r.id);
     }

@@ -1,24 +1,27 @@
 #!/usr/bin/env node
 // ============================================================================
-// QAYTA NAVBAT JARAYONINI KUZATADI (2026-09-27)
+// QAYTA NAVBAT BO'LAGINI KUZATADI (2026-09-27)
 //
-// Har bo'lakdan keyin: nechtasi matn oldi, nechtasi bo'sh qaytdi, nechtasi
-// xato bilan tugadi, nechtasi hali navbatda. Bo'sh ulushi normal darajadan
-// keskin oshsa OGOHLANTIRADI — bu STT yana buzilganini bildiradi.
+// AYNAN SO'NGGI BO'LAKNI o'lchaydi: requeue-stt.mjs har yurgizilganda
+// o'zgartirgan qatorlarning id'larini JSON zaxiraga yozadi — shu fayldan
+// id'lar olinadi va faqat o'shalarning hozirgi holati sanaladi.
 //
-// NORMAL DARAJA (haqiqiy ma'lumotdan o'lchangan, ≥20s qo'ng'iroqlar):
-//   23-sentabr      19.7% bo'sh
-//   24-sen ertalab  14.7% bo'sh
-// Shu sabab 40% dan oshsa shubhali, 70% — circuit breaker chegarasi.
+// NEGA SHUNDAY: avval o'lchov butun oyna bo'yicha olinardi va hali
+// navbatga qo'yilmagan 1900+ qator ham "bo'sh" deb sanalardi — natijada
+// "bo'sh ulushi 99.5%" degan yolg'on ko'rsatkich chiqardi.
 //
-// ISHLATISH: node scripts/requeue-progress.mjs [--watch]
+// ISHLATISH:
+//   node scripts/requeue-progress.mjs            # bir marta
+//   node scripts/requeue-progress.mjs --watch     # tugaguncha har daqiqada
+//   node scripts/requeue-progress.mjs --file <zaxira.json>
 // ============================================================================
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
-const WATCH = process.argv.includes('--watch');
+const argv = process.argv.slice(2);
+const WATCH = argv.includes('--watch');
 
 const env = {};
 for (const line of readFileSync(path.join(ROOT, '.env.local'), 'utf8').split('\n')) {
@@ -29,55 +32,87 @@ for (const line of readFileSync(path.join(ROOT, '.env.local'), 'utf8').split('\n
 }
 const URL_BASE = (env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL || '').replace(/\/+$/, '');
 const KEY = env.SUPABASE_SERVICE_ROLE_KEY;
-const COMPANY = process.env.COMPANY_ID || '24823352-465e-43ea-913c-9f9d7270b9e9';
-const SINCE = process.env.SINCE || '2026-09-24T14:00:00';
 
-async function count(filter) {
-  const resp = await fetch(`${URL_BASE}/rest/v1/calls?select=id&${filter}`, {
-    headers: {
-      apikey: KEY, Authorization: `Bearer ${KEY}`,
-      Prefer: 'count=exact', Range: '0-0',
+/** Eng yangi zaxira faylini topadi (yoki --file bilan berilganini). */
+function backupPath() {
+  const i = argv.indexOf('--file');
+  if (i >= 0 && argv[i + 1]) return path.resolve(argv[i + 1]);
+  const files = readdirSync(ROOT).filter((f) => /^requeue-backup-.*\.json$/.test(f)).sort();
+  if (!files.length) {
+    console.error('Zaxira fayli topilmadi. Avval requeue-stt.mjs ni yurgizing.');
+    process.exit(1);
+  }
+  return path.join(ROOT, files[files.length - 1]);
+}
+
+const bak = backupPath();
+const batch = JSON.parse(readFileSync(bak, 'utf8'));
+const ids = batch.map((r) => r.id);
+const durationById = new Map(batch.map((r) => [r.id, Number(r.duration) || 0]));
+
+async function fetchRows(chunk) {
+  const resp = await fetch(
+    `${URL_BASE}/rest/v1/calls?select=id,status,transcript,kpi_score,dropped_reason,key_moments,is_problem`
+    + `&id=in.(${chunk.join(',')})`,
+    {
+      headers: { apikey: KEY, Authorization: `Bearer ${KEY}` },
+      signal: AbortSignal.timeout(60_000),
     },
-    signal: AbortSignal.timeout(60_000),
-  });
-  const cr = resp.headers.get('content-range') || '/0';
-  return Number(cr.split('/')[1]) || 0;
+  );
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+  return resp.json();
 }
 
 async function report() {
-  const base = `company_id=eq.${COMPANY}&created_at=gte.${SINCE}&duration=gte.15`;
-  const [navbatda, ishlanmoqda, matnli, shubhali, xato, javobsiz] = await Promise.all([
-    count(`${base}&status=eq.requeued`),
-    count(`${base}&status=eq.processing`),
-    count(`${base}&transcript=not.is.null`),
-    count(`${base}&status=eq.stt_suspect`),
-    count(`${base}&status=eq.failed`),
-    count(`${base}&transcript=is.null&status=eq.done`),
-  ]);
-  const ishlangan = matnli + javobsiz;
-  const boshUlush = ishlangan ? (100 * javobsiz) / ishlangan : 0;
+  const rows = [];
+  for (let i = 0; i < ids.length; i += 100) rows.push(...(await fetchRows(ids.slice(i, i + 100))));
 
-  console.log(`\n[${new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Tashkent' })} Toshkent]`);
-  console.log(`  navbatda (requeued) : ${navbatda}`);
-  console.log(`  ishlanmoqda         : ${ishlanmoqda}`);
-  console.log(`  MATN OLDI           : ${matnli}`);
-  console.log(`  bo'sh qaytdi        : ${javobsiz}`);
-  console.log(`  STT shubhali        : ${shubhali}`);
-  console.log(`  xato (qayta urinadi): ${xato}`);
-  console.log(`  bo'sh ulushi        : ${boshUlush.toFixed(1)}%  (normal 15-20%)`);
+  const s = {
+    navbatda: 0, ishlanmoqda: 0, matnli: 0, bosh: 0, shubhali: 0, xato: 0, ballangan: 0,
+    keyMoments: 0, muammoli: 0,
+  };
+  for (const r of rows) {
+    const hasText = !!(r.transcript && String(r.transcript).trim());
+    if (r.status === 'requeued') s.navbatda++;
+    else if (r.status === 'processing') s.ishlanmoqda++;
+    else if (r.status === 'stt_suspect') s.shubhali++;
+    else if (r.status === 'failed') s.xato++;
+    if (hasText) s.matnli++;
+    else if (r.status === 'done') s.bosh++;
+    if (Number(r.kpi_score) > 0) s.ballangan++;
+    if (Array.isArray(r.key_moments) && r.key_moments.length) s.keyMoments++;
+    if (r.is_problem) s.muammoli++;
+  }
 
-  if (shubhali > 0) {
-    console.log('\n  ⚠️  CIRCUIT BREAKER ISHGA TUSHGAN — navbat pauzada.');
+  const ishlangan = s.matnli + s.bosh;
+  const boshUlush = ishlangan ? (100 * s.bosh) / ishlangan : 0;
+  const qoldi = s.navbatda + s.ishlanmoqda;
+
+  console.log(`\n[${new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Tashkent' })} Toshkent]`
+    + `  bo'lak: ${ids.length} ta  (${path.basename(bak)})`);
+  console.log(`  navbatda            : ${s.navbatda}`);
+  console.log(`  ishlanmoqda         : ${s.ishlanmoqda}`);
+  console.log(`  MATN OLDI           : ${s.matnli}`);
+  console.log(`  ballangan (kpi>0)   : ${s.ballangan}`);
+  console.log(`  vaqt belgilari bor  : ${s.keyMoments}`);
+  console.log(`  muammoli deb topildi: ${s.muammoli}`);
+  console.log(`  bo'sh qaytdi        : ${s.bosh}`);
+  console.log(`  STT shubhali        : ${s.shubhali}`);
+  console.log(`  xato (qayta urinadi): ${s.xato}`);
+  console.log(`  bo'sh ulushi        : ${boshUlush.toFixed(1)}%   (normal 15-20%)`);
+
+  if (s.shubhali > 0) {
+    console.log('\n  ⚠️  CIRCUIT BREAKER ISHGA TUSHGAN — navbat pauzada, STT ni tekshiring.');
   } else if (ishlangan >= 20 && boshUlush > 40) {
     console.log('\n  ⚠️  Bo\'sh ulushi normal darajadan yuqori — STT ni tekshiring.');
   }
-  return { navbatda, ishlanmoqda };
+  return qoldi;
 }
 
 if (WATCH) {
   for (;;) {
-    const { navbatda, ishlanmoqda } = await report();
-    if (navbatda === 0 && ishlanmoqda === 0) { console.log('\nNavbat tugadi.\n'); break; }
+    const qoldi = await report();
+    if (qoldi === 0) { console.log('\nBo\'lak tugadi.\n'); break; }
     await new Promise((r) => setTimeout(r, 60_000));
   }
 } else {
