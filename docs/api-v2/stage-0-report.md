@@ -188,3 +188,155 @@ Appendix A kelguncha quyidagi tartibda ishlashni taklif qilaman
 5. **5-bosqich:** retention (§7) — dry-run rejimida.
 
 Appendix A kelishi bilan v2 sxemalari va endpointlari parallel boshlanadi.
+
+---
+
+# 0-bosqich, 2-qism: Appendix A o'qilgandan keyin
+
+`docs/prompt` topildi (1423 qator). Appendix A (892–1424) va §11–17
+to'liq o'qildi. Quyida §16 aniq so'ragan, birinchi qismda yo'q bo'lgan
+ma'lumotlar.
+
+## A. Status va sabab taqsimoti
+
+Butun bazada **19 278** qo'ng'iroq, lekin JAMALS'ga faqat **4 862** tasi
+tegishli. **14 416** tasida `company_id = NULL` (eski quvur qoldiqlari)
+va **14 362** tasi `failed`. Ya'ni bazada katta eski "qabristоn" bor —
+v2 so'rovlari `company_id` bo'yicha filtrlangani uchun ularga tegmaydi,
+lekin indekslar va backfill hajmini rejalashtirishda hisobga olinishi
+kerak.
+
+| Status | Soni (barcha) |
+|---|---|
+| done | 4 737 |
+| failed | 14 362 |
+| requeued | 179 |
+| processing / stt_suspect / queued | 0 |
+
+## B. Sabab matnlari -> A.5 kalitlari (to'liq xarita, `unknown` YO'Q)
+
+| Bazadagi matn | A.5 kaliti | Soni |
+|---|---|---|
+| Javobsiz | `no_answer` | 1 691 |
+| Qisqa suhbat | `short` | 435 |
+| Keyinroq qayta qo'ng'iroq | `callback_later` | 335 |
+| Aloqa sifati yomon | `bad_audio` | 258 |
+| Kunlik limitdan oshdi | `daily_limit` | 773 |
+| Noto'g'ri raqam | `wrong_number` | 186 |
+| Sotuv suhbati emas | `not_sales` | 61 |
+| Mijoz go'shakni qo'ydi | `hung_up` | 10 |
+| Matnga o'girilmadi | `stt_failed` | 0 (yangi, hali ishlatilmagan) |
+| **JAMI** | | **3 749** |
+
+Yig'indi aynen mos keladi (3 749 = sababi bor qatorlar soni), ya'ni
+**har bir matn bitta kalitga toza o'giriladi va `unknown` qolmaydi**.
+§4 dagi `reason_key_of()` funksiyasi shu 9 qatordan iborat bo'ladi.
+
+## C. STORAGE — retention uchun eng muhim topilma
+
+Bucketlar (uchtasi ham **PUBLIC**):
+
+| Bucket | Public | Tarkibi |
+|---|---|---|
+| `recordings` | ha | JAMALS audiosi YO'Q |
+| `payment-receipts` | ha | to'lov kvitansiyalari |
+| `company-logos` | ha | logolar |
+
+**JAMALS'ning 4 862 qo'ng'irog'ining HAMMASI audiosi faqat UTel'da**
+(`api.utc381.utel.uz`). `audio_storage_url` va `audio_storage_path`
+barchasida NULL. Ya'ni biz boshqaradigan audio bayt **yo'q**.
+
+Bu §7 uchun ikki jiddiy natija beradi:
+
+1. **Retention hozir 0 bayt bo'shatadi.** Hamma narsa
+   `provider_audio_url` toifasiga kiradi; §7.3 ga ko'ra biz faqat
+   havolani yashiramiz, UTel nusxasini o'chira olmaymiz. Ya'ni
+   "2 oydan keyin audio o'chadi" bu tenant uchun hozircha **faqat
+   ko'rsatmaslik**, joy bo'shatish emas.
+2. **Aksincha xatar muhimroq:** UTel o'z yozuvlarini qanchadan keyin
+   o'chirishini bilmaymiz. Agar u masalan 30 kundan keyin o'chirsa,
+   audio BIZNING 2 oylik oynamizdan OLDIN yo'qoladi va biz uni
+   qaytarib olmaymiz. Shu sababli **§8 (peaks) ustuvorligi oshadi** —
+   to'lqin shakli audio hali olinadigan paytda hisoblanishi kerak.
+   Xuddi shu sabab transkript va tahlilni saqlash ham kritik
+   (allaqachon shunday).
+
+**Savol sizga:** UTel yozuvlarni qancha saqlaydi? Bu retention oynasini
+va peaks backfill shoshqaloqligini belgilaydi.
+
+## D. 2 oydan oshgan audio: HOZIR 0 TA
+
+Cutoff (2 oy, Toshkent): **2026-07-27**. Eng erta qo'ng'iroq:
+**2026-09-23**. Demak retention bugun **0 nomzod** topadi.
+
+Birinchi haqiqiy o'chirish ~**2026-11-23** atrofida bo'ladi. Ya'ni:
+retention'ni xotirjam qurib, dry-run'da sinab ko'rish uchun ~2 oy vaqt
+bor va hozir hech qanday xatar yo'q.
+
+## E. Telegram "Hisobot" funksiyasi — YO'Q
+
+`src/telegram/` va `telegram-bot/` da kunlik hisobot shabloni topilmadi
+(faqat tarif/menyu matnlarida "konversiya" so'zi uchraydi). Demak §9.1
+dagi "the Telegram report, if it exists" — mavjud emas, va §9.2 dagi
+shablon **birlamchi manba** bo'ladi. Email OTP oqimi ham yo'q.
+
+## F. Lid / taklif / bitim ta'riflari (hozirgi holat)
+
+Uchtasi ham `calls` ustunlaridan yig'iladi (`analytics.ts:479-481`):
+
+| Appendix A | Hozirgi ustun | Manba |
+|---|---|---|
+| leads | `new_leads_count` | GPT bahosi |
+| offers | `sent_to_dealer_count` | GPT bahosi |
+| deals | `closed_deals_count` | GPT bahosi |
+
+`bad_leads` ta'rifi GPT promptida yozilgan (`audio-pipeline.ts:434`):
+javob bermadi, noto'g'ri raqam, umuman qiziqmadi, spam, mos kelmaydigan
+mijoz. "Hozir vaqtim yo'q" — sifatsiz lid EMAS.
+
+amoCRM kodi bor (`src/lib/amocrm.ts`, `src/routes/crm.ts`,
+`src/multi-tenant/routes/integrations.ts`), lekin `crm_daily_stats` va
+`crm_funnel_snapshot` jadvallari yo'q. `uncontactedLeads` manbasi hozir
+mavjud emas -> Appendix A bo'yicha `null` qaytaradi.
+
+**Diqqat:** leads/offers/deals GPT bahosi bo'lgani uchun ular §4 dagi
+whitelist'da "tahlil maydonlari" sifatida qoladi (faktik emas). Bu
+to'g'ri, lekin konversiya raqamlari amoCRM bilan solishtirilmaguncha
+GPT talqiniga tayanadi.
+
+## G. §12.1 — DB kechikishi maqsaddan ~45 barobar uzoq
+
+Production'dan 12 marta o'lchandi (bitta so'rovli endpoint,
+`Server-Timing: app;dur`):
+
+| Ko'rsatkich | Qiymat | §12.1 maqsadi |
+|---|---|---|
+| p50 | **223 ms** | — |
+| p95 | **638 ms** | **<= 5 ms** (qattiq chegara 20 ms) |
+| min / max | 220 / 638 ms | — |
+
+Supabase o'z ichida 37 ms. Railway servisi `sfo`. Supabase regioni
+noma'lum — Settings -> General -> Region kerak.
+
+## H. 2-qaror o'lchovi: uzun qo'ng'iroq ta'rifi
+
+ESKI `duration >= 60` -> YANGI `duration > 60 AND reason != no_answer`.
+Oxirgi 7 kun, 4 862 qo'ng'iroq:
+
+| Kun | Jami | ESKI | YANGI | Farq | =60s | javobsiz |
+|---|---|---|---|---|---|---|
+| 23-sen | 697 | 162 | 159 | −3 | 3 | 0 |
+| 24-sen | 1 306 | 276 | 263 | −13 | 13 | 0 |
+| 25-sen | 1 440 | 265 | 242 | −23 | 23 | 0 |
+| 26-sen | 1 366 | 276 | 242 | −34 | 15 | 23 |
+| 27-sen | 53 | 7 | 4 | −3 | 1 | 3 |
+| **JAMI** | **4 862** | **986** | **910** | **−76 (−7.7%)** | 55 | 26 |
+
+Operator kesimida eng katta o'zgarish: ext 105 (−25), 103 va 107
+(−9 tasi), qolganlarda −1..−5.
+
+Ya'ni yangi ta'rif "uzun suhbat"lar sonini **7.7% kamaytiradi**: 55 tasi
+aynan 60 soniyalik (qat'iy `>` tufayli chiqadi), 26 tasi javobsiz
+jiringlash. Norma bajarilishi (`meetsNorm`) shunga mos ravishda
+qattiqlashadi — `dailyLongCallsNorm` seed qiymatini (40) shu farqni
+hisobga olib ko'rib chiqish kerak bo'lishi mumkin.

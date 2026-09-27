@@ -1,0 +1,1424 @@
+# SalesPulse · BACKEND work order
+
+API v2 for the "Pulse Noir" UI, 2-month audio retention, a permanent reports archive, and maximum speed.
+
+You are a senior backend engineer on SalesPulse, a multi-tenant AI call-audit platform. Calls arrive from UTel, are converted and transcribed, and are then scored by GPT. A new frontend ("Pulse Noir") is being built in parallel by another engineer against **Appendix A (API v2 contract)** at the end of this document. Your job:
+
+1. Implement API v2 exactly as specified. It must be fast, correct, tenant-safe and fully data-driven.
+2. Add **automatic audio retention**:
+   - audio is removed **2 calendar months after it arrived** (counted from both the call day and the day the file reached us), and ONLY audio older than that;
+   - it is never removed in bulk by mistake;
+   - removal is reversible for 7 days;
+   - analyses, transcripts, waveforms and reports are kept forever in its place.
+3. Build a **permanent reports archive**: an automatic daily, weekly and monthly report for every period since each company started, plus on-demand reports with PDF, XLSX, CSV and ZIP output. The UI's "Hisobot" button shows all of them.
+4. Make the system **fast**:
+   - no request may call an LLM;
+   - p95 targets are in §12;
+   - the database must be co-located with the API;
+   - heavy work must stay off the request path.
+
+Read the whole document first. Where something is ambiguous, prefer, in order: (1) not breaking production, (2) data correctness, (3) speed. Write every decision down in your stage report.
+
+---
+
+## 0. Non-negotiables
+
+1. **Production safety first.** The ingestion pipeline (UTel → conversion → STT → GPT → DB) must never break.
+   - All schema changes are additive and backward-compatible.
+   - v1 endpoints keep working until the new frontend is live AND the user approves their removal.
+2. **Appendix A is the contract.** Implement it exactly. Publish `GET /api/v2/openapi.json`, generated from the zod schemas that validate your responses in tests.
+   - If you must change the contract, stop, and propose the change to the user in your report, so both specs are updated together.
+3. **No hardcoded business values.** Norms, targets, thresholds, work hours, labels and retention period live in per-company settings (Appendix A `Norms`).
+   - Find every literal in the codebase (60 s, 40 calls, 8.0 target, 20% conversion, 3.0 low score, 9–23 work hours, …) and replace it with settings reads.
+   - Seed the current production values once per company.
+4. **No LLM or STT call inside any GET handler.** Anything AI-generated is precomputed by jobs and read from tables.
+5. **Tenant isolation on every query.** `company_id` comes from the auth context, never from client input. Tests must prove cross-tenant access is impossible.
+6. **Retention can never remove audio younger than the retention window, or audio whose derived data isn't safely stored.** It starts in dry-run mode. Live mode needs the user's explicit approval (§7).
+7. **Git and deploys**
+   - Work on branch `feat/api-v2` with small, clear commits and PRs.
+   - **Do not push to `main`, do not deploy to production, and do not change Railway variables or services yourself.** The user merges and deploys.
+   - When a step needs an infrastructure change (new service, region move, env var, bucket privacy), prepare it and ask the user in your report.
+8. **Report at the end of every stage (§16):** what changed, tests, EXPLAIN plans, measurements, risks, and the next step.
+
+---
+
+## 1. Facts about the current system (verified in previous work; re-check them in Stage 0)
+
+**Services and repos**
+- **Backend:** Node.js/TypeScript service "callmeback" on Railway.
+  - Repo `github.com/Abdurahmon-Muxammadjonov/callmeback`; the user's local path is `/Users/macbook/procell-backend`.
+- **Frontend:** Next.js repo "prosell" on Vercel. It calls this API.
+- **DB and storage:** Supabase Postgres and Supabase Storage.
+
+**Ingestion pipeline**
+1. UTel webhook (`src/routes/utel-webhook.ts`).
+2. WAV → MP3 at 24 kbps, mono, 16 kHz.
+3. STT via `sales-ai-front.vercel.app` (`src/lib/salesAiClient.ts`; the base URL is hardcoded around line 17). The upstream provider is unknown.
+4. GPT-4o-mini analysis.
+5. The `calls` row is updated.
+
+**Queue**
+- Runs inside the API process, 8 in parallel (`UTEL_BATCH=8`).
+- Work hours are 09:00–23:00 Asia/Tashkent.
+- Per-operator daily audio limit `OPERATOR_DAILY_AUDIO_LIMIT_SEC=3600`. Rows with status `requeued` are exempt; that exemption is durable through processing, failed, stt_suspect and restart.
+
+**The `calls` table**
+- Statuses: `done`, `processing`, `failed`, `stt_suspect`, `requeued`.
+- Scores are stored **0–100**; API v2 exposes them as 0–10 (`Score10`).
+- Columns include `key_moments` (kind `good|bad|neutral`), `is_problem`, `problem_severity`, `problem_reason`, `operator_ext`, `client_phone`, `direction`, `audio_url`, `created_at`, `company_id`, `manager_id`, `duration` and the count fields.
+- `operator_ext` has been saved only since **2026-09-23 ~18:30** (Tashkent). Earlier calls are "Aniqlanmagan".
+
+**STT circuit breaker** (`src/lib/sttHealth.ts`, 9 tests)
+- Window: the last 20 calls of 20 s or longer. If ≥ 70% came back as empty text, the queue pauses and calls get `stt_suspect`.
+- A probe runs every 10 min, and a Telegram alert fires after 30 min of silence during work hours.
+- Env vars: `STT_HEALTH_WINDOW`, `STT_EMPTY_THRESHOLD`, `STT_HEALTH_MIN_DURATION_SEC`, `STT_PROBE_INTERVAL_MS`, `STT_ALERT_AFTER_MS`.
+- The normal empty-text rate is 14.7–19.7%.
+
+**GPT write whitelist** (`analyze-call.test.ts`, 6 tests)
+- GPT output can never write factual fields: `duration`, `incoming_count`, `outgoing_count`, `total_calls`, `unanswered_count`, `client_phone`, `operator_ext`, `created_at`, `audio_url`, `direction`, `company_id`, `manager_id`.
+
+**Requeue tooling:** `scripts/requeue-stt.mjs` and `scripts/requeue-progress.mjs` (JSON backup before writing, `--limit`).
+
+**Analytics today**
+- There is no `daily_stats` table. Analytics are computed live from `calls` with a 60 s cache.
+- The staff-stats endpoint calls GPT inside a GET request, taking 6.5–7.4 s.
+- A DB round-trip (`SELECT 1`) measured ~229 ms from the API: cross-region. The Railway edge is lhr1; the Supabase region is unknown.
+
+**Integrations:** amoCRM, OnlinePBX (legacy), and two Telegram bots (a client bot and an admin/alerts bot).
+
+**Tests:** 21 passing. They must stay green.
+
+**Deploy rules**
+- Production deploys only from `main` via GitHub. `railway up` is for emergencies only and is always followed by a merge to `main`.
+- The Railway GitHub source connection was broken ("Could not load branches / Auto deploy unavailable"). Until the user confirms it is fixed, **any env var change can redeploy an old commit**, so don't touch variables.
+
+---
+
+## 2. Guardrails: never break these
+
+| # | Guardrail |
+|---|---|
+| G1 | `UTEL_BATCH=8` and `OPERATOR_DAILY_AUDIO_LIMIT_SEC=3600` stay. Only `requeued` rows are exempt from the limit. |
+| G2 | The circuit breaker and requeue semantics are unchanged (they may move to the worker; the behaviour stays identical). |
+| G3 | The GPT whitelist holds. Add new factual fields (`local_day`, `local_hour`, `peaks`, `audio_*`, `reason_key`) to the protected list, with tests. |
+| G4 | Migrations are additive and idempotent. Build indexes with `CREATE INDEX CONCURRENTLY`. Backfills are batched (≤ 2 000 rows per statement), resumable, and throttled during work hours. No long locks on `calls` between 09:00 and 23:00. |
+| G5 | Secrets live only in env and are never logged. This includes signed URLs, API keys and full phone numbers (log the last 4 digits only). |
+| G6 | v1 responses are unchanged, with two exceptions: remove GPT from the staff-stats GET (§6.5), and return `audio_url: null` for removed audio (§7.5). |
+| G7 | All times use `Asia/Tashkent` (UTC+5, no DST) for day, hour and week boundaries. Store timestamps as `timestamptz`. |
+
+---
+
+## 3. Target architecture
+
+**API service** (existing, keep the current framework)
+- Serves v1 and v2, SSE and signed URLs. It must never run CPU-heavy work on its event loop.
+
+**Worker service** (new Railway service from the same repo, started with `ROLE=worker`; needs the user's approval, §16 Stage 7)
+- Runs the transcription queue and all background jobs:
+  - stats rollups (hourly and daily)
+  - amoCRM sync
+  - peaks
+  - reports
+  - retention
+  - insights
+  - signals
+  - notifications
+- Until it is approved, run the jobs inside the API process under a Postgres advisory-lock leader, with low concurrency. Run CPU work (ffmpeg, PDF, XLSX, ZIP) in child processes or `worker_threads`, never on the main loop.
+
+**Jobs**
+- Use a Postgres-backed queue (`pg-boss` or `graphile-worker`): durable, retryable, no Redis.
+- Schedules are defined in `Asia/Tashkent` and executed by exactly one leader.
+
+**Events**
+- The app emits `NOTIFY sp_events, '<json>'` on relevant changes.
+- Each API instance `LISTEN`s and fans events out to its SSE clients.
+- Events emitted by the worker therefore reach every API instance.
+
+**Storage**
+- The existing audio bucket gains a `trash/` prefix for retention (§7).
+- A new private bucket `reports` holds generated files.
+
+---
+
+## 4. Data model changes (additive, lock-safe migrations)
+
+The sketches below show intent. Adapt names to the existing schema and document the final DDL in the PR.
+
+**Lock safety.** `calls` is hot: UTel writes to it all day.
+- Never add a `GENERATED … STORED` column or an immediately-validated constraint to it. Both rewrite or scan the table under an exclusive lock.
+- Add CHECK constraints as `NOT VALID` and `VALIDATE` them later. Validation takes a weaker lock.
+- Run DDL after 23:00 Tashkent. Build indexes with `CREATE INDEX CONCURRENTLY`.
+
+```sql
+-- 4.1 calls: new columns (all nullable or with constant defaults, so no table rewrite)
+ALTER TABLE calls
+  ADD COLUMN IF NOT EXISTS local_day          date,          -- Tashkent date of the call's start time
+  ADD COLUMN IF NOT EXISTS local_hour         smallint,      -- 0..23 Tashkent
+  ADD COLUMN IF NOT EXISTS reason_key         text,          -- Appendix A.5 key, or internal 'unknown'
+  ADD COLUMN IF NOT EXISTS score10            numeric(3,1),  -- maintained by trigger from the 0–100 score column
+  ADD COLUMN IF NOT EXISTS client_phone_rev   text,          -- reversed digits, for fast suffix search
+  ADD COLUMN IF NOT EXISTS peaks              smallint[],    -- 200 values 0..100
+  ADD COLUMN IF NOT EXISTS peaks_status       text,          -- 'ok' | 'failed' | null
+  ADD COLUMN IF NOT EXISTS peaks_attempts     smallint NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS transcript_segments jsonb,        -- [{speaker,start,end,text}] when STT returns segments
+  ADD COLUMN IF NOT EXISTS audio_path         text,          -- storage key of the MP3 we control
+  ADD COLUMN IF NOT EXISTS audio_bytes        integer,
+  ADD COLUMN IF NOT EXISTS wav_path           text,          -- storage key of a kept WAV original, if any
+  ADD COLUMN IF NOT EXISTS wav_bytes          integer,
+  ADD COLUMN IF NOT EXISTS audio_received_at  timestamptz,   -- when the audio file reached us (arrival)
+  ADD COLUMN IF NOT EXISTS provider_audio_url text,          -- only for audio hosted solely at the telephony provider
+  ADD COLUMN IF NOT EXISTS retention_released_at timestamptz, -- set only by scripts/retention-held.mjs --release
+  ADD COLUMN IF NOT EXISTS audio_state        text NOT NULL DEFAULT 'available',
+  ADD COLUMN IF NOT EXISTS audio_trash_path   text,
+  ADD COLUMN IF NOT EXISTS wav_trash_path     text,
+  ADD COLUMN IF NOT EXISTS audio_trashed_at   timestamptz,
+  ADD COLUMN IF NOT EXISTS audio_removed_at   timestamptz,
+  ADD COLUMN IF NOT EXISTS audio_keep         boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS audio_keep_by      uuid,
+  ADD COLUMN IF NOT EXISTS audio_keep_at      timestamptz;
+ALTER TABLE calls ADD CONSTRAINT calls_audio_state_chk
+  CHECK (audio_state IN ('available','trashing','trashed','expired','missing')) NOT VALID;   -- VALIDATE later
+```
+
+The API maps `trashing` and `trashed` to `expired`, because users can't play either.
+
+**Write path for derived columns.** This is required; without it, new calls are invisible to "today" pages.
+
+- A `BEFORE INSERT OR UPDATE` trigger `calls_derive()` sets:
+  - `local_day` and `local_hour` from the call's start time (`AT TIME ZONE 'Asia/Tashkent'`);
+  - `client_phone_rev`;
+  - `score10 = round(score/10.0, 1)`;
+  - `reason_key = reason_key_of(<reason text>)`, where `reason_key_of` is a SQL function holding the mapping table.
+- A second trigger (or the same one) inserts into `stats_dirty_days` when a row with `local_day < today` changes its status, score, duration, money or reason.
+- Ingestion code sets `audio_path`, `audio_bytes`, `wav_path`/`wav_bytes` (if a WAV is kept), `audio_received_at = now()` at upload, and `peaks` (§8).
+- Tests cover all of these for insert and update.
+
+**Indexes** (all `CONCURRENTLY`; check each against EXPLAIN on production-size data):
+
+| Index | Purpose |
+|---|---|
+| `(company_id, local_day, created_at DESC, id DESC)` | lists and keyset pagination |
+| `(company_id, local_day, operator_ext)` | per-operator aggregates |
+| `(company_id, local_day, status)` | status filters |
+| `(company_id, local_day) WHERE score IS NOT NULL` | rated subsets |
+| `(company_id, local_day, audio_received_at) WHERE audio_state = 'available' AND audio_keep = false` | the retention scan |
+| `(company_id, client_phone_rev text_pattern_ops)` | suffix search as prefix `LIKE` on reversed digits |
+| `GIN (to_tsvector('simple', coalesce(transcript,'')))` | full-text `q` (adapt to the transcript column) |
+
+**Per-company settings** (a new table `company_settings`, one row per company):
+
+| Column | Purpose |
+|---|---|
+| `long_call_sec`, `daily_long_calls_norm`, `target_score10`, `target_conversion_pct`, `low_score_threshold10` | norms |
+| `work_hour_from`, `work_hour_to` | work hours |
+| `audio_retention_months smallint NOT NULL CHECK (audio_retention_months BETWEEN 1 AND 12)` | retention period |
+| `retention_mode text NOT NULL DEFAULT 'dry_run' CHECK (retention_mode IN ('off','dry_run','live'))` | **per company** |
+| `keep_limit int NOT NULL` | keep cap |
+| `daily_report_time time NOT NULL` | the preliminary daily report, e.g. 21:00 |
+| `accent text CHECK (accent IN ('lime','blue','coral','violet'))` | brand |
+| `labels jsonb` | `{uz:{leads:{plural,singular,short}, offers:{…}, deals:{…}}, ru:{…}}`, e.g. offers.plural = "O‘quv markazga taklif" |
+| `rules jsonb` | thresholds for signals and insights (§6.3); these are business values, not code |
+| `operator_ext_tracked_since timestamptz`, `first_data_day date` | history markers |
+
+**System settings** (a single row):
+
+| Column | Purpose |
+|---|---|
+| `retention_enabled boolean NOT NULL DEFAULT true` | global kill switch |
+| `default_company_settings jsonb` | the defaults, stored in the DB |
+
+- **Seed:** every existing company gets values from what is currently hardcoded in the code and from its existing config.
+- **New companies:** on creation, copy `default_company_settings` in the same transaction, so `/me` and the jobs always find a row.
+- Every read goes through one cached `getCompanySettings(companyId)`, invalidated on write.
+
+**New tables**
+
+- **`call_hourly_stats`** — primary key `(company_id, day, hour, operator_ext)`. `operator_ext = ''` means unmapped. Columns:
+  - calls, inbound, outbound, talk_sec, duration_sum, long_calls
+  - rated, score10_sum, low_score
+  - bonus_sum, penalty_sum
+  - reasons (jsonb key → count)
+
+  These rows serve same-window comparisons.
+- **`call_daily_stats`** — the same metrics per `(company_id, day, operator_ext)`, for fast multi-day ranges.
+- **`operator_criteria_daily`** — `(company_id, day, operator_ext, criterion_id)` with n, pct_sum, fail_n (pct < 50) and lost_points_sum.
+- **`crm_daily_stats`** — `(company_id, day, operator_ext)` with leads, offers, deals and uncontacted_leads.
+- **`crm_funnel_snapshot`** — `(company_id, month)`, holding stages jsonb and updated_at.
+- Both CRM tables are filled by an **amoCRM sync job**, every 5 min during work hours and hourly otherwise. GET handlers never call amoCRM.
+- **`stats_dirty_days (company_id, day, stats_done_at, reports_done_at)`** — filled by the trigger.
+  - A **rollup reconciliation job every 5 minutes** recomputes the hourly and daily rollups for rows where `stats_done_at IS NULL`. It then sets `stats_done_at`, bumps `history_version` and emits `stats.changed {scope:'past', days}`.
+  - The 02:00 report job rebuilds reports for rows where `reports_done_at IS NULL` (§9.3).
+  - Rows are deleted once both timestamps are set.
+- **`stats_versions`** — `(company_id PK, live_version bigint, history_version bigint)`, stored in the DB and mirrored in memory via NOTIFY (§6.1).
+- **`notifications`** — id, company_id, audience (`all` | user_id | `role:owner,admin`), severity, key, params jsonb, target jsonb, dedupe_key, created_at. There is a unique constraint on `(company_id, dedupe_key)`. A separate `notification_reads (notification_id, user_id, read_at)` table tracks reads.
+- **`reports`** — id, company_id, type, kind, from_day, to_day, locale, final, status, progress, data jsonb, summary jsonb, files jsonb (`[{format, path, size}]`), created_by, created_at, updated_at, version, error. There is a unique index on `(company_id, type, from_day, to_day, kind, locale) WHERE type <> 'custom'`.
+- **`report_bundles`** — id, company_id, created_by, report_ids uuid[], format, status, progress, path, size, created_at, error.
+- **`audio_retention_runs`** — id, company_id, started_at, finished_at, mode, cutoff, candidates, removed, purged, bytes_freed, held, errors jsonb, summary jsonb.
+- **`operator_insights`**, if it doesn't exist yet — company_id, operator_ext, items_uz jsonb, items_ru jsonb, generated_at, based_on_calls.
+- **`audit_log`** — company_id, user_id, action, entity, before jsonb, after jsonb, at. Records keep toggles, norms changes, brand changes, retention-mode changes, report deletions and restores.
+
+---
+
+## 5. Backfills
+
+Each backfill is a script in `scripts/`. Every script:
+
+- is resumable (it checkpoints the last id or day);
+- supports `--dry-run`, `--company`, `--from` and `--to`;
+- prints progress;
+- **runs only between 23:00 and 09:00** (or on the worker service at low priority). Batches are ≤ 2 000 rows per statement.
+
+**Order**
+
+1. `local_day`, `local_hour`, `client_phone_rev`, `score10` and `reason_key` for every call.
+   - The mapping covers every existing reason text (log the unknown ones as `unknown`).
+   - Then `VALIDATE` the constraints.
+2. **Audio locations.** For every call, derive `audio_path`, `wav_path`, the byte sizes and `audio_received_at` from `audio_url` and the storage listing. Use `created_at` as `audio_received_at` when nothing better exists.
+   - Check existence by listing storage prefixes in batches, not with one request per object.
+   - Audio that lives only at a provider URL (UTel / OnlinePBX) → leave `audio_path` null and store the URL in `provider_audio_url`. Retention handles it (§7.3).
+   - **Marking objects `missing` is guarded.**
+     1. Run the script in `--dry-run` first and report "not found" counts per company.
+     2. If more than 5% of a company's objects are "not found", stop for that company. A wrong bucket or path pattern is far more likely than real loss. Report it.
+     3. Otherwise mark `missing` only after a second, independent pass on another night confirms the absence.
+3. Seed company settings, `operator_ext_tracked_since` (the first `created_at` with a non-null `operator_ext`) and `first_data_day`.
+4. `call_hourly_stats`, `call_daily_stats`, `operator_criteria_daily` and the first CRM sync for the full history. Verify that the totals equal the live aggregates for 5 random days per company.
+5. `peaks` for every call whose audio is available (§8), oldest first, so calls near the retention cutoff are done first.
+6. The reports archive: final daily, weekly and monthly JSON snapshots for every period since each company's first call, in `uz` and `ru` (§9). Files are built lazily.
+
+---
+
+## 6. API v2: implementation rules
+
+### 6.1 General
+
+- **Layout.** `src/v2/` contains `routes/`, `schemas/` (zod, the single source for OpenAPI), `queries/`, `definitions.ts` and `cache.ts`. Generate OpenAPI with `@asteasolutions/zod-to-openapi` or similar, and serve it at `/api/v2/openapi.json`.
+- **Request pipeline:**
+  1. Auth.
+  2. Resolve the company (the existing mechanism).
+  3. Validate query and body with zod: 400 on failure.
+  4. Handler.
+  5. Validate the response with zod (in tests and development).
+  6. Compress: brotli level 4 or gzip 6. Never compress SSE.
+  7. Set the `ETag`.
+  8. Add `Server-Timing: total;dur=…, db;dur=…, cache;desc=hit|miss`.
+- **Versions.** `stats_versions` has two counters per company, stored in the DB so they survive restarts and are shared by all instances:
+  - `live_version`: bumped by any change to calls whose `local_day` is today, and by settings changes.
+  - `history_version`: bumped when a dirty past day is reconciled, and by settings changes.
+
+  Every bump sends `NOTIFY sp_events`. Instances keep a copy in memory, refreshed by LISTEN, with a 30 s safety re-read.
+- **ETag** = hash of company_id, role, endpoint, normalized params, locale and the relevant version, plus **user_id** in two cases:
+  - every route whose output depends on the user: `/me`, `/badges`, `/notifications`, preferences and keep;
+  - **every route when the role is `operator`**, because their rows are filtered to their own calls.
+
+  The relevant version is:
+  - fully past ranges: `history_version`;
+  - ranges that contain today: `live_version` plus `history_version`.
+
+  `If-None-Match` with a matching ETag returns 304 without running any query.
+- **Response cache.** An in-process LRU keyed by the same tuple as the ETag, including user_id where the ETag has it. **Company and role are always part of the key; tests prove bodies are never shared across companies, roles or operator users.**
+  - TTL 15 s for today ranges; 24 h for past ranges, which are corrected by the version.
+- **SSE `stats.changed`.**
+  - `{scope:'today', days:[today]}` on live changes, throttled to 5 s.
+  - `{scope:'past', days}` when dirty past days are reconciled.
+- **Localization.** `Accept-Language: uz|ru` selects the locale. Generated sentences (`Msg.text`) come from a server-side catalog, `src/v2/i18n/{uz,ru}.ts`. Numbers are formatted the same way as the frontend: U+202F thousands separator, U+2212 minus, and "." (uz) or "," (ru) as the decimal separator.
+- **Performance shape.** Each page endpoint runs its block queries in parallel (`Promise.all`) on the shared pool.
+  - Past days come from the daily and hourly rollups.
+  - Today comes from `calls`, via the `local_day` index.
+  - Same-window comparisons use hourly rollups for full hours, plus a raw indexed scan of only the current partial hour of the comparison days.
+  - No N+1 queries, no per-row subqueries, and no sequential scans on `calls`.
+- **Outbound HTTP.** No GET handler makes outbound HTTP calls (LLM, STT, amoCRM, Telegram). The one exception is Supabase Storage URL signing.
+
+### 6.2 Definitions (`src/v2/definitions.ts`, the single source, unit-tested)
+
+- **Call time.** The column the current app treats as the call's start. `local_day` and `local_hour` are derived from it.
+- **Long call.** `duration > norms.longCallSec`, strictly, matching the UI label ">60 s". If the current app used `>=`, note the numeric difference in your report.
+- **Rated / analyzed.** `score IS NOT NULL`. Not analyzed = total − rated.
+- **Low score.** `score10 < norms.lowScoreThreshold10`.
+- **Pending.** DB `processing`, `requeued` (and any waiting state) or `stt_suspect`. The status mapping to API values is in Appendix A.3.7.
+- **Operators.**
+  - Configured operators = the company's active operators (Operatorlar settings).
+  - The **team** for a range = operators with ≥ 1 call in the range.
+  - Active operators = |team| ÷ configured.
+- **Working days in a range.** Days with ≥ 1 company call, up to today.
+  - `normTarget` = `dailyLongCallsNorm × workingDays` (day = 1).
+  - `meetsNorm` = `longCalls >= normTarget`.
+  - Lagging = team members with `!meetsNorm`. `lagging.top` = the 3 with the largest deficit.
+- **Same-window rule.** If a range contains now, `cutoff = now`. Each previous-period value only counts calls whose time-of-period offset ≤ the elapsed offset:
+  - day: time of day;
+  - week: day-of-week plus time;
+  - month: day-of-month plus time.
+
+  For "previous 7 days average" comparisons, each day is cut at the same clock time.
+- **Hour buckets for a day.** `workHours.from … workHours.to` inclusive, widened to include any hour that has calls. Future buckets return `count: null`. `isCurrent` marks the bucket containing now.
+- **Load intervals.** 3-hour bands over the same hour set, with `to` exclusive (9–12 … 21–24; the last band may be shorter). Every bucket hour belongs to exactly one band.
+- **Leads, offers, deals, uncontacted leads.** Keep the current definitions and sources, now read from the CRM sync tables. Document them in `definitions.ts`. Return `null` when the source is unavailable, e.g. amoCRM is not connected.
+- **Conversion.** deals ÷ leads × 100. The current app's definition wins if it differs. Document which.
+- **Criterion lost points** (score10 scale).
+  - For criterion i with weight wᵢ (total W; use equal weights if the company has none), one call's lost points = `10 × wᵢ/W × (1 − pctᵢ/100)`.
+  - `lostPoints` = the average over rated calls in the range.
+  - `callsWithError` = the count with pct < 50.
+  - Top errors = the top 3 by `lostPoints`. The operator card's `topError` = the top 1.
+- **Pulse indices.** The formulas are in Appendix A.3.3. The status thresholds are the frontend's concern.
+- **Negatives.** Each item carries the exact `DeepLink` that lists the counted calls. Tests verify that for every non-null `target`, the link's `/calls` total equals the metric.
+
+  | Key | Definition | Link |
+  |---|---|---|
+  | bad_audio | reason `bad_audio` | `audio?reason=bad_audio` |
+  | penalties | money < 0 | `audio?money=penalty` |
+  | short | reason `short` | `audio?reason=short` |
+  | no_answer | reason `no_answer` | `audio?reason=no_answer` |
+  | bad_leads | the current app's definition | a `CallsFilter` if expressible, otherwise `target: null` |
+
+  Every link covers today's date range.
+- **Load tip.** Uses `rules.loadTipSharePct` (seed 30). When the top band's share is ≥ that value, return `load.tip.peak_band {share, from, to}` → "Qo‘ng‘iroqlarning {share}% shu {n} soatda — shu oraliqqa ko‘proq operator qo‘ying." Otherwise null.
+- **`lowestCallId`.** The lowest-score rated call in the range whose audio is available; otherwise the lowest overall; otherwise null.
+- **`expiresAt`.** Computed as Appendix A.3.1 defines it.
+- **`expiringNext7Days` and `expiringLink`.** Use `CallsFilter.expiringBefore = now + 7 days` with `audio=available`, `keep=false` and the full range `from=firstDataDay&to=today` (exact shape in A.3.1). A golden test checks that the link's `/calls` total equals `expiringNext7Days`.
+- **`restorableUntil`.** `audio_trashed_at + 7 days` while the state is `trashed`, otherwise null.
+- **`keep_limit`.** Read from company settings.
+
+### 6.3 Signals engine (rule-based, no LLM; thresholds from `company_settings.rules`)
+
+It runs every 5 minutes during work hours, plus after `stats.changed` (debounced 60 s). It upserts today's signals (one per rule per company per day, via `dedupe_key`). A new or escalated signal also creates a notification.
+
+The seed values below go into `default_company_settings.rules` and are copied per company. **They are data, not code.**
+
+| Rule key | Condition (today, same window) | Severity | Metric shown | Target |
+|---|---|---|---|---|
+| short_spike | short ≥ `spikeMinCount` (20) and ≥ +`spikePct` (30)% vs the previous 7-day average | bad | "+34%" | audio?reason=short |
+| no_answer_spike | the same test for no_answer | bad | "+x%" | audio?reason=no_answer |
+| lagging_team | after `laggingAfterHour` (15), lagging ≥ `laggingTeamPct` (50)% of the team | bad | "10/12" | analytics?team=behind |
+| quality_low | team average < target − `qualityGap` (2.0) | warn | "3.4" | staff?range=today |
+| penalties_up / penalties_down | change ≥ `penaltyChangePct` (30)% and ≥ `penaltyMinCount` (3) vs yesterday | bad / good | "−56%" | audio?money=penalty |
+| stt_paused | the circuit breaker is open | bad | "STT" | status (no date = today) |
+| conversion_low | month-to-date conversion < `conversionWarnRatio` (0.7) × target | warn | "14.6%" | control |
+| calls_up | calls ≥ +`callsUpPct` (20)% vs yesterday, same window | good | "+87%" | analytics |
+
+Title and detail are `Msg`s with params. A detail lists up to 3 extensions plus "va yana {n} kishi". The control page returns the top 4, sorted by severity (bad → warn → good) and then by magnitude.
+
+`rules` also holds `insightMinRated` (5), `weakestMinRated` (5) and `criterionFailPct` (50), used in §9 and §10.
+
+### 6.4 Endpoints, one by one (see Appendix A for the shapes)
+
+- **`/me`, `/badges`, `/dictionaries`** — tiny cached queries.
+  - `badges.audioLowToday` = today's calls with score10 < low threshold.
+  - `sttPaused` comes from the breaker state.
+  - `features.reports` = role ∈ {owner, admin, rop}.
+  - `labels` are returned in the request locale.
+  - `/dictionaries` has an ETag and a 5-minute cache. Criteria include `shortLabel`, from company config or null.
+- **`/pages/analytics`**
+  - Today and current-period values are computed live; historical buckets come from rollups.
+  - `leads`/`offers` series come from `crm_daily_stats`, with keys and labels at the same granularity as `dynamics`.
+- **`/pages/control`**
+  - Pulse, KPIs, negatives (with `last7` from hourly rollups plus live today), load, the funnel (from `crm_funnel_snapshot`) and signals (from the table).
+  - `view=macro|rop` returns `ControlMacroView` / `ControlRopView`. Define them in openapi.json during Stage 2 and tell the user so the frontend can build them.
+- **`/pages/compare`** and **`/compare/breakdown`**
+  - Metrics follow the same-window rule when b contains now. `talkSec` is in seconds.
+  - The series for a returns in full. The series for b is null after now.
+  - `insight` rules:
+    - same peak bucket → "Ikkala kunda ham cho‘qqi {h}:00 da";
+    - otherwise → "Cho‘qqi: {A} — {ha}:00, {B} — {hb}:00";
+    - then append a volume phrase when the ratio is ≥ 1.5 ("deyarli ikki barobar" for 1.8–2.2, else "{r} barobar ko‘p") or ≤ 0.67 ("{r} barobar kam").
+  - `days` come from rollups. `operatorCalls` = calls with a non-null `operator_ext`.
+- **`/pages/staff`** and **`/staff/{ext}`**
+  - Everything is computed with SQL from rollups plus live data.
+  - `history7` = daily score10 averages for the 7 days ending at the range end.
+  - `fixes` come from `operator_insights` (no LLM here).
+- **`/pages/status`**
+  - `segments` use the precedence in A.3.6 and sum exactly to the total. Tested.
+  - For each segment, the mapped `/calls` filter's total equals the segment count. Tested.
+- **`/calls`**
+  - Keyset pagination. The cursor is base64 JSON `{sort, lastValues, lastId, offset}`. Sorts: `time_desc`, `time_asc`, `score_asc`, `score_desc`, `duration_desc`, `duration_asc`, each with an `id` tie-break.
+  - `total`, `counts` and `kpi` come from one aggregate query with `FILTER` clauses. They are cached for 15 s per filter set, so they are cheap on every page.
+  - `kpi.previous` follows the same-window rule. For custom ranges, it uses the same-length window just before.
+  - **`q` parsing:**
+    - all digits and length ≤ 5, matching an operator ext → ext filter;
+    - all digits and length ≥ 4 → phone suffix via `client_phone_rev LIKE reverse(q)||'%'`;
+    - otherwise → `plainto_tsquery('simple', q)` against the transcript index.
+  - `criterion` → calls whose criterion pct < `rules.criterionFailPct`.
+  - `include=peaks` → `peaks60`, max-pooled from `peaks` (in SQL or in the app, vectorized).
+  - List params are comma-separated.
+- **`/calls/{id}`**
+  - One query plus a criteria join.
+  - The criteria labels and categories are the snapshot stored with the analysis when available, otherwise the current ones.
+  - `clientPhone` is masked for role `operator` (e.g. `+998 ** *** 12 34`).
+  - `dayAvgScore10` is the company average for that call's `local_day`.
+- **`/calls/{id}/transcript`** — segments from `transcript_segments` when present; otherwise a single segment with `speaker: null, start: null, end: null`.
+- **`/calls/{id}/audio-url`**
+  - Supabase `createSignedUrl(audio_path, 900)`.
+  - When `audio_path` is null but `provider_audio_url` is set and the state is `available`, return the provider URL with `expiresAt` = now + 15 min (today's v1 behaviour).
+  - 410 `audio_expired` for `trashing`, `trashed` or `expired`; 404 `audio_missing` when there is no object and no provider URL.
+  - Never log the URL.
+  - Rate limit: 60 per minute per user.
+- **`PUT /calls/{id}/keep`**
+  - Allowed for owner, admin and rop. Enforce the company `keep_limit` (409 `keep_limit`).
+  - `keep=true` on a `trashed` call first restores the object from trash (§7.3), then keeps it.
+  - 410 once the audio has been purged (`expired`).
+  - Writes `audit_log` and returns the new audio state.
+- **Notifications** — list the audience-visible items with their read state; mark read. Keep items 90 days.
+- **Settings** — `PATCH /company/norms` validates the ranges; lowering `audioRetentionMonths` requires `confirm: true` (409 `confirm_required` otherwise). Writes `audit_log`. Bumps both versions.
+- **Preferences, session and company**
+  - `PATCH /me/preferences` stores locale and theme per user.
+  - `POST /company/switch` uses the existing company-switch mechanism and must check membership.
+  - `PATCH /company/brand` (owner/admin) writes `audit_log` and bumps the versions so `/me` ETags change.
+  - `POST /auth/logout` is the existing logout; keep its path if it differs and document it in openapi.json.
+- **`/company/retention-preview`** (owner/admin) — the count and byte sum that the next run would remove under N months (same eligibility SQL as §7.2, run in dry mode).
+- **`/retention/status`** (owner/admin/rop) — this company's mode, the last run and the counters, plus `expiringLink`.
+- **Reports endpoints** — see §9. Role-gated to owner, admin and rop (403 otherwise).
+
+### 6.5 staff-stats v1 fix (quick win, Stage 1)
+
+Remove the GPT call from the v1 staff-stats GET. Serve the same response fields, with the AI text read from `operator_insights`, or null when not yet generated.
+
+---
+
+## 7. Audio retention: the 2-month rule (the user's key requirement)
+
+> "Audio that arrives today is removed automatically 2 months later. Only audio older than 2 months is ever removed — never everything. In place of the audio we keep the reports and the analysis."
+
+### 7.1 Rule and cutoff
+
+- **Setting:** `company_settings.audio_retention_months`, default **2**, allowed 1–12. Only owner/admin can change it (`PATCH /company/norms`), and lowering it requires confirmation.
+- **What is removed:** only audio bytes stored in our storage — the MP3 (`audio_path`) and a kept WAV original (`wav_path`).
+- **What is kept forever:**
+  - the call row and its metadata;
+  - transcript text and segments;
+  - analysis, score, criteria, errors, strengths and improvements;
+  - key moments, summary, money, problem flags;
+  - waveform `peaks`;
+  - every report.
+- **Cutoff, per company, computed in SQL at run time:**
+  `cutoff_day = ((now() AT TIME ZONE 'Asia/Tashkent')::date - make_interval(months => m))::date`
+  - This is calendar months. PostgreSQL clamps month ends (30 Apr − 2 months = 28 Feb).
+  - A call must satisfy BOTH `local_day < cutoff_day` AND `(audio_received_at AT TIME ZONE 'Asia/Tashkent')::date < cutoff_day`. A recording uploaded or re-synced late is therefore never removed early.
+  - Example: a call that arrived on 27 Sep is removed in the run of 28 Nov. It is never removed earlier than 2 months, and at most about a day later.
+
+### 7.2 Eligibility (all conditions, written as one SQL predicate in `src/retention/eligible.sql` and unit-tested)
+
+```sql
+-- a call is ELIGIBLE when all of these hold
+local_day < :cutoff_day
+AND (audio_received_at AT TIME ZONE 'Asia/Tashkent')::date < :cutoff_day
+AND audio_state = 'available'
+AND audio_keep = false
+AND (
+      ( status = 'done'
+        AND ( (score IS NOT NULL AND transcript IS NOT NULL AND <analysis payload> IS NOT NULL)   -- analysed, results persisted
+           OR (score IS NULL AND reason_key IN ('no_answer','short','callback_later','wrong_number','bad_audio','hung_up','not_sales')) ) )
+             -- skipped for a KNOWN reason where no analysis is expected
+   OR retention_released_at IS NOT NULL   -- a held call the user explicitly released (audit_log entry required)
+    )
+AND peaks_status IS NOT NULL   -- 'ok', or 'failed' after 3 decode failures (§8); Phase A's step 0 computes missing peaks first
+```
+
+The predicate does not require `audio_path`. Provider-only audio (`provider_audio_url`) is eligible under the same rules.
+
+Every other old call is **held**, never removed:
+
+- `processing`, `requeued` or `stt_suspect`;
+- `failed`;
+- `reason_key` of `daily_limit` (never analysed because of the quota), `stt_failed` or `unknown`;
+- `done` without a score or a known reason.
+
+Handling held calls:
+
+- They are counted in `held` and listed in the run summary.
+- Owner/admin get a notification: "{n} ta eski qo‘ng‘iroq tahlilsiz qolgan — audio o‘chirilmadi".
+- `scripts/retention-held.mjs` has these modes:
+  - `--list` shows them;
+  - `--requeue` sends them to analysis (status `requeued`, low priority);
+  - `--release --before=YYYY-MM-DD` sets `retention_released_at` (with an `audit_log` entry), which makes them eligible next time. The date conditions still apply.
+
+  The script runs only when the user explicitly asks for it.
+
+### 7.3 Two-phase removal, lock-free, reversible for 7 days
+
+- **Schedule:** nightly at **03:10 Asia/Tashkent**, per company, after reports (00:30–02:00) and outside work hours.
+- **Phase A: move to trash** (batches of 500, storage concurrency 4)
+  0. **Peaks pre-step:** for rows that meet every §7.2 condition except peaks (`peaks_status IS NULL`), compute peaks first (§8). Rows whose peaks still fail are retried on later nights and are never trashed without peaks.
+  1. **Short transaction:**
+     - select the batch with `FOR UPDATE SKIP LOCKED` using the full §7.2 predicate;
+     - set `audio_state='trashing'`;
+     - commit.
+
+     No row lock is held during file work.
+  2. **Outside any transaction:** move `audio_path` to `trash/{run_date}/{audio_path}`; move `wav_path` the same way if present. Provider-only rows have nothing to move.
+  3. **Finalize:** set `audio_state='trashed'`, the trash paths and `audio_trashed_at`.
+     - On a storage error, set the row back to `available`; it is retried next night.
+     - If a keep arrived meanwhile (`audio_keep=true`), move the file straight back and set `available`.
+  4. From `trashing` onward, the API reports `expired` (with `restorableUntil`), and `audio-url` returns 410. This also applies to provider-only audio.
+- **Phase B: purge** (the same nightly run)
+  1. For each row with `audio_state='trashed'` and `audio_trashed_at` < now − 7 days, **row by row using the stored trash paths**, permanently delete the objects. Never delete by listing a prefix.
+  2. Set `audio_state='expired'`, `audio_removed_at`, and null the paths.
+  3. Add `bytes_freed` from `audio_bytes` and `wav_bytes`.
+- **Provider-only audio** (no object in our storage):
+  - Phase A marks it `trashed` exactly like stored audio, so it gets the same 7 days of restorability.
+  - Phase B sets `expired` and nulls `provider_audio_url`.
+  - We cannot delete the provider's copy, and we stop exposing it.
+- **Restore** (within 7 days):
+  - `scripts/restore-audio.mjs --run=YYYY-MM-DD | --call=<id> | --company=<id> [--dry-run]` moves objects back and sets `available`.
+  - `PUT /calls/{id}/keep {keep:true}` restores a single call automatically.
+- **Storage errors and "not found"**
+  - Both count as errors for the breaker.
+  - More than 5% errors in a batch (for example, a wrong bucket or path setting) → stop the company run, alert, change nothing further.
+  - Rows whose object is verifiably absent after 3 nights → `missing`.
+- **WAV files are never deleted at ingestion.** They follow exactly this retention flow via `wav_path`.
+
+### 7.4 Safety breakers (the "never delete everything" guarantee)
+
+| # | Breaker | Behaviour |
+|---|---|---|
+| B1 | Mode gates | A company is processed live only if `system_settings.retention_enabled = true` AND its `company_settings.retention_mode = 'live'`. Every company ships as **`dry_run`**: the run computes and reports but changes nothing. |
+| B2 | Floor | Abort the company run if `m < 1`, if `cutoff_day > today − 28 days`, or if the settings read failed or is null. |
+| B3 | Human-approved, per company | The mode changes only through `scripts/retention-mode.mjs --company=<id> --mode=live`. It prints that company's latest dry-run summary and requires `--yes`. **You never run it without the user's explicit instruction for that company.** |
+| B4 | Anomaly guard | Once a company's backlog is cleared (its last live run had fewer candidates than the cap), abort and alert if the candidates exceed 3× that company's average daily arrivals over the last 14 days. This catches clock, time-zone or setting bugs. The first live run and backlog runs are bounded by B5 instead. |
+| B5 | Per-run cap | At most 20 000 objects or 5 GB per company per night. The remainder continues the next night. |
+| B6 | Idempotency | The state machine `available → trashing → trashed → expired` means re-runs are safe. Each run is recorded in `audio_retention_runs` with its cutoff, counts, bytes and errors. |
+| B7 | Kill switches | `retention_enabled=false` (global) or `retention_mode='off'` (company) stops the next batch. |
+| B8 | Tenant scope | Each run processes exactly one company (`company_id` in every statement). A test proves company A's run never touches company B. |
+
+### 7.5 v1 compatibility
+
+**Before any company goes live,** v1 responses must return `audio_url: null` for calls whose `audio_state` is not `available`, so the old UI never plays a removed file. This is the one allowed v1 change besides §6.5.
+
+### 7.6 Reporting
+
+- Every run (dry or live) writes `audio_retention_runs`.
+- It posts an owner/admin notification with the counts: candidates, moved to trash, purged, bytes freed, held.
+- It sends the existing Telegram admin alert through the current alert helper, e.g. "Audio tozalash (sinov): 12 431 ta fayl · 1.9 GB · 3 ta ushlab qolindi".
+- `GET /retention/status` and `/company/retention-preview` expose the numbers to the UI.
+
+### 7.7 Retention tests (all required)
+
+- Cutoff arithmetic: month ends, the February clamp, the 00:00 / 23:59 local edges, and a late upload (`audio_received_at` after `local_day`).
+- The eligibility predicate: every status, every reason key including `daily_limit`, `stt_failed` and `unknown`, keep, missing transcript, and peaks missing / computed / failed.
+- The lock-free two-phase flow with a fake storage adapter; the peaks pre-step; provider-only audio; the release branch; restore; keep during Phase A; keep of a trashed call.
+- Breakers B1–B8, including the error-rate stop on "not found".
+- Re-run idempotency, and that a dry run changes nothing.
+
+---
+
+## 8. Waveform peaks (so the UI keeps a waveform after the audio is gone)
+
+- **At ingestion**, right after the MP3 conversion and before STT:
+  1. `ffmpeg -i in.mp3 -ac 1 -ar 8000 -f s16le -` streams PCM.
+  2. Split it into 200 equal buckets and take the max |sample| per bucket.
+  3. Normalize to 0–100 with √ compression (`round(100 × sqrt(max/32768))`).
+  4. Store `peaks` (smallint[200]) and `peaks_status='ok'`.
+
+  Every call gets peaks even if analysis fails.
+- **Errors:**
+  - A download or network error is retried later; `peaks_status` stays null.
+  - Only a decode error increments `peaks_attempts`. After 3 decode failures, set `peaks_status='failed'`; the UI then draws a flat line.
+- **Backfill** (§5): oldest first, concurrency 2, only 23:00–09:00 or on the worker.
+- `peaks60` for lists is a max-pool of the 200 values into 60.
+
+---
+
+## 9. Reports archive (the permanent record that replaces audio)
+
+### 9.1 One generator
+
+`src/reports/` builds `ReportData` (Appendix A.3.9) for any `(company, from, to, kind, locale, until?)`. It uses rollups for past days and live data for today.
+
+It is used by:
+
+- the schedules;
+- `POST /reports`;
+- the backfill;
+- `GET /reports` `today` (the live summary);
+- **the Telegram "Hisobot" feature, if it exists.** Refactor it to call the generator so web and Telegram numbers are identical. Keep its delivery logic, its email OTP check (6 digits, 5 minutes, 3 attempts) and its owner/admin/ROP-only access unchanged.
+
+  Do not build new Telegram features in this task.
+
+### 9.2 Content
+
+- `totals`, `reasons`, `operators`, `criteria`, `byDay` (weekly, monthly and custom only).
+- `best`.
+- `weakest` = the lowest score10 among operators with ≥ `rules.weakestMinRated` rated calls in the period (fallback: ≥ 1), with `issues` = their top 3 error labels.
+- `uncontactedLeads` ("Aloqaga chiqilmagan lidlar soni"): from `crm_daily_stats`, or null.
+
+`text` is the Telegram-style plain text. **If the Telegram template exists, it is the source of truth.** Otherwise use:
+
+```
+🚩 {DD/MM/YYYY} hisobot 🚀
+Jami qo‘ng‘iroqlar: {calls} ta ({inbound} kiruvchi · {outbound} chiquvchi)
+Gaplashuv: {H} soat {M} daqiqa · uzun suhbatlar: {longCalls} ta
+Tahlil qilingan: {rated} ta · o‘rtacha ball: {avg}/10
+{labels.leads.plural}: {leads} ta · {labels.offers.plural}: {offers} ta · {labels.deals.plural}: {deals} ta · konversiya: {conv}%
+Normadan orqada: {lagging} ta operator
+Aloqaga chiqilmagan lidlar soni: {uncontacted} ta.
+
+⚠️ {weakest.name}: shu xodimda oqsoqlik kuzatildi — {issues joined by ", "}
+```
+
+Omit lines whose values are null. Emoji is allowed only in this Telegram text, never in the UI chrome or the PDF.
+
+### 9.3 Schedules (Asia/Tashkent), per company, in both `uz` and `ru`
+
+| When | Report | Final? |
+|---|---|---|
+| Daily at `company_settings.daily_report_time` (seeded 21:00, the Telegram report moment) | Today, `until` = that time | `final=false` |
+| 00:30 daily | Yesterday, full day. Overwrites data and files, `version+1`. | `final=true` |
+| Monday 00:45 | Last Monday–Sunday | `final=true` |
+| 1st of month, 01:00 | Last month | `final=true` |
+| 02:00 nightly | Days in `stats_dirty_days` with `reports_done_at IS NULL`: regenerate that day's final report plus its week and month (`version+1`), then set `reports_done_at`. The rollups themselves are reconciled every 5 min (§4). | — |
+
+The list endpoint returns auto reports in the request locale. Custom reports are returned regardless of locale.
+
+**Access:** owner, admin and rop only, for list, view, download and bundle. Other roles get 403.
+
+### 9.4 Files
+
+- **PDF** (pdfkit)
+  - A4 portrait, print-friendly light style: white background, the accent used sparingly for headers and bars.
+  - Embedded Onest and JetBrains Mono TTFs (latin, latin-ext, cyrillic; OFL, committed under `assets/fonts/`).
+  - Footer page numbers.
+- **XLSX** (exceljs streaming writer)
+  - Typed number formats, frozen header row, column widths, localized headers.
+- **Layout by `kind`**
+  - `full`:
+    - PDF: header (company, period, final flag, generated time), KPI grid, reasons, operators table, weakest/best, criteria, per-day chart for multi-day reports.
+    - XLSX sheets: Umumiy, Operatorlar, Sabablar, Mezonlar, Kunlar.
+  - `operators`: the operators table plus per-operator criteria percentages and top errors.
+  - `calls`:
+    - the filter summary at the top, then a paginated table with columns time, operator, direction, duration, result (score, label or reason), money and script;
+    - XLSX sheet "Qo‘ng‘iroqlar";
+    - **CSV** is allowed only for this kind: UTF-8 with BOM, `;` separator, CRLF line endings, localized headers, streamed. Up to 200 000 rows; beyond that `POST /reports` returns 422 `too_many_rows`.
+- **Eager builds:** auto reports (final and preliminary) produce PDF and XLSX eagerly. Backfilled history is JSON-only; files are built on the first download (the 202 flow).
+- **Storage:** private bucket `reports`, path `{company_id}/{type}/{from}_{to}_{kind}_{locale}_v{version}.{ext}`.
+  - Downloads are signed URLs valid 15 min, with `Content-Disposition: attachment; filename="SalesPulse_{company}_{type}_{from}_{to}.{ext}"`.
+- **Bundles:** ZIP (archiver, streaming) of up to 400 reports in one format. Missing files are built inside the job. Progress is emitted as `bundle.updated`. Bundles are stored under `reports/bundles/` and deleted after 24 h.
+- **Work placement:** all generation runs in the worker (or `worker_threads`) with concurrency 2, never in a request. Progress (0–100) is written to the row and emitted as `report.updated`.
+- **Keeping:** reports are kept forever. Custom reports can be deleted by their creator or by owner/admin (`audit_log`).
+
+---
+
+## 10. Operator insights ("TUZATISH YO‘LI"): LLM, strictly off the request path
+
+- **Schedule:** a job at 13:00 and 20:00 on working days, plus 02:30 nightly.
+- **Scope:** each operator with ≥ `rules.insightMinRated` (5) rated calls in the last 7 days.
+- **Input:** their top 3 errors (label, lost points, fail rate) and the summaries of their 5 lowest-scoring calls.
+- **Output:** GPT-4o-mini returns JSON `{uz: string[3], ru: string[3]}`. Each tip is imperative, specific and ≤ 90 characters. Validate with zod.
+- **Storage:** `operator_insights`, with `generated_at` and `based_on_calls`.
+- **Cost guard:** one call per operator per run, and token usage is logged. On failure, keep the previous insight.
+
+---
+
+## 11. SSE and notifications
+
+- **Token.** `POST /events/token` returns an HMAC-signed short token (user, company, exp = 60 min). `GET /events?token=` validates it.
+- **Stream headers:** `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `Connection: keep-alive`, `X-Accel-Buffering: no`. No compression.
+- **Liveness:** a heartbeat comment every 25 s. Clean up on close. At most 5 connections per user.
+- **Payloads:** exactly as Appendix A.4 (`call.created` carries opExt, direction and status; `notification.created` carries the full item; `bundle.updated` is included).
+- **Event sources:**
+  - call insert/update: status, reason, score, audio state, keep and expiry changes;
+  - `stats.changed` (today, throttled to 5 s; past days on reconciliation);
+  - new notifications;
+  - report and bundle progress;
+  - breaker state changes;
+  - badge recomputation, debounced 5 s.
+
+  All are emitted through `NOTIFY sp_events` and fanned out per company and audience.
+- **Notification sources:** signals (§6.3), report and bundle ready (to the creator), retention run summaries and held calls (owner/admin), STT paused/resumed (everyone), and amoCRM disconnected, detected by the sync job. Dedupe per day and rule. Retain 90 days.
+
+---
+
+## 12. Performance: targets and how to hit them
+
+### 12.1 Targets
+
+Measured from the API host on production-size data, with the p95 reported per endpoint. Validate them **after the API is co-located with the database** (§12.2 step 1). Before that, report the measured numbers and the expected gain.
+
+| What | Target |
+|---|---|
+| DB round-trip `SELECT 1` | ≤ 5 ms p95 (hard limit 20 ms). Today it is ~229 ms, which means cross-region. |
+| `/pages/*` | ≤ 150 ms warm, ≤ 400 ms cold |
+| `/calls` | ≤ 120 ms |
+| `/calls/{id}` | ≤ 60 ms |
+| `/me`, `/badges`, `/dictionaries` | ≤ 30 ms |
+| 304 revalidation | ≤ 15 ms |
+| Event-loop lag | p99 ≤ 50 ms while the queue is processing at full batch |
+| Load | 50 RPS mixed traffic on one instance without breaching any p95 above. Provide an autocannon or k6 script in `scripts/load/`. |
+
+### 12.2 How
+
+1. **Region co-location** (the biggest single win; ask for approval in Stage 0)
+   - Find the Supabase project region and the Railway service region.
+   - Add an internal endpoint `/internal/diag/db` (admin-only) that times 20 × `SELECT 1`.
+   - Propose moving the Railway service(s) to the region closest to Supabase, e.g. Supabase eu-central-1 → Railway europe-west4. The user executes the move. Re-measure afterwards.
+2. **Connection pool:** one shared `pg.Pool` with max 10–20, keepAlive, `connectionTimeoutMillis` 2000, and `statement_timeout` 5 s for API queries (longer for jobs). Use the direct or session-pooler connection string for the long-lived server. Never open a client per request. Name the hot prepared statements.
+3. **Rollups for history, and live data only for today** (hourly rollups for same-window work). One SQL statement per block, with `FILTER` aggregates. Blocks run in parallel.
+4. **Response and ETag caching** (§6.1). The target is ≥ 80% cache or 304 hits on page endpoints during work hours.
+5. **No outbound HTTP in GET handlers** (§6.1): no LLM, STT, amoCRM or ffmpeg. Remove GPT from v1 staff-stats (§6.5).
+6. **Queue and jobs off the API** (the worker service; ask for approval in Stage 0, and the user creates it from your runbook): the API runs with `QUEUE_IN_API=false`, and the worker processes the queue with `FOR UPDATE SKIP LOCKED` claiming. The breaker moves with the queue.
+   - Until the worker exists, backfills and heavy jobs run only 23:00–09:00.
+7. **EXPLAIN (ANALYZE, BUFFERS)** for every v2 query on production-size data, pasted in the PR. No sequential scans on `calls`.
+8. **Payload discipline:** only the fields in the contract. `peaks60` only when asked for. Compression is on.
+
+---
+
+## 13. Security and privacy
+
+- **Roles:** keep the current role rules. v2 must never widen access; for example, if operators today see only their own calls, v2 enforces the same rule.
+  - Reports: owner, admin and rop only.
+  - Retention status: owner, admin and rop. Retention preview and settings writes: owner and admin.
+- **Tenant isolation tests for every endpoint:** a company-A token must get 404 for company-B ids, lists must never contain B rows, and cached bodies or 304s are never shared across companies or roles.
+- **Buckets and URLs:**
+  - Signed URLs expire in 15 min. The reports bucket is private.
+  - The audio bucket becomes private after the frontend cutover (Stage 7). This needs the user's approval because v1 may use public URLs.
+- **Rate limits:**
+
+  | Scope | Limit |
+  |---|---|
+  | `q` search | 10 req/s per user |
+  | `POST /reports` | 10 per minute per user |
+  | bundles | 3 per minute per user |
+  | `audio-url` | 60 per minute per user |
+
+- **Staging and previews**
+  - Propose a staging environment in Stage 0: a Railway environment plus a Supabase branch or separate project, with anonymized or test data. The user creates it.
+  - CORS allows the production frontend origin plus the Vercel preview pattern for this project only (e.g. `https://prosell-*-<team>.vercel.app`), and only on staging.
+  - Document how previews authenticate: `SameSite=None; Secure` cookies or bearer tokens.
+- **Other rules:**
+  - All input is validated with zod.
+  - Phone numbers are masked for the operator role and in logs.
+  - `audit_log` covers settings, keep, retention mode, report deletion and restore.
+  - Secrets live only in env. RunPod, OpenAI, Supabase and Telegram keys never appear in logs, code or chat.
+
+---
+
+## 14. Observability
+
+- **Logs:** structured JSON (pino) with request id, route, company id, duration and status. No PII.
+- **Health:** `/health` for liveness; `/ready` checks that DB ping < 50 ms and the job leader is alive.
+- **Metrics** (log-based or a `/metrics` endpoint): per-route latency histograms, pool usage, event-loop lag, cache and 304 hit rate, and job durations and failures (reports, retention, peaks, insights, signals, CRM sync).
+- **Alerts:** job failures, retention breaker trips, report failures and event-loop lag > 200 ms go through the existing Telegram admin alert helper, rate-limited.
+
+---
+
+## 15. Testing
+
+- **Existing tests:** all 21 must stay green, including sttHealth ×9 and analyze-call ×6. Extend the GPT whitelist test with the new factual columns.
+- **Test database:** a Postgres test DB (Supabase local or Docker) seeded deterministically with:
+  - 2 companies and 70+ days of calls;
+  - every status and reason, including `unknown`;
+  - late uploads;
+  - time-zone edges (23:59 / 00:01 Tashkent) and month ends;
+  - unmapped operators before `operator_ext_tracked_since`;
+  - an amoCRM-less company.
+- **Contract:** every v2 response validates against its zod schema. `openapi.json` is generated in CI and diffed.
+- **Golden tests** per page endpoint on the seed:
+  - same-window deltas (hourly rollup plus partial hour);
+  - `normTarget` and lagging; pulse indices;
+  - negatives: every non-null target's `/calls` total equals the metric;
+  - segments sum to the total;
+  - `peaks60` pooling;
+  - cursor pagination with no gaps or duplicates across pages;
+  - cache and ETag isolation across companies and roles.
+- **Derived-column triggers:** insert and update behaviour.
+- **Retention:** §7.7. **Reports:** JSON snapshots and text template; PDF text extraction; XLSX read-back; CSV BOM and separator; 422 above 200k rows; bundle contents; role gating.
+- **SSE:** auth, company isolation, heartbeat, NOTIFY fan-out, payload shapes.
+- **Performance:** each endpoint's p95 on the seeded 200k-call DB is reported in the stage report (run locally, with a CI smoke test).
+
+---
+
+## 16. Stages and reporting (send the user a short report after each)
+
+**Stage 0 — Recon (no code changes).** Report on:
+- the schema of calls, companies, operators, criteria, scripts and amoCRM tables;
+- the status and reason distributions, and every distinct reason text;
+- the current definitions of leads, offers, deals, `bad_leads` and uncontacted leads;
+- **storage**: bucket names, path patterns, public or private, whether WAVs are kept, object count and bytes per company, **how many calls and bytes are older than 2 months per company**, and calls whose audio lives outside our storage;
+- whether the Telegram report exists, and its template;
+- where the norms and business thresholds are hardcoded;
+- the Supabase and Railway regions, the `SELECT 1` p50/p95 and the current endpoint p95s;
+- whether the Railway GitHub source is fixed (ask the user).
+
+**Ask the user for these approvals in the same report:**
+1. The region move.
+2. Creating the worker service.
+3. Creating a staging environment.
+
+For each, prepare a step-by-step runbook (Railway/Supabase clicks, env vars, verification commands). **The user executes it; you never change services or variables yourself** (§0.7). Ideally this happens before Stage 2's performance validation.
+
+**Stage 1 — Foundations:** lock-safe migrations, derived-column triggers, settings with seeding and new-company defaults, `definitions.ts`, backfills 1–4 (at night), the v1 staff-stats GPT removal, and the CRM sync job.
+
+**Stage 2 — Read API:** API v2 read endpoints (including the macro/rop view shapes), OpenAPI, versions, cache and ETag, and the performance pass with EXPLAIN plans. **Give the user `openapi.json` to pass to the frontend engineer.**
+
+**Stage 3 — Live data:** SSE, notifications, the signals engine and the insights job.
+
+**Stage 4 — Peaks:** peaks at ingestion, plus the night-time backfill.
+
+**Stage 5 — Reports:** generator, schedules, history backfill (JSON), files, bundles, and the Telegram generator reuse if it exists.
+
+**Stage 6 — Retention in `dry_run`**
+1. Includes the v1 `audio_url` compatibility change (§7.5).
+2. The user deploys it.
+3. After 3 nights of dry-run summaries, report the numbers per company.
+4. **The user decides** and runs `retention-mode --company=<id> --mode=live` for each company.
+5. Monitor the first live run and the purge 7 days later.
+
+**Stage 7 — Infrastructure** (with approval, if not already done): the worker cut-over with `QUEUE_IN_API=false`, and making the audio bucket private after the frontend cutover.
+
+**Stage 8 — Cleanup:** deprecate the v1 endpoints the new frontend no longer uses (with approval) and remove dead code.
+
+**Every report contains:** what changed; migrations; test results; EXPLAIN highlights; measured p95s; risks; what you need from the user (approvals, env changes, deploys); and the next step.
+
+---
+
+## 17. Definition of done
+
+- [ ] Appendix A is implemented exactly, including the macro/rop view shapes. `openapi.json` is published. Contract tests are green.
+- [ ] No business literals remain in the code. Norms, rules, labels, report time, keep limit and retention are per-company settings with DB-stored defaults for new companies.
+- [ ] Derived columns are written for every new and updated call (triggers plus ingestion), and are tested.
+- [ ] No GET handler makes outbound calls (LLM, STT, amoCRM) other than storage signing. v1 staff-stats no longer calls GPT.
+- [ ] Performance targets (§12.1) are measured and met after co-location (or the numbers and the proposal are delivered). Caches and ETags are tenant- and role-safe.
+- [ ] Peaks exist for every call with available audio. New calls get peaks at ingestion.
+- [ ] Every auto report (daily, weekly, monthly) exists for the full history in uz and ru. Custom reports, file formats and bundles work, with role gating. The Telegram report and the web show identical numbers.
+- [ ] Retention:
+  - the 2-month rule (call day AND arrival day);
+  - explicit eligibility and held calls;
+  - lock-free trash, purge and restore;
+  - breakers B1–B8;
+  - v1 `audio_url` hiding.
+
+  All of it is tested. Dry-run summaries were delivered. **Live mode is enabled only by the user, per company.**
+- [ ] SSE, notifications and signals work, with tenant isolation proven.
+- [ ] Guardrails G1–G7 hold. The existing 21 tests plus the new tests pass. No production deploys were made by you.
+
+---
+
+# APPENDIX A — SalesPulse API v2 contract (the same text is included in the frontend and backend specs)
+
+This contract is the single agreement between the frontend and the backend:
+
+- The backend implements it exactly, and the frontend consumes it exactly.
+- Any change must be made in BOTH specs and announced to the other side before it ships.
+- The backend also publishes it as `GET /api/v2/openapi.json`, generated from the zod schemas that validate its responses.
+- The frontend generates its TypeScript types from that file.
+
+## A.1 Conventions
+
+**Transport**
+- Base path `/api/v2`. JSON, UTF-8, with brotli/gzip compression.
+
+**Auth and tenancy**
+- Auth uses the existing session/JWT mechanism. The server resolves the active company exactly as it does today.
+- EVERY query is scoped to the active company. Cross-tenant data must be impossible, and a test must prove it.
+- Responses may depend on the caller's role (e.g. operator masking). Server caches and ETags always include company, role and — for user-scoped data — user.
+
+**Locale**
+- The frontend sends `Accept-Language: uz` or `ru`.
+- Every server-generated sentence (`Msg.text`) and every company label is returned in that locale.
+
+**Time and periods**
+- All day boundaries, hours, weekdays and date strings use `Asia/Tashkent` (UTC+5, no DST).
+- `ISODate` = `"YYYY-MM-DD"` (Tashkent local date). `ISODateTime` = ISO-8601 with offset.
+- Periods: `day` is one calendar day; `week` is Monday–Sunday; `month` is a calendar month. `date` anchors the period and defaults to today.
+- A custom range's "previous" is the same-length window immediately before it.
+- **Same-window comparison.** When a range contains "now", every `previous` value covers the previous period only up to the same elapsed time:
+  - today 10:17 vs yesterday 00:00–10:17;
+  - this week Mon→Thu 10:17 vs last week Mon→Thu 10:17;
+  - the same logic for months.
+
+**Units**
+- Scores are ALWAYS 0.0–10.0 with one decimal (`Score10`). API v2 never returns 0–100 scores.
+- Durations are integer seconds. Money is integer so‘m: a bonus is positive, a penalty negative.
+- Every `progress` field is an integer 0–100.
+- Unknown or unavailable values are `null`, never `0` as a placeholder. The frontend renders "—" or hides the element.
+
+**Labels**
+- Labels from company configuration (criteria, scripts, funnel stages, operator names, metric names) come as display strings.
+- Fixed enumerations (reason keys, negative-metric keys) come as keys and are translated by the frontend.
+- Generated sentences come as `Msg` with a ready `text`.
+
+**Operators**
+- `OperatorRef = { ext, name }`. The UI shows `name ?? "Operator " + ext`.
+- `op: null` = a call without a mapped internal number ("Aniqlanmagan").
+
+**Query parameters**
+- Lists are comma-separated (`reason=short,no_answer`, `op=104,108`, `op=none` for unmapped).
+- Dates are real ISO dates; omit the param for "today".
+- Booleans are `true`/`false`.
+
+**Caching and diagnostics**
+- Every GET returns `ETag` and `Cache-Control: private, no-cache`. Clients revalidate with `If-None-Match`, and an unchanged response is a `304`.
+- Every response carries `Server-Timing` (total, db, cache).
+
+**Errors**
+- `{ "error": { "code": string, "message": string } }` with the right HTTP status: 400, 401, 403, 404, 409, 410, 422, 429 or 500.
+
+**Pagination**
+- Keyset cursors: `cursor`, and `limit` ≤ 100 (default 50).
+
+## A.2 Shared types
+
+```ts
+type ISODate = string;
+type ISODateTime = string;
+type Score10 = number;                        // 0.0–10.0, one decimal
+type Tone = 'good' | 'warn' | 'bad';
+type Period = 'day' | 'week' | 'month';
+type AccentPreset = 'lime' | 'blue' | 'coral' | 'violet';   // #D4F570 | #6E9BFF | #FF8A5C | #B19CFF
+
+interface OperatorRef { ext: string; name: string | null }
+interface Range { from: ISODate; to: ISODate; cutoff: ISODateTime | null }   // cutoff is set when the range contains "now"
+interface Pair<T> { current: T; previous: T }                                // previous = same window of the previous period
+interface Msg { key: string; params: Record<string, string | number>; text: string }   // text already rendered in the request locale
+interface DeepLink {
+  page: 'analytics' | 'control' | 'compare' | 'staff' | 'status' | 'audio' | 'reports' | 'settings';
+  params: Record<string, string>;   // becomes the URL query of that page (lists comma-separated);
+                                    // for 'settings', params.section ∈ operators|criteria-categories|criteria|amocrm|brand|kpi
+}
+interface MetricLabel { plural: string; singular: string; short: string }
+  // e.g. leads  = { plural: "Yangi lidlar", singular: "Yangi lid", short: "lid" }
+  //      offers = { plural: "O‘quv markazga taklif", singular: "O‘quv markazga taklif", short: "taklif" }
+  //      deals  = { plural: "Yopilgan bitimlar", singular: "Yopilgan bitim", short: "bitim" }
+
+type ReasonKey =
+  | 'no_answer' | 'short' | 'callback_later' | 'wrong_number' | 'bad_audio'
+  | 'hung_up' | 'not_sales' | 'daily_limit' | 'stt_failed';
+type CallStatus = 'queued' | 'processing' | 'rated' | 'skipped' | 'stt_suspect' | 'failed';
+type AudioState = 'available' | 'expired' | 'missing';
+  // expired = removed by the retention policy (including the 7-day restorable trash stage);
+  // analysis, transcript and waveform are kept
+
+interface Norms {
+  longCallSec: number;          // a call is "long" when duration > longCallSec (strict)
+  dailyLongCallsNorm: number;   // long calls per operator per working day
+  targetScore10: Score10;
+  targetConversionPct: number;
+  lowScoreThreshold10: Score10; // "Past ball" = score10 < this
+  audioRetentionMonths: number; // 1–12; audio is removed this many calendar months after it arrived
+  workHours: { from: number; to: number };
+    // business hours [from, to) for the queue and norms; charts show hour buckets from..to inclusive
+}
+// Every Norms value is stored per company in the database and edited on the "KPI normalari" page.
+// New companies receive a copy of the database-stored defaults when they are created.
+// The current production values are 60 s, 40, 8.0, 20, 3.0, 2 months, 9–23.
+// No client or server code path may fall back to literals.
+```
+
+## A.3 Endpoints
+
+### A.3.1 Session, shell, dictionaries, settings
+
+```ts
+GET /me → MeResponse
+interface MeResponse {
+  user: { id: string; name: string; role: 'owner' | 'admin' | 'rop' | 'operator';
+          locale: 'uz' | 'ru'; theme: 'dark' | 'light' | 'system' };
+  company: { id: string; name: string; initials: string; planName: string; operatorCount: number;
+             accent: AccentPreset; telephony: { provider: string } | null;       // provider e.g. "UTel"
+             firstDataDay: ISODate | null };                                     // date pickers: earliest selectable day
+  companies: { id: string; name: string; initials: string }[];                  // companies this user can switch to
+  features: { amocrm: boolean; lockedRoutes: string[]; reports: boolean };       // reports = user may open the reports center
+  norms: Norms;
+  labels: { leads: MetricLabel; offers: MetricLabel; deals: MetricLabel };
+  operatorExtTrackedSince: ISODateTime | null;   // before this moment calls have no operator ("Aniqlanmagan")
+  serverTime: ISODateTime;                       // the client derives clock skew from it
+}
+
+GET   /badges → { audioLowToday: number; notificationsUnread: number; sttPaused: boolean }
+GET   /dictionaries → {
+        operators: (OperatorRef & { active: boolean })[];
+        scripts: { id: string; name: string }[];
+        criteria: { id: string; index: number; label: string; shortLabel: string | null; category: string | null }[];
+      }
+PATCH /me/preferences { locale?: 'uz' | 'ru'; theme?: 'dark' | 'light' | 'system' } → 204
+POST  /auth/logout → 204                                                             // or the existing logout route
+POST  /company/switch { companyId: string } → 204                                    // the client must also get a new SSE token
+PATCH /company/brand { accent: AccentPreset } → 204                                  // owner/admin
+PATCH /company/norms Partial<Norms> & { confirm?: true } → Norms                     // owner/admin
+      // lowering audioRetentionMonths without confirm: true → 409 { code: 'confirm_required' }
+GET   /company/retention-preview?months=N → { months: number; toRemove: number; bytes: number; nextRunAt: ISODateTime }   // owner/admin
+GET   /retention/status → RetentionStatus                                             // owner/admin/rop
+interface RetentionStatus {
+  months: number; mode: 'off' | 'dry_run' | 'live';        // this company's mode
+  nextRunAt: ISODateTime;
+  lastRun: { at: ISODateTime; mode: 'dry_run' | 'live'; removed: number; purged: number;
+             bytesFreed: number; held: number } | null;
+  audioAvailable: number;        // calls whose audio can still be played
+  audioExpired: number;          // calls whose audio was removed, analysis kept
+  expiringNext7Days: number;     // available, not kept, with expiresAt within 7 days
+  expiringLink: DeepLink;        // an /audio link listing exactly those calls
+  kept: number; keepLimit: number;
+}
+```
+
+`expiresAt` for a call is the start time of the first nightly retention run (03:10 Tashkent) at which BOTH the call's day and the audio's arrival day are before `run date − audioRetentionMonths` (calendar months).
+
+It is `null` when:
+- the call is kept;
+- the call is held (not final, see the backend spec §7.2);
+- the company's retention mode is not `live`, or retention is globally disabled. In dry-run nothing is ever removed, so nothing is announced.
+
+`expiringLink` is always a complete list link: `{ page: 'audio', params: { from: firstDataDay, to: today, audio: 'available', keep: 'false', expiringBefore: now + 7 days, sort: 'time_asc' } }`.
+
+### A.3.2 Analytics page: `GET /pages/analytics?period=day|week|month&date=`
+
+```ts
+interface AnalyticsPage {
+  range: Range; previousRange: Range;
+  lagging: { count: number; top: { op: OperatorRef; longCalls: number; normTarget: number }[] };   // top = 3 largest deficits
+  calls: {
+    total: Pair<number>;
+    talkSec: number;
+    longCalls: number;
+    buckets: { key: string; label: string; count: number | null; isCurrent: boolean }[];
+      // day: one per hour from workHours.from to workHours.to INCLUSIVE, widened to include any other hour that has calls;
+      // week: 7 dates; month: every date of the month. count null = future bucket.
+      // key = "HH" for hours, ISODate for dates (the frontend formats axis ticks from key);
+      // label = server-formatted display label in the request locale ("19:00", "Pa, 24-sen", "24-sen")
+    peak: { key: string; label: string; count: number } | null;
+  };
+  leads: { total: Pair<number>; series: { key: ISODate; label: string; count: number }[] } | null;
+      // 14 buckets, oldest first, same granularity as `dynamics`; null = source unavailable
+  offers: { total: Pair<number>; series: { key: ISODate; label: string; count: number }[]; shareOfLeadsPct: number | null } | null;
+  conversion: { pct: number | null; previousPct: number | null; targetPct: number;
+                leads: number; offers: number; deals: number } | null;
+  dynamics: { key: ISODate; label: string; calls: number; longCalls: number; deals: number | null }[];
+      // day: last 14 days; week: last 12 weeks (key = Monday); month: last 12 months (key = 1st)
+  funnel: { key: 'calls' | 'long' | 'leads' | 'offers' | 'deals'; count: number }[];   // stages without a source are omitted
+  direction: { outbound: number; inbound: number };
+  team: {
+    op: OperatorRef; calls: number; longCalls: number;
+    normTarget: number;            // dailyLongCallsNorm × working days in the range (1 for a day)
+    meetsNorm: boolean;            // longCalls >= normTarget
+    inbound: number; outbound: number; newLeads: number | null; score10: Score10 | null;
+  }[];
+}
+```
+
+### A.3.3 Control page: `GET /pages/control?date=&view=overview|macro|rop`
+
+`view=overview` returns `ControlPage`. `macro` and `rop` return `ControlMacroView` and `ControlRopView`:
+
+- The backend defines these two shapes in openapi.json during its Stage 2, by normalizing the data the current "Yirik ma’lumotlar" and "ROP tahlili" views use.
+- The normalization follows these conventions: Score10, seconds, null rules, OperatorRef.
+- The frontend implements those views after the shapes are published.
+
+```ts
+interface ControlPage {
+  pulse: {
+    score: number | null;                                   // mean of the non-null indices, 0–100, integer
+    indices: { key: 'activity' | 'conversion' | 'quality' | 'discipline'; value: number | null; note: Msg }[];
+    summary: Msg | null;                                    // rule-based sentence
+  };
+  kpis: {
+    calls: Pair<number>;
+    avgScore10: Pair<Score10 | null>;
+    avgDurationSec: Pair<number | null>;
+    activeOperators: { active: number; total: number };
+  };
+  negatives: {
+    key: 'bad_audio' | 'penalties' | 'short' | 'no_answer' | 'bad_leads';
+    today: number; last7: number[];                          // last7[6] = today (same window)
+    vsYesterdayPct: number | null;                           // same window
+    vsLastWeekPct: number | null;                            // vs the average of the previous 7 days, same window
+    target: DeepLink | null;                                 // an /audio list reproducing exactly the counted calls; null if not expressible
+  }[];
+  load: {
+    hours: { hour: number; count: number | null }[];         // same hour set as analytics day buckets; null = future
+    intervals: { from: number; to: number; count: number; sharePct: number }[];
+      // 3-hour bands over the same hour set, `to` exclusive (e.g. 21→24 covers 21:00–23:59); the last band may be shorter
+    peakHour: number | null;
+    tip: Msg | null;                                         // rule-based
+  };
+  funnel: { stages: { label: string; count: number }[]; overallPct: number | null } | null;  // amoCRM month to date; null when not connected
+  signals: Signal[];                                         // max 4, sorted bad → warn → good, then by magnitude
+}
+interface Signal { id: string; severity: Tone; title: Msg; detail: Msg; metric: string; target: DeepLink | null }
+```
+
+Index formulas (each 0–100; a missing input makes that index `null`):
+
+- `activity` = 50 × (active operators ÷ operators) + 50 × min(1, calls today ÷ average of the last 14 working days up to the same time)
+- `conversion` = min(100, conversion ÷ target × 100)
+- `quality` = average score10 × 10
+- `discipline` = operators meeting the daily norm ÷ operators × 100
+
+### A.3.4 Compare page: `GET /pages/compare?period=&a=&b=`
+
+`a` and `b` are the anchor dates of the two periods (any date inside the week or month).
+
+```ts
+interface ComparePage {
+  a: Range; b: Range;
+  metrics: { calls: { a: number; b: number }; talkSec: { a: number; b: number };
+             avgScore10: { a: Score10 | null; b: Score10 | null } };
+      // if b contains now, a is cut at the same elapsed time (same window)
+  series: { granularity: 'hour' | 'day';
+            points: { key: string; label: string; a: number | null; b: number | null }[] };
+      // day → same hour set as analytics day buckets; week → 7 days (Mon..Sun); month → days 1..31.
+      // a is returned in full; b stops at now (null after)
+  insight: Msg | null;
+  scoreDeltas: { op: OperatorRef; a: Score10 | null; b: Score10 | null }[];
+  days: { key: ISODate; label: string; calls: number; operatorCalls: number; talkSec: number; avgCallSec: number | null }[];
+      // day: 7 days ending at b; week: 8 weeks; month: 6 months
+}
+GET /compare/breakdown?from=&to= → { operators: { op: OperatorRef | null; calls: number; talkSec: number }[] }
+      // sums equal the row totals; op null = unmapped calls
+```
+
+### A.3.5 Staff: `GET /pages/staff?range=today|yesterday|7d|30d`
+
+`7d` and `30d` are rolling windows ending today, including today.
+
+```ts
+interface StaffPage {
+  range: Range;
+  totals: { operators: number; calls: number; rated: number };
+  team: { avgScore10: Score10 | null; targetScore10: Score10; normMet: number; operatorCount: number;
+          best: { op: OperatorRef; score10: Score10 } | null; worst: { op: OperatorRef; score10: Score10 } | null };
+  operators: {
+    op: OperatorRef; rank: number | null; score10: Score10 | null; calls: number; talkSec: number; rated: number;
+    history7: (Score10 | null)[];                            // 7 days ending at the range end
+    topError: { criterionId: string; label: string; shortLabel: string | null; lostPoints: number } | null;
+    meetsNorm: boolean;
+  }[];                                                        // score desc, nulls last
+}
+
+GET /staff/{ext}?range= → StaffDetail
+interface StaffDetail {
+  op: OperatorRef; rank: number | null; of: number; calls: number; talkSec: number; rated: number; inbound: number;
+  longCalls: number; normTarget: number; meetsNorm: boolean; score10: Score10 | null;
+  deltaVsPrevious: number | null;                             // score10 change vs the previous range of the same length
+  errors: { criterionId: string; label: string; lostPoints: number; callsWithError: number; callsRated: number }[];  // top 3, pure SQL
+  fixes: { items: string[]; generatedAt: ISODateTime; basedOnCalls: number } | null;   // operator_insights; null = not generated yet
+  criteria: { id: string; index: number; label: string; pct: number | null }[];        // every criterion of the company
+  lowestCallId: string | null;   // lowest-score rated call in the range with available audio, else lowest overall
+}
+```
+
+### A.3.6 Analysis status: `GET /pages/status?date=`
+
+```ts
+interface StatusPage {
+  total: { calls: number; talkSec: number };
+  analyzed: { calls: number; talkSec: number };
+  notAnalyzed: { calls: number; talkSec: number };            // total − analyzed (includes pending and failed)
+  segments: { key: 'analyzed' | 'pending' | 'failed' | ReasonKey; count: number }[];   // sums to total.calls exactly
+      // pending = queued/processing/stt_suspect; failed = failed without a reason key
+  reasons: { key: ReasonKey; count: number; last7: number[] }[];            // every reason with count > 0 today or in last7
+  operators: { op: OperatorRef | null; analyzed: number; notAnalyzed: number; analyzedTalkSec: number }[];
+  operatorExtTrackedSince: ISODateTime | null;
+}
+```
+
+**Segment precedence.** Every call belongs to exactly one segment, checked in this order:
+
+1. `analyzed` (rated)
+2. `pending` (queued / processing / stt_suspect)
+3. the call's API-level reason key, if it has one (A.3.7 mapping; `stt_failed` failures land here)
+4. `failed` (failed without a reason)
+
+The list totals below equal these segment counts exactly (tested).
+
+Map the status page's `filter` to `/calls` parameters like this:
+
+| Status filter | `/calls` parameters |
+|---|---|
+| `all` | no status |
+| `analyzed` | `status=rated` |
+| `not_analyzed` | `status=unrated` |
+| `pending` | `status=pending` |
+| `failed` | `status=failed&reason=none` |
+| a reason key | `status=unrated&reason=<key>` |
+
+Reason filters always use API-level keys. For example, `reason=not_sales` also matches rows stored as `unknown` and done rows with neither a score nor a reason.
+
+### A.3.7 Calls
+
+```ts
+GET /calls?{CallsFilter} → CallsPage
+interface CallsFilter {
+  from?: ISODate; to?: ISODate;                             // default: today
+  status?: 'all' | 'rated' | 'unrated' | 'low' | 'pending' | 'failed';
+  reason?: (ReasonKey | 'none')[]; op?: string[];           // reason 'none' = no reason; op: ext list, 'none' = unmapped
+  script?: string[]; direction?: 'in' | 'out';
+  minDur?: number; maxDur?: number; minScore?: number; maxScore?: number;
+  problem?: boolean; money?: 'bonus' | 'penalty' | 'any'; criterion?: string;   // criterion = failed criterion id (pct < 50)
+  hourFrom?: number; hourTo?: number;                       // [hourFrom, hourTo)
+  audio?: AudioState; keep?: boolean; expiringBefore?: ISODateTime;   // expiringBefore: available, not kept, expiresAt < value
+  q?: string;                                               // ext, phone digits (suffix match) or transcript full-text
+  sort?: 'time_desc' | 'time_asc' | 'score_asc' | 'score_desc' | 'duration_desc' | 'duration_asc';
+  cursor?: string; limit?: number;
+  include?: 'peaks';
+}
+interface CallsPage {
+  items: CallListItem[]; nextCursor: string | null; prevCursor: string | null;
+  total: number; offset: number;                            // offset of the first item (for "1–50 / 1 306")
+  counts: { all: number; rated: number; unrated: number; low: number; pending: number };   // every filter except status
+  kpi: { total: Pair<number>; rated: number; avgScore10: Pair<Score10 | null>; low: number };  // every filter except status; same on every page
+}
+interface CallListItem {
+  id: string; op: OperatorRef | null; script: { id: string; name: string } | null; startedAt: ISODateTime;
+  direction: 'in' | 'out'; durationSec: number; status: CallStatus; reason: ReasonKey | null;
+  score10: Score10 | null; money: number | null; isProblem: boolean;
+  audio: { state: AudioState; expiresAt: ISODateTime | null; keep: boolean };
+  peaks60?: number[];                                       // 60 values 0–100, only with include=peaks
+}
+
+GET /calls/{id} → CallDetail
+interface CallDetail extends CallListItem {
+  clientPhone: string | null;                               // masked for role 'operator'
+  dayAvgScore10: Score10 | null;                            // company average for that call's day
+  summary: string | null;
+  keyMoments: { t: number; kind: 'good' | 'bad' | 'neutral'; label: string }[];
+  criteria: { id: string; label: string; category: string | null; pct: number }[];   // labels as evaluated (snapshot), full list, script order
+  errors: { label: string; points: number }[];              // points lost, positive numbers
+  strengths: string | null; improvements: string | null;
+  transcriptAvailable: boolean;
+  peaks200: number[] | null;                                // 200 values 0–100; kept after the audio is removed
+  audio: { state: AudioState; expiresAt: ISODateTime | null; keep: boolean; removedAt: ISODateTime | null;
+           restorableUntil: ISODateTime | null };   // set while the file sits in the 7-day trash; keep=true restores it
+}
+GET  /calls/{id}/transcript → { segments: { speaker: 'operator' | 'client' | null; start: number | null; end: number | null; text: string }[] }
+POST /calls/{id}/audio-url  → { url: string; expiresAt: ISODateTime }
+     // signed, ≤ 15 min, supports HTTP Range; 410 { code: 'audio_expired' }; 404 { code: 'audio_missing' }
+PUT  /calls/{id}/keep { keep: boolean } → { keep: boolean; audio: { state: AudioState; expiresAt: ISODateTime | null } }
+     // owner/admin/rop. keep=true on a call still in the 7-day trash restores the audio first.
+     // Errors: 409 { code: 'keep_limit' }; 410 once the audio has been purged.
+```
+
+**Status mapping, database → API** (the backend documents the final mapping in openapi.json)
+
+| Database state | API status (and reason) |
+|---|---|
+| `done` with a score | `rated` |
+| `done` without a score, with a skip reason | `skipped` + that `reason` |
+| `done` without a score and without a reason (data anomaly, logged) | `skipped` + `not_sales` |
+| `processing` | `processing` |
+| `requeued` or any waiting state | `queued` |
+| `stt_suspect` | `stt_suspect` |
+| `failed` because STT failed | `failed` + `stt_failed` |
+| `failed` for another cause | `failed` + reason `null` |
+
+### A.3.8 Notifications
+
+```ts
+GET  /notifications?cursor=&filter=all|signals → { items: NotificationItem[]; unread: number; nextCursor: string | null }
+interface NotificationItem { id: string; severity: Tone; title: Msg; detail: Msg | null; target: DeepLink | null;
+                             createdAt: ISODateTime; read: boolean }
+POST /notifications/read { ids?: string[]; all?: true } → 204
+```
+
+### A.3.9 Reports: the permanent archive that replaces audio as the long-term record
+
+Access: `owner`, `admin` and `rop` (the same roles as the Telegram report). Other roles get 403, and `/me.features.reports` is false for them.
+
+```ts
+type ReportType = 'daily' | 'weekly' | 'monthly' | 'custom';
+type ReportKind = 'full' | 'calls' | 'operators';
+type ReportFormat = 'pdf' | 'xlsx' | 'csv';
+
+GET  /reports?type=all|daily|weekly|monthly|custom&from=&to=&cursor=&limit=
+     → { items: StoredReport[]; nextCursor: string | null; total: number;
+         counts: Record<'all' | ReportType, number>; today: ReportSummary | null }
+     // newest period first. Automatic reports exist for EVERY past day, week and month since the company's first call.
+     // `today` is a live summary of today, shown in the reports center's pinned row.
+GET  /reports/{id} → StoredReport & { data: ReportData | null }      // data null until status = done
+POST /reports { kind: ReportKind; from: ISODate; to: ISODate; formats: ReportFormat[]; locale: 'uz' | 'ru'; filters?: CallsFilter }
+     → 202 { id: string }         // creates a 'custom' report; csv only for kind 'calls'; filters only for kind 'calls'
+     → 422 { code: 'too_many_rows' } when a calls export exceeds 200 000 rows
+POST /reports/{id}/download { format: ReportFormat }
+     → 200 { url: string; expiresAt: ISODateTime }                     // signed, 15 min
+     → 202 { status: 'generating' }                                    // the file is being built; wait for report.updated
+                                                                       // (or poll GET /reports/{id} every 2 s), then call again
+POST /reports/bundle { ids: string[]; format: 'pdf' | 'xlsx' } → 202 { id: string }      // ZIP, max 400 reports
+GET  /reports/bundle/{id} → { status: 'queued' | 'running' | 'done' | 'failed'; progress: number; sizeBytes: number | null; error: string | null }
+POST /reports/bundle/{id}/download → { url: string; expiresAt: ISODateTime }
+DELETE /reports/{id} → 204                                             // only type 'custom', by its creator or owner/admin
+
+interface StoredReport {
+  id: string; type: ReportType; kind: ReportKind; from: ISODate; to: ISODate; locale: 'uz' | 'ru';
+  final: boolean;              // false = preliminary (daily report at the evening report time); true after the day/week/month is closed
+  status: 'queued' | 'running' | 'done' | 'failed'; progress: number;
+  createdAt: ISODateTime; updatedAt: ISODateTime; createdBy: { id: string; name: string } | null;   // null = automatic
+  summary: ReportSummary | null;
+  files: { format: ReportFormat; sizeBytes: number }[];                // formats already built
+  error: string | null;
+}
+interface ReportSummary {
+  calls: number; talkSec: number; rated: number; avgScore10: Score10 | null;
+  leads: number | null; offers: number | null; deals: number | null; conversionPct: number | null;
+  uncontactedLeads: number | null; laggingOperators: number;
+}
+interface ReportData {
+  period: { type: ReportType; from: ISODate; to: ISODate; until: ISODateTime | null };
+  generatedAt: ISODateTime;
+  totals: ReportSummary & { inbound: number; outbound: number; longCalls: number; notAnalyzed: number;
+                            bonusSum: number; penaltySum: number };
+  reasons: { key: ReasonKey; count: number }[];
+  operators: { op: OperatorRef; calls: number; longCalls: number; normTarget: number; talkSec: number; rated: number;
+               score10: Score10 | null; bonusSum: number; penaltySum: number; topError: string | null }[];
+  weakest: { op: OperatorRef; score10: Score10 | null; issues: string[] } | null;   // "shu xodimda oqsoqlik kuzatildi"
+  best: { op: OperatorRef; score10: Score10 } | null;
+  criteria: { label: string; pct: number }[];                                       // team average per criterion
+  byDay: { day: ISODate; calls: number; rated: number; avgScore10: Score10 | null }[];   // weekly, monthly, custom
+  text: string;                     // plain-text version, identical to the Telegram report (may contain emoji)
+}
+```
+
+## A.4 Live events (Server-Sent Events)
+
+```
+POST /events/token → { token: string; expiresAt: ISODateTime }    // 60 min, bound to user + company
+GET  /events?token=…  (text/event-stream, heartbeat comment every 25 s)
+
+event: call.created          data: { id, startedAt, opExt | null, direction, status }
+event: call.updated          data: { id, status, reason | null, score10 | null, audioState, keep, expiresAt | null }
+event: stats.changed         data: { scope: 'today' | 'past', days: ISODate[] }      // at most once per 5 s per company
+event: notification.created  data: NotificationItem
+event: report.updated        data: { id, status, progress, files }
+event: bundle.updated        data: { id, status, progress }
+event: stt.health            data: { paused: boolean }
+event: badges                data: { audioLowToday, notificationsUnread }
+```
+
+**Client rules**
+- Reconnect with exponential backoff (1 s → 30 s) and refresh the token before it expires.
+- After a company switch, fetch a new token and reconnect.
+- After 3 failed reconnects, fall back to polling:
+  - `/badges` every 30 s;
+  - active queries every 60 s;
+  - pending report and bundle jobs every 2 s.
+
+## A.5 Reason keys: labels and colours
+
+| key | uz label | uz short | ru label | ru short | colour (fill) | text on 12% tint: dark / light |
+|---|---|---|---|---|---|---|
+| no_answer | Javobsiz | Javobsiz | Без ответа | Без ответа | --bad | #FF9A85 / #A3341F |
+| short | Qisqa suhbat | Qisqa suhbat | Короткий разговор | Короткий | --warn | #F9D877 / #7A5200 |
+| callback_later | Keyinroq qayta qo‘ng‘iroq | Keyinroq | Перезвонить позже | Перезвон | --lilac | #CBB9FF / #6A4FD0 |
+| wrong_number | Noto‘g‘ri raqam | Noto‘g‘ri raqam | Неверный номер | Неверный номер | --pink | #FF9EC7 / #B23A74 |
+| bad_audio | Aloqa sifati yomon | Aloqa sifati | Плохое качество связи | Качество связи | --slate | #A9B4C2 / #4E5A69 |
+| hung_up | Mijoz go‘shakni qo‘ydi | Go‘shakni qo‘ydi | Клиент положил трубку | Положил трубку | --slate-2 | #A3AAB6 / #4B5563 |
+| not_sales | Sotuv suhbati emas | Sotuv emas | Не продажный разговор | Не продажа | --sky | #A9D6FF / #2A6FB0 |
+| daily_limit | Kunlik limitdan oshdi | Limit | Превышен дневной лимит | Лимит | --periwinkle | #B9C8FF / #4056B8 |
+| stt_failed | Matnga o‘girilmadi | STT xatosi | Не распознано | Ошибка STT | --peach | #FFC9A9 / #B45A1E |
+| (segment) analyzed | Tahlil qilingan | Tahlil qilingan | Проанализировано | Проанализировано | --good | #86EBBA / #0B6B49 |
+| (segment) pending | Navbatda | Navbatda | В очереди | В очереди | --bar-dim-2 | #C9CCD3 / #33363D |
+| (segment) failed | Xatolik | Xatolik | Ошибка | Ошибка | --faint | #C9CCD3 / #33363D |
+
+**Where the labels are used**
+- Short labels: chips, the Audio table pill, compact places.
+- Full labels: legends, cards, tooltips.
+
+**Stored reason texts**
+- The backend maps every existing reason text in the database to exactly one key. The mapping is part of the migration and is tested.
+- Unknown texts are stored internally as `unknown`. The API exposes them as `not_sales` and logs them. Retention treats `unknown` as held (backend spec §7.2).
+
+**Negative-metric keys used on the control page, with their uz labels**
+
+| Key | uz label |
+|---|---|
+| bad_audio | Past sifatli aloqalar |
+| penalties | Jarima olingan holatlar |
+| short | Qisqa uzilgan aloqalar |
+| no_answer | Lid ko‘tarmadi |
+| bad_leads | Sifatsiz lid |
+
+`bad_leads` keeps the current app's definition. Its `target` is `null` if that definition cannot be expressed as a `CallsFilter`.
