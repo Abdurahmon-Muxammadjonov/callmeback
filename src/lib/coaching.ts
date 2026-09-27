@@ -50,18 +50,42 @@ const STAGE_ADVICE: Array<{ match: RegExp; fault: string; advice: string }> = [
   { match: /madaniyat|muloqot/i, fault: 'Muloqot ohangi bo\'sh — xushmuomalalik yetishmayapti', advice: 'Mijozning ismini ishlating, gapini bo\'lmang, suhbatni minnatdorchilik bilan yakunlang' },
 ];
 
-function fallbackCoaching(input: CoachingInput): Coaching {
-  const weak = input.stages.filter((s) => s.pct < 70).slice(0, 4);
+// ============================================================================
+// DETERMINISIK QISM — GPT'SIZ, GET so'rovlaridan chaqirish XAVFSIZ.
+//
+// NEGA AJRATILDI (API v2 §0.4, §6.5): hech bir GET handler LLM chaqirmasligi
+// kerak. "Ayblar" (faults) skript bandlarining foizidan to'g'ridan-to'g'ri
+// kelib chiqadi — buni hisoblash uchun model kerak emas. "Tavsiya" (advice)
+// esa AI matni: u fon jobida tayyorlanadi va operator_insights jadvalidan
+// o'qiladi.
+// ============================================================================
+
+/** Skript bandlari foizidan "ayblar" ro'yxati. Model chaqirilmaydi. */
+export function deriveFaults(stages: Array<{ title: string; pct: number }>): string[] {
+  const weak = stages.filter((s) => s.pct < 70).slice(0, 4);
   const faults: string[] = [];
-  const advice: string[] = [];
   for (const s of weak) {
     const hit = STAGE_ADVICE.find((a) => a.match.test(s.title));
     faults.push(hit ? `${hit.fault} (${s.pct}%)` : `${s.title} — ${s.pct}%`);
-    if (hit) advice.push(hit.advice);
   }
   if (!faults.length) faults.push('Sezilarli kamchilik topilmadi — skript bandlari yaxshi bajarilgan.');
+  return faults;
+}
+
+/** Bandlardan kelib chiqadigan zaxira tavsiyalar (model ishlamaganda). */
+export function deriveAdvice(stages: Array<{ title: string; pct: number }>): string[] {
+  const weak = stages.filter((s) => s.pct < 70).slice(0, 4);
+  const advice: string[] = [];
+  for (const s of weak) {
+    const hit = STAGE_ADVICE.find((a) => a.match.test(s.title));
+    if (hit) advice.push(hit.advice);
+  }
   if (!advice.length) advice.push('Shu darajani ushlab turing va probniyga chaqirishni har suhbatda takrorlang.');
-  return { faults, advice };
+  return advice;
+}
+
+function fallbackCoaching(input: CoachingInput): Coaching {
+  return { faults: deriveFaults(input.stages), advice: deriveAdvice(input.stages) };
 }
 
 export async function buildCoaching(name: string, input: CoachingInput): Promise<Coaching> {

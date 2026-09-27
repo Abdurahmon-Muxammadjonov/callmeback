@@ -13,6 +13,8 @@ import companyWebhooksRouter, { incomingRouter as webhooksIncomingRouter } from 
 import dashboardRouter from './routes/dashboard';
 import telegramWebhooksRouter from './routes/telegram-webhooks';
 import utelWebhookRouter, { startUtelWorker } from './routes/utel-webhook';
+import { startOperatorInsightsSchedule } from './jobs/operatorInsights';
+import { supabase as sharedSupabase } from './lib/supabase';
 import analyzeCallRouter, { recoverStuckCalls } from './routes/analyze-call';
 import managersRouter from './routes/managers';
 import criteriaRouter from './routes/criteria';
@@ -174,6 +176,17 @@ function startServer(port: number, isRetry = false): void {
     // uzilsa ham qo'ng'iroqlar YO'QOLMAYDI (processing'da yozilgan) va shu
     // yerda tugatiladi. Eski failed'lar ham shu navbatdan o'tadi.
     startUtelWorker();
+
+    // OPERATOR TAVSIYALARI (API v2 §10) — staff-stats GET so'rovi endi GPT
+    // chaqirmaydi, matn shu jobda tayyorlanib operator_insights jadvaliga
+    // yoziladi. Reja: 13:00, 20:00 va 02:30 (Asia/Tashkent).
+    //
+    // DIQQAT: worker servis paydo bo'lganda bu chaqiruv o'sha yerga ko'chadi
+    // (§3) va xotiradagi qo'riqchi advisory-lock bilan almashtiriladi.
+    startOperatorInsightsSchedule(async () => {
+      const { data } = await sharedSupabase.from('companies').select('id').limit(100);
+      return (data || []).map((c: { id: string }) => c.id);
+    });
 
     // amoCRM davriy sync — ulangan bo'lsa menejerlarni avtomatik yangilab turadi.
     // CRM_SYNC_MINUTES=0 bo'lsa o'chiriladi (default 10 daqiqa).

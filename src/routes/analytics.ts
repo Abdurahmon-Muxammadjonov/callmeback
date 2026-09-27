@@ -3,7 +3,7 @@ import { supabase, fetchAllRows } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 import { getCompanyManagerIds } from '../lib/companyScope';
 import { popStatsInNode, overviewStatsInNode } from '../lib/analyticsFallback';
-import { buildCoaching } from '../lib/coaching';
+import { deriveFaults } from '../lib/coaching';
 import { getCompanySettings } from '../lib/companySettings';
 import { dayBounds, isHhMm, tashkentDay, tashkentHm, tashkentHour } from '../lib/tashkentTime';
 
@@ -404,7 +404,10 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
     const from = new Date(`${date}T00:00:00+05:00`).toISOString();
     const to = new Date(`${date}T23:59:59.999+05:00`).toISOString();
 
-    const [calls, managers] = await Promise.all([
+    // AI tavsiyalari fon jobida tayyorlanadi va SHU YERDA faqat o'qiladi
+    // (API v2 §6.5). Jadval hali yaratilmagan bo'lsa ham so'rov yiqilmaydi —
+    // xato yutib yuboriladi va advice: null qaytadi.
+    const [calls, managers, insights] = await Promise.all([
       fetchAllRows<any>((f, t) =>
         supabase.from('calls')
           .select('id, duration, kpi_score, rop_comment, dropped_reason, transcript, manager_id, operator_ext, new_leads_count, sent_to_dealer_count, closed_deals_count, is_problem')
@@ -412,7 +415,24 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
           .or('operator_ext.not.is.null,manager_id.not.is.null')
           .range(f, t)),
       supabase.from('managers').select('id, name').eq('company_id', companyId),
+      supabase.from('operator_insights')
+        .select('operator_ext, items_uz, generated_at, based_on_calls')
+        .eq('company_id', companyId)
+        .then((r) => r, () => ({ data: null, error: null })),
     ]);
+
+    const insightByExt = new Map<string, { items: string[]; generatedAt: string; basedOnCalls: number }>();
+    for (const row of ((insights as any)?.data || []) as any[]) {
+      const items = Array.isArray(row.items_uz)
+        ? row.items_uz.filter((x: unknown): x is string => typeof x === 'string' && x.trim() !== '')
+        : [];
+      if (!items.length) continue;
+      insightByExt.set(String(row.operator_ext), {
+        items,
+        generatedAt: row.generated_at,
+        basedOnCalls: Number(row.based_on_calls) || 0,
+      });
+    }
 
     const nameById = new Map<string, string>();
     for (const m of managers.data || []) nameById.set(m.id, m.name);
@@ -526,21 +546,21 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
           .slice(0, 6);
         const conversion = a.leads > 0 ? Math.round((a.closed / a.leads) * 1000) / 10 : 0;
 
-        const { faults, advice } = await buildCoaching(a.name, {
-          calls: a.calls,
-          minutes: Math.round((a.seconds / 60) * 10) / 10,
-          avgScore,
-          scoredCalls: a.scores.length,
-          stages,
-          mistakes: a.mistakes.slice(0, 12),
-          reasons: [...a.reasons.entries()].map(([r, n]) => `${r} (${n} ta)`),
-          topMistakes,
-          lostReasons,
-          leads: a.leads,
-          invited: a.invited,
-          closed: a.closed,
-          conversion,
-        });
+        // ============================================================
+        // GPT BU YERDA CHAQIRILMAYDI (API v2 §0.4, §6.5).
+        //
+        // Ilgari har bir operator uchun buildCoaching() -> GPT-4o-mini
+        // chaqirilardi va bu GET so'rovini 7.4 soniyaga cho'zardi.
+        // Endi:
+        //   faults  — skript bandlari foizidan determinisik hisoblanadi;
+        //   advice  — operator_insights jadvalidan O'QILADI (fon jobi
+        //             to'ldiradi). Hali tayyorlanmagan bo'lsa null —
+        //             UI "Tavsiya tayyorlanmoqda…" ko'rsatadi.
+        // ============================================================
+        const faults = deriveFaults(stages);
+        const ext = a.key.startsWith('ext:') ? a.key.slice(4) : null;
+        const insight = ext ? insightByExt.get(ext) : undefined;
+        const advice = insight?.items ?? null;
         return {
           key: a.key,
           name: a.name,
@@ -550,7 +570,9 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
           avg_score: avgScore,          // 0-100 (frontend 10 ballikka bo'ladi)
           stages,
           faults,
-          advice,
+          advice,                       // null = hali tayyorlanmagan
+          advice_generated_at: insight?.generatedAt ?? null,
+          advice_based_on_calls: insight?.basedOnCalls ?? null,
           // Konversiya va yo'qotish tahlili (talab 2026-09-27)
           leads: a.leads,
           invited: a.invited,
