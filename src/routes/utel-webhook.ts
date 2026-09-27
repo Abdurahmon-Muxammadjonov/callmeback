@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { supabase } from '../lib/supabase';
 import { processTranscriptToCall } from './analyze-call';
-import { submitAudioForAnalysis, waitForAnalysis, isSalesAiConfigured } from '../lib/salesAiClient';
+import { submitAudioForAnalysis, waitForAnalysis, waitBudgetMs, isSalesAiConfigured } from '../lib/salesAiClient';
 import { isWorkTime, workWindowLabel } from '../lib/workHours';
 import { probeWavDurationSec } from '../lib/audioDuration';
 import { classifyShortCall } from '../lib/openaiAnalyzer';
@@ -208,8 +208,13 @@ export async function analyzeUtelCall(
   // Operatorning kunlik tahlil limiti to'lgan bo'lsa — to'xtaymiz.
   if (!(await passesDailyLimit(rowId))) return;
   try {
+    // Qo'ng'iroq davomiyligini oldindan olamiz: kutish budjeti shunga qarab
+    // belgilanadi va pastdagi "ishonchlilik tekshiruvi" uchun ham kerak.
+    const { data: durRow } = await supabase.from('calls').select('duration').eq('id', rowId).maybeSingle();
+    const durSec = Math.max(0, Number(durRow?.duration) || 0);
+
     const jobId = await submitAudioForAnalysis(audioUrl, clientName);
-    const res = await waitForAnalysis(jobId);
+    const res = await waitForAnalysis(jobId, { timeoutMs: waitBudgetMs(durSec) });
 
     // HAR BIR QO'NG'IROQDA YO BALL, YO SABAB BO'LSIN (foydalanuvchi talabi
     // 2026-09-24). Suhbat bo'lmagan yoki juda qisqa qo'ng'iroqda sotuv
@@ -219,9 +224,35 @@ export async function analyzeUtelCall(
     // "Noto'g'ri raqam" ...) va izohga yoziladi.
     const text = res.fullText || '';
     const SHORT_LIMIT = 250; // belgidan qisqa = to'liq suhbat emas
-    if (res.status !== 'done' || text.trim().length < SHORT_LIMIT) {
-      const { data: row } = await supabase.from('calls').select('duration').eq('id', rowId).maybeSingle();
-      const dur = Number(row?.duration) || 0;
+
+    // ============================================================
+    // STT TUGAMAGAN BO'LSA — BU "SUHBAT BO'LMAGAN" DEGANI EMAS.
+    //
+    // XATO (2026-09-24 19:01 — 2026-09-27, 2842 qo'ng'iroq yo'qoldi):
+    // shart `res.status !== 'done' || qisqa` edi. Ya'ni STT timeout
+    // bo'lsa ham (bo'sh matn), qo'ng'iroq darhol "Javobsiz" /
+    // "Aloqa sifati yomon" deb belgilanar va status='done' yozilar edi.
+    // Navbat esa `.neq('status','done')` bilan tanlaydi — demak bunday
+    // qator BOSHQA HECH QACHON qayta urinilmasdi. Natijada 906 soniyalik
+    // (15 daqiqalik) haqiqiy sotuv suhbati "Aloqa sifati yomon" bo'lib
+    // qolgan.
+    //
+    // Endi: STT tugamagan bo'lsa XATO tashlanadi -> catch status='failed'
+    // qiladi (dropped_reason YOZILMAYDI) -> navbat qayta uradi.
+    //
+    // Ikkinchi himoya: uzun audiodan bo'm-bo'sh matn kelishi ham STT
+    // nosozligi, "javobsiz" emas — 60 soniyadan uzun qo'ng'iroqda
+    // amalda gap bo'lmasligi mumkin emas.
+    // ============================================================
+    const emptyFromLongAudio = durSec >= 60 && text.trim().length < 50;
+    if (res.status !== 'done' || emptyFromLongAudio) {
+      throw new Error(
+        `STT natija bermadi (status=${res.status}, audio ${durSec}s, matn ${text.trim().length} belgi) — qayta urinamiz.`,
+      );
+    }
+
+    if (text.trim().length < SHORT_LIMIT) {
+      const dur = durSec;
       const { category, note } = await classifyShortCall(text, dur);
       await supabase.from('calls').update({
         transcript: text || null,
@@ -383,9 +414,18 @@ const QUEUE_SINCE = (() => {
 // qayta-qayta urinilib, Gemini kvotasini yeb turdi). Endi har urinishdan
 // keyin qator vaqtincha chetga qo'yiladi (5 daqiqa, har safar ikki barobar,
 // ko'pi bilan 1 soat).
-const retryAfter = new Map<string, { at: number; delayMs: number }>();
+const retryAfter = new Map<string, { at: number; delayMs: number; tries: number }>();
 const BASE_BACKOFF_MS = 5 * 60_000;
 const MAX_BACKOFF_MS = 60 * 60_000;
+
+// Bir qator ko'pi bilan shuncha marta urinib ko'riladi. NEGA CHEGARA KERAK
+// (2026-09-27): STT tugamasa endi xato tashlanadi va qator navbatda qoladi —
+// bu to'g'ri, lekin chegarasiz bo'lsa buzuq audio har soatda qaytadan
+// yuklanib, qaytadan STT'ga berilardi (pul va token bekorga ketardi).
+// Chegaradan oshgach qator aniq sabab bilan yopiladi va "Tahlil holati"
+// bo'limida ko'rinadi.
+const MAX_TRIES = 4;
+const STT_FAILED_REASON = 'Matnga o\'girilmadi';
 
 function isCoolingDown(id: string): boolean {
   const r = retryAfter.get(id);
@@ -414,15 +454,48 @@ function excludeCooling(q: any): any {
   return ids.length ? q.not('id', 'in', `(${ids.join(',')})`) : q;
 }
 
-function markAttempted(id: string): void {
+// Qaytaradi: bu qator uchun nechanchi urinish bo'lgani.
+function markAttempted(id: string): number {
   const prev = retryAfter.get(id);
   const delayMs = prev ? Math.min(prev.delayMs * 2, MAX_BACKOFF_MS) : BASE_BACKOFF_MS;
-  retryAfter.set(id, { at: Date.now() + delayMs, delayMs });
+  const tries = (prev?.tries ?? 0) + 1;
+  retryAfter.set(id, { at: Date.now() + delayMs, delayMs, tries });
+  return tries;
+}
+
+function triesOf(id: string): number {
+  return retryAfter.get(id)?.tries ?? 0;
+}
+
+// Urinishlar tugadi — qatorni aniq sabab bilan yopamiz (navbat qayta olmaydi).
+async function giveUp(id: string, lastError: string): Promise<void> {
+  await supabase.from('calls').update({
+    status: 'done',
+    dropped_reason: STT_FAILED_REASON,
+    summary: 'Audio matnga o\'girilmadi.',
+    rop_comment: `(Baholanmadi) ${STT_FAILED_REASON}. ${MAX_TRIES} marta urinildi. Oxirgi xato: ${lastError.slice(0, 200)}`,
+  }).eq('id', id).then(undefined, () => {});
+  console.warn(`UTel: row=${id} ${MAX_TRIES} urinishdan keyin yopildi — ${lastError.slice(0, 120)}`);
 }
 
 function markSucceeded(id: string): void {
   retryAfter.delete(id);
 }
+
+// ============================================================================
+// AYNI VAQTDA ISHLANAYOTGAN QATORLAR (2026-09-27)
+//
+// NEGA: STT endi bitta uzun audio uchun 18 daqiqagacha ketadi (o'lchandi),
+// backoff esa 5 daqiqa. Ya'ni 5-daqiqada qator navbatda yana "bo'sh"
+// ko'rinar (status='processing', 'done' emas) va AYNI audio ikkinchi marta
+// yuborilardi — ikki barobar STT xarajati va ikki barobar token.
+//
+// Shu sabab jarayonda turgan id'lar shu to'plamda saqlanadi va navbat
+// ularni olmaydi. To'plam faqat xotirada: server qayta ishga tushsa
+// bo'shaydi, bu xavfsiz — o'sha qator baribir qaytib navbatga tushadi.
+// ============================================================================
+const inFlight = new Set<string>();
+
 
 // Navbatdan bitta to'plam olib ishlaydi. Qaytaradi: nechta ishlandi (0 =
 // navbat bo'sh). AVVAL matni bor qo'ng'iroqlar (ular tayyorga yaqin — faqat
@@ -446,14 +519,19 @@ async function runQueueOnce(): Promise<number> {
     .limit(BATCH * 5);
   const needAnalysis = ((pending || []) as any[])
     .filter((r: any) => typeof r.transcript === 'string' && r.transcript.trim() !== '')
-    .filter((r: any) => !isCoolingDown(r.id))
+    .filter((r: any) => !isCoolingDown(r.id) && !inFlight.has(r.id))
     .slice(0, BATCH);
   if (needAnalysis.length > 0) {
     console.log(`UTel navbat: ${needAnalysis.length} ta matn tahlilga (audiosiz).`);
     await Promise.allSettled(needAnalysis.map(async (r: any) => {
       markAttempted(r.id);
-      await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
-      await reanalyzeTranscriptOnly(r as any);
+      inFlight.add(r.id);
+      try {
+        await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
+        await reanalyzeTranscriptOnly(r as any);
+      } finally {
+        inFlight.delete(r.id);
+      }
     }));
   }
 
@@ -474,15 +552,24 @@ async function runQueueOnce(): Promise<number> {
   const rows = ((data || []) as any[])
     .filter((r: any) => typeof r.audio_url === 'string' && r.audio_url.includes('utel'))
     .filter((r: any) => !String(r.error || '').includes('AUDIO_TOO_LARGE'))
-    .filter((r: any) => !isCoolingDown(r.id))
+    .filter((r: any) => !isCoolingDown(r.id) && !inFlight.has(r.id))
     .slice(0, BATCH);
   if (rows.length === 0) return needAnalysis.length;
 
   console.log(`UTel navbat: ${rows.length} ta audio tahlilga.`);
   await Promise.allSettled(rows.map(async (r: any) => {
+    if (triesOf(r.id) >= MAX_TRIES) {
+      await giveUp(r.id, String(r.error || 'STT natija bermadi'));
+      return;
+    }
     markAttempted(r.id);
-    await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
-    await analyzeUtelCall(r.id, r.audio_url as string, r.company_id ?? null, r.client_phone ?? undefined);
+    inFlight.add(r.id);
+    try {
+      await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
+      await analyzeUtelCall(r.id, r.audio_url as string, r.company_id ?? null, r.client_phone ?? undefined);
+    } finally {
+      inFlight.delete(r.id);
+    }
   }));
   return needAnalysis.length + rows.length;
 }

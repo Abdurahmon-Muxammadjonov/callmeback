@@ -159,10 +159,30 @@ export async function fetchAnalysisOnce(id: string): Promise<SalesAiResult> {
   };
 }
 
-// done/failed bo'lguncha kutadi (poll). Standart: har 8s, 3 daqiqagacha.
+// done/failed bo'lguncha kutadi (poll).
+//
+// TIMEOUT NEGA 3 DAQIQADAN 20 DAQIQAGA OSHIRILDI (2026-09-27):
+// Standart 180_000 (3 daqiqa) edi. Whisper 15 daqiqalik audioni 3 daqiqada
+// ulgurmaydi (ayniqsa xizmatda navbat bo'lsa). Timeout bo'lganda bu funksiya
+// status='timeout' va bo'sh matn qaytarardi, chaqiruvchi esa uni "suhbat
+// bo'lmagan" deb hisoblab qo'ng'iroqni ABADIY "Javobsiz" deb belgilardi —
+// 24-sentabr 19:01'dan keyingi 2842 qo'ng'iroq shu sababdan yo'qoldi
+// (ichida 15 daqiqalik haqiqiy sotuv suhbatlari ham bor edi).
+//
+// O'LCHANDI (2026-09-27, 906 soniyalik haqiqiy qo'ng'iroq):
+//   POST -> done = 1096 soniya (18.3 daqiqa), 1994 so'z, 54 dialog qatori.
+//   Ya'ni STT real vaqtdan ~1.2x, ustiga xizmat navbati qo'shiladi.
+// Shu sabab budjet: davomiylikning 2.5 barobari, kamida 5, ko'pi bilan
+// 30 daqiqa.
+export function waitBudgetMs(durationSec?: number | null): number {
+  const d = Number(durationSec);
+  if (!Number.isFinite(d) || d <= 0) return 10 * 60_000;
+  return Math.min(30 * 60_000, Math.max(5 * 60_000, Math.round(d * 2500)));
+}
+
 export async function waitForAnalysis(id: string, opts: { intervalMs?: number; timeoutMs?: number } = {}): Promise<SalesAiResult> {
   const interval = opts.intervalMs ?? 8000;
-  const deadline = Date.now() + (opts.timeoutMs ?? 180_000);
+  const deadline = Date.now() + (opts.timeoutMs ?? 10 * 60_000);
   let last: SalesAiResult | null = null;
   while (Date.now() < deadline) {
     last = await fetchAnalysisOnce(id);
