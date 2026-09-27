@@ -7,7 +7,7 @@ import { processTranscriptToCall } from './analyze-call';
 import { submitAudioForAnalysis, waitForAnalysis, waitBudgetMs, isSalesAiConfigured } from '../lib/salesAiClient';
 import {
   recordOutcome, isPaused as isSttPaused, shouldProbe, markProbed,
-  maybeAlertAdmin, countsTowardHealth, SUSPECT_STATUS,
+  maybeAlertAdmin, countsTowardHealth, SUSPECT_STATUS, logHealthConfig,
 } from '../lib/sttHealth';
 import { isWorkTime, workWindowLabel } from '../lib/workHours';
 import { probeWavDurationSec } from '../lib/audioDuration';
@@ -734,6 +734,7 @@ export function startUtelWorker(): void {
     }
   })();
   console.log(`UTel navbat ishchisi ishga tushdi (bir vaqtda ${BATCH} ta).`);
+  logHealthConfig();
 }
 
 function buildEntry(req: Request) {

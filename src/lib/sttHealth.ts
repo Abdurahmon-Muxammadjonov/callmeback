@@ -128,6 +128,16 @@ export function markProbed(): void {
   state.lastProbeAt = Date.now();
 }
 
+/** Ishga tushishda sozlamalarni logga yozadi — himoya yuklanganini ko'rish uchun. */
+export function logHealthConfig(): void {
+  console.log(
+    `STT circuit breaker yoqilgan: oxirgi ${WINDOW} ta (≥${MIN_DURATION_SEC}s) `
+    + `qo'ng'iroqning ≥${Math.round(THRESHOLD * 100)}% i bo'sh chiqsa navbat pauza qilinadi; `
+    + `tiklanish sinovi har ${Math.round(PROBE_INTERVAL_MS / 60000)} daq, `
+    + `ogohlantirish ${Math.round(ALERT_AFTER_MS / 60000)} daq jimlikdan keyin.`,
+  );
+}
+
 export function healthSnapshot(): {
   paused: boolean; emptyRatio: number; window: number; samples: number;
   lastSuccessAt: string; pausedAt: string | null; minDurationSec: number; threshold: number;
