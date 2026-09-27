@@ -397,6 +397,31 @@ export async function analyzeTranscript(
     // "faqat dinamik qoidalar bo'lsa" deyilardi va mezonsiz kompaniyada
     // bo'sh qolardi — shu sabab ball tafsiloti ko'rinmasdi).
     'criteria_scores — YUQORIDAGI SKRIPT bandlarining har biri uchun bitta element qo\'shing: {title: band nomi, category: "Skript", score: shu band necha foiz bajarilgani (0-100)}. Agar quyida "QO\'SHIMCHA DINAMIK QOIDALAR" ham berilgan bo\'lsa, ularni HAM shu massivga qo\'shing (category: "Mezon").',
+    // ========================================================================
+    // MUHIM LAHZALAR (key_moments) — TANLASH QOIDASI (2026-09-27)
+    //
+    // NEGA: avval promptda faqat JSON shakli berilardi, tanlash mezoni yo'q
+    // edi. Natijada model har suhbatda bo'ladigan arzimas lahzalarni
+    // yozardi — "Suhbat boshlandi", "Salomlashish", "Mijoz o'z fikrlarini
+    // bildirdi". Bunday lahza hech narsa bermaydi: ROP audioni qaysi
+    // daqiqadan eshitishini bilmaydi.
+    //
+    // Endi faqat QARORGA TA'SIR QILGAN lahzalar so'raladi.
+    // ========================================================================
+    [
+      'key_moments — suhbatning FAQAT MUHIM lahzalari, 3 tadan 6 tagacha. Vaqtni transkriptdagi [MM:SS] belgisidan aynan oling, o\'zingizdan o\'ylab topmang va yaxlitlamang.',
+      'FAQAT shu turdagi lahzalarni yozing:',
+      '  • mijozning E\'TIROZI ("qimmat", "o\'ylab ko\'ramiz", "vaqtim yo\'q", "boshqa joyda arzon") va operator unga qanday javob bergani;',
+      '  • mijozning QIZIQISHI yoki ROZILIGI ("qachon boshlanadi?", "kelaman", "joyimni band qiling", raqam/ism berishi);',
+      '  • OPERATOR XATOSI — skriptga zid gap, narxni erta aytish, mijozning gapini bo\'lish, savolga javob bermaslik, qo\'pol ohang;',
+      '  • NARX yoki TARIF muhokamasi boshlangan joy;',
+      '  • KEYINGI QADAM kelishuvi (probniy dars, uchrashuv, qayta qo\'ng\'iroq) — sana/vaqt aytilgan joy.',
+      'QUYIDAGILARNI YOZMANG (ular har suhbatda bor va foydasiz): "Suhbat boshlandi", "Salomlashish", "Tanishtirish", "Suhbat tugadi", "Mijoz javob berdi", "Mijoz o\'z fikrlarini bildirdi", "Operator ma\'lumot berdi" kabi umumiy lahzalar.',
+      'label — 5-10 so\'z, AYNAN nima bo\'lganini ayting: "Mijoz narxni qimmat dedi" emas "E\'tiroz". Kim nima dedi ko\'rinsin.',
+      'kind — faqat uchtasidan biri: "good" (sotuvga yaqinlashtirgan), "bad" (sotuvni yo\'qotgan yoki operator xatosi), "neutral" (muhim, lekin ikki tomonga ham emas).',
+      'AGAR problem.is_problem = true bo\'lsa, key_moments ichida KAMIDA BITTA lahza kind="bad" bo\'lishi SHART va u aynan o\'sha muammoning o\'zi bo\'lsin — problem.reason da yozgan narsa qaysi daqiqada yuz berganini ko\'rsating.',
+      'Agar suhbatda haqiqatan 3 ta muhim lahza ham bo\'lmasa (juda qisqa yoki mazmunsiz suhbat), bor bo\'lganini yozing — arzimas lahza bilan to\'ldirmang.',
+    ].join('\n'),
     'Agar bitim yopilmagan bo\'lsa, lost_reasons massivida sababini yozing; yopilgan bo\'lsa — bo\'sh massiv.',
     'total_calls, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count — transkriptni diqqat bilan o\'qib, ULARNI HAQIQIY sanoqqa asoslab to\'ldiring (taxmin qilib to\'ldirmang). Odatda bitta audio = bitta qo\'ng\'iroq (total_calls=1), lekin transkriptda bir nechta alohida suhbat/qo\'ng\'iroq ketma-ket ketgan bo\'lsa, shularning barchasini sanang. incoming_count + outgoing_count yig\'indisi total_calls\'ga teng bo\'lishi kerak.',
 
@@ -523,7 +548,9 @@ function normalizeAnalysisJson(text: string, source: string, stages?: ScriptStag
     key_moments: Array.isArray((parsed as any).key_moments)
       ? ((parsed as any).key_moments as any[])
           .filter((k) => k && typeof k.label === 'string' && k.label.trim() !== '' && Number.isFinite(Number(k.time)))
-          .slice(0, 10)
+          // Prompt 3-6 ta so'raydi; model ko'proq bersa eng boshidagi
+          // 6 tasi olinadi (ular vaqt bo'yicha tartiblangan bo'ladi).
+          .slice(0, 6)
           .map((k) => ({
             time: Math.max(0, Math.round(Number(k.time))),
             label: String(k.label).trim().slice(0, 120),
