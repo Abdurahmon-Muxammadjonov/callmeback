@@ -61,7 +61,7 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
 
     let query = supabase
       .from('calls')
-      .select('id, manager_id, operator_ext, direction, platform_id, audio_url, duration, kpi_score, penalty_amount, bonus_amount, rop_comment, dropped_reason, status, created_at, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count')
+      .select('id, manager_id, operator_ext, direction, is_problem, problem_severity, problem_reason, platform_id, audio_url, duration, kpi_score, penalty_amount, bonus_amount, rop_comment, dropped_reason, status, created_at, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count')
       .eq('company_id', companyId)
       .order('created_at', { ascending: false })
       .range(offset, offset + limit - 1);
@@ -77,6 +77,9 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
     const analyzed = typeof req.query.analyzed === 'string' ? req.query.analyzed : undefined;
     if (analyzed === 'true') query = query.gt('kpi_score', 0);
     else if (analyzed === 'false') query = query.or('kpi_score.is.null,kpi_score.eq.0');
+
+    // ?problem=true — AI muammoli deb belgilagan qo'ng'iroqlar.
+    if (req.query.problem === 'true') query = query.eq('is_problem', true);
 
     const reason = typeof req.query.reason === 'string' && req.query.reason ? req.query.reason : undefined;
     if (reason) {

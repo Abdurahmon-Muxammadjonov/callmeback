@@ -407,7 +407,7 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
     const [calls, managers] = await Promise.all([
       fetchAllRows<any>((f, t) =>
         supabase.from('calls')
-          .select('id, duration, kpi_score, rop_comment, dropped_reason, transcript, manager_id, operator_ext')
+          .select('id, duration, kpi_score, rop_comment, dropped_reason, transcript, manager_id, operator_ext, new_leads_count, sent_to_dealer_count, closed_deals_count, is_problem')
           .eq('company_id', companyId).gte('created_at', from).lte('created_at', to)
           .or('operator_ext.not.is.null,manager_id.not.is.null')
           .range(f, t)),
@@ -425,6 +425,18 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
         .select('call_id, title, score').in('call_id', ids.slice(i, i + 200));
       stageRows.push(...((data || []) as any[]));
     }
+    // Bitim yo'qolgan sabablar — "kim qaysi xato tufayli mijozni yo'qotyapti".
+    const lostRows: Array<{ call_id: string; reason_text: string }> = [];
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data } = await supabase.from('lost_reasons')
+        .select('call_id, reason_text').in('call_id', ids.slice(i, i + 200));
+      lostRows.push(...((data || []) as any[]));
+    }
+    const lostByCall = new Map<string, string[]>();
+    for (const l of lostRows) {
+      lostByCall.set(l.call_id, [...(lostByCall.get(l.call_id) || []), l.reason_text]);
+    }
+
     const stagesByCall = new Map<string, Array<{ title: string; score: number }>>();
     for (const s of stageRows) {
       stagesByCall.set(s.call_id, [...(stagesByCall.get(s.call_id) || []), { title: s.title, score: Number(s.score) || 0 }]);
@@ -435,6 +447,13 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
       key: string; name: string; calls: number; seconds: number;
       scores: number[]; stages: Map<string, number[]>; mistakes: string[];
       reasons: Map<string, number>;
+      // Konversiya va yo'qotish tahlili uchun (talab 2026-09-27).
+      leads: number; invited: number; closed: number; problems: number;
+      /** Xato matni -> {necha marta, jami necha ball yo'qotilgan} */
+      mistakeAgg: Map<string, { count: number; minus: number }>;
+      /** Bitim yo'qolgan sabablar (lost_reasons jadvalidan). */
+      lostAgg: Map<string, number>;
+      callIds: string[];
     }
     const byOp = new Map<string, Agg>();
     for (const c of calls) {
@@ -446,6 +465,10 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
         stages: new Map<string, number[]>(),
         mistakes: [] as string[],
         reasons: new Map<string, number>(),
+        leads: 0, invited: 0, closed: 0, problems: 0,
+        mistakeAgg: new Map<string, { count: number; minus: number }>(),
+        lostAgg: new Map<string, number>(),
+        callIds: [] as string[],
       };
       a.calls += 1;
       a.seconds += Math.max(0, Number(c.duration) || 0);
@@ -453,11 +476,34 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
       for (const st of stagesByCall.get(c.id) || []) {
         a.stages.set(st.title, [...(a.stages.get(st.title) || []), st.score]);
       }
+      a.leads += Number(c.new_leads_count) || 0;
+      a.invited += Number(c.sent_to_dealer_count) || 0;
+      a.closed += Number(c.closed_deals_count) || 0;
+      if (c.is_problem) a.problems += 1;
+      a.callIds.push(c.id);
+
       // Izohdagi "− X · Band: nima qilmadi" qatorlari — aniq dalil sifatida.
+      // Bir vaqtda XATOLARNI YIG'AMIZ: qaysi xato necha marta uchragan va
+      // jami necha ball yo'qotilgan (talab 2026-09-27: "kim qaysi xatolar
+      // tufayli mijozlarni yo'qotyapti").
       for (const line of String(c.rop_comment || '').split('\n')) {
-        if (line.trim().startsWith('−') && a.mistakes.length < 40) a.mistakes.push(line.trim());
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('−')) continue;
+        if (a.mistakes.length < 40) a.mistakes.push(trimmed);
+        const m = trimmed.match(/^−\s*([\d.]+)\s*·\s*([^:]+):/);
+        if (m) {
+          const label = m[2].trim();
+          const cur = a.mistakeAgg.get(label) || { count: 0, minus: 0 };
+          cur.count += 1;
+          cur.minus += Number(m[1]) || 0;
+          a.mistakeAgg.set(label, cur);
+        }
       }
       if (c.dropped_reason) a.reasons.set(c.dropped_reason, (a.reasons.get(c.dropped_reason) || 0) + 1);
+      for (const reason of lostByCall.get(c.id) || []) {
+        a.lostAgg.set(reason, (a.lostAgg.get(reason) || 0) + 1);
+      }
+
       byOp.set(key, a);
     }
 
@@ -470,6 +516,16 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
           .map(([title, arr]) => ({ title, pct: Math.round(avg(arr)) }))
           .sort((x, y) => x.pct - y.pct); // eng kuchsizi birinchi
         const avgScore = Math.round(avg(a.scores));
+        const topMistakes = [...a.mistakeAgg.entries()]
+          .map(([label, v]) => ({ label, count: v.count, points_lost: Math.round(v.minus * 10) / 10 }))
+          .sort((x, y) => y.points_lost - x.points_lost)
+          .slice(0, 6);
+        const lostReasons = [...a.lostAgg.entries()]
+          .map(([reason, count]) => ({ reason, count }))
+          .sort((x, y) => y.count - x.count)
+          .slice(0, 6);
+        const conversion = a.leads > 0 ? Math.round((a.closed / a.leads) * 1000) / 10 : 0;
+
         const { faults, advice } = await buildCoaching(a.name, {
           calls: a.calls,
           minutes: Math.round((a.seconds / 60) * 10) / 10,
@@ -478,6 +534,12 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
           stages,
           mistakes: a.mistakes.slice(0, 12),
           reasons: [...a.reasons.entries()].map(([r, n]) => `${r} (${n} ta)`),
+          topMistakes,
+          lostReasons,
+          leads: a.leads,
+          invited: a.invited,
+          closed: a.closed,
+          conversion,
         });
         return {
           key: a.key,
@@ -489,6 +551,14 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
           stages,
           faults,
           advice,
+          // Konversiya va yo'qotish tahlili (talab 2026-09-27)
+          leads: a.leads,
+          invited: a.invited,
+          closed: a.closed,
+          conversion,                   // lid -> bitim, foizda
+          problems: a.problems,         // AI muammoli deb belgilagan qo'ng'iroqlar
+          top_mistakes: topMistakes,    // qaysi xato necha marta, necha ball yeb ketgan
+          lost_reasons: lostReasons,    // bitim nega yo'qolgan
           reasons: [...a.reasons.entries()].sort((x, y) => y[1] - x[1]).map(([reason, count]) => ({ reason, count })),
         };
       }));

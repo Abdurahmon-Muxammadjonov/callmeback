@@ -420,3 +420,39 @@ export function buildScriptRules(fresh?: ScriptStage[], reactivation?: ScriptSta
     'Qo\'ng\'iroq javobsiz qolgan yoki suhbat umuman bo\'lmagan bo\'lsa — kpi_score 0 va criteria_scores bo\'sh massiv.',
   ].join('\n');
 }
+
+/* MUHIM JOYLAR vaqtini HAQIQIY segmentlarga yopishtiradi.
+ *
+ * GPT vaqtni yaxlitlab yuborishi mumkin (00:00, 02:00, 05:00) yoki
+ * qo'ng'iroq davomiyligidan oshirib yozishi — 2026-09-27 sinovida aynan
+ * shunday bo'ldi. Shu sabab har bir vaqt eng yaqin segment boshiga
+ * ko'chiriladi, davomiylikdan oshganlari esa tashlab yuboriladi.
+ */
+export function snapKeyMoments<T extends { time: number; label: string }>(
+  moments: T[],
+  segments: unknown[],
+  durationSec?: number,
+): T[] {
+  const starts = (Array.isArray(segments) ? segments : [])
+    .map((s: any) => Number(s?.start))
+    .filter((n) => Number.isFinite(n) && n >= 0)
+    .sort((a, b) => a - b);
+
+  const max = Number(durationSec) > 0 ? Number(durationSec) : starts.length ? starts[starts.length - 1] : 0;
+
+  const out: T[] = [];
+  const seen = new Set<number>();
+  for (const m of moments) {
+    let time = Math.max(0, Math.round(Number(m.time) || 0));
+    if (starts.length) {
+      // Eng yaqin segment boshi.
+      time = starts.reduce((best, s) => (Math.abs(s - time) < Math.abs(best - time) ? s : best), starts[0]);
+      time = Math.round(time);
+    }
+    if (max > 0 && time > max) continue;      // qo'ng'iroqdan tashqarida
+    if (seen.has(time)) continue;             // bir xil vaqtga ikki belgi qo'ymaymiz
+    seen.add(time);
+    out.push({ ...m, time });
+  }
+  return out.sort((a, b) => a.time - b.time);
+}

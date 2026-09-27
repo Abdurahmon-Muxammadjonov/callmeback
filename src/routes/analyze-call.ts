@@ -4,8 +4,8 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { unlink, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { processLocalAudio, processLongAudio, analyzeTranscript } from '../lib/audio-pipeline';
-import type { ScriptStage } from '../lib/evaluationScript';
+import { processLocalAudio, processLongAudio, analyzeTranscript, withTimeCodes } from '../lib/audio-pipeline';
+import { snapKeyMoments, type ScriptStage } from '../lib/evaluationScript';
 import { fetchAllRows } from '../lib/supabase';
 import { isSectionUnlocked } from '../lib/companySections';
 import { getCompanySettings } from '../lib/companySettings';
@@ -818,7 +818,10 @@ export async function processTranscriptToCall(
   const activeCriteria = await fetchActiveCriteria(supabase, companyId);
   const { script, extra } = splitScriptCriteria(activeCriteria);
   const extraRules = buildDynamicRules(extra);
-  const analysis = await analyzeTranscript(transcript, extraRules, script);
+  // GPT'ga VAQT BELGILARI qo'yilgan transkript beriladi — "muhim joylar"
+  // uchun haqiqiy vaqtlarni ko'rsatishi kerak (o'ylab topmasligi uchun).
+  const timed = withTimeCodes(transcript, dialogSegments);
+  const analysis = await analyzeTranscript(timed, extraRules, script);
   // cast: audio-pipeline'ning CallAnalysis'i va bu yerdagi AuditResult
   // LostReason tipi bir oz farq qiladi (count maydoni) — normalizeAuditResult
   // baribir barcha maydonlarni normalize/default qiladi, shu sabab xavfsiz.
@@ -857,10 +860,31 @@ export async function processTranscriptToCall(
     }
     extraFields = { dropped_reason: 'Sotuv suhbati emas' };
   }
-  const { error } = await supabase
+  // Muhim joylar va muammo belgisi — ular uchun alohida ustunlar bor
+  // (supabase/add_key_moments_and_problem.sql). SQL hali ishga
+  // tushirilmagan bo'lsa, insert ularni tashlab qayta uriniladi —
+  // qo'ng'iroq baribir saqlanadi.
+  // GPT bergan vaqtlarni haqiqiy segmentlarga yopishtiramiz.
+  const moments = snapKeyMoments(analysis.key_moments, dialogSegments, audit.duration);
+  const aiFields = {
+    key_moments: moments.length ? moments : null,
+    is_problem: analysis.problem.is_problem,
+    problem_severity: analysis.problem.is_problem ? analysis.problem.severity : null,
+    problem_reason: analysis.problem.is_problem ? analysis.problem.reason : null,
+  };
+
+  let upd = await supabase
     .from('calls')
-    .update({ ...callRowFields(audit), ...extraFields, status: 'done', error: null })
+    .update({ ...callRowFields(audit), ...extraFields, ...aiFields, status: 'done', error: null })
     .eq('id', callId);
+  if (upd.error && /key_moments|is_problem|problem_severity|problem_reason/i.test(upd.error.message || '')) {
+    console.warn('calls.key_moments ustunlari yo\'q — supabase/add_key_moments_and_problem.sql ishga tushirilsin.');
+    upd = await supabase
+      .from('calls')
+      .update({ ...callRowFields(audit), ...extraFields, status: 'done', error: null })
+      .eq('id', callId);
+  }
+  const { error } = upd;
   if (error) throw new Error(error.message);
   await Promise.allSettled(childWritePromises(supabase, callId, audit));
 }

@@ -21,6 +21,14 @@ export interface CoachingInput {
   stages: Array<{ title: string; pct: number }>;
   mistakes: string[];      // "− 2.0 · Probniyga chaqirish: ..." qatorlari
   reasons: string[];       // "Aloqa sifati yomon (5 ta)" kabi
+  /* Konversiya konteksti (2026-09-27): maslahat "ballni ko'tar" emas,
+   * "ko'proq mijoz yopish" haqida bo'lishi uchun. */
+  topMistakes?: Array<{ label: string; count: number; points_lost: number }>;
+  lostReasons?: Array<{ reason: string; count: number }>;
+  leads?: number;
+  invited?: number;
+  closed?: number;
+  conversion?: number;     // lid -> bitim, foizda
 }
 
 export interface Coaching {
@@ -67,12 +75,24 @@ export async function buildCoaching(name: string, input: CoachingInput): Promise
     '           Masalan: "Probniyga chaqirmayapti — 12 ta suhbatdan faqat 1 tasida taklif qilgan".',
     '  advice — 2-4 ta qator: buni QANDAY tuzatish. Amaliy, aynan aytiladigan gap bilan.',
     '           Masalan: "Suhbat oxirida: \'Shanba soat 10 mi, 14 mi qulay?\' deb tanlov bering".',
+    '           MAQSAD — KONVERSIYA: har maslahat "shu operator ko\'proq mijoz yopishi" uchun bo\'lsin.',
+    '           Eng ko\'p ball yeb ketgan xatodan va bitim yo\'qolgan sabablardan boshlang — ular berilgan.',
     'O\'zbek tilida, sodda va hurmat bilan yozing. Har qator 15 so\'zdan oshmasin.',
   ].join('\n');
+
+  const conv = input.leads !== undefined
+    ? `Lid: ${input.leads} · markazga taklif: ${input.invited ?? 0} · yopilgan: ${input.closed ?? 0} · konversiya: ${(input.conversion ?? 0).toFixed(1)}%`
+    : '';
 
   const user = [
     `Operator: ${name}`,
     `Kunlik natija: ${input.calls} qo'ng'iroq, ${input.minutes} daqiqa gaplashgan, ${input.scoredCalls} tasi baholangan, o'rtacha ball ${(input.avgScore / 10).toFixed(1)}/10`,
+    conv,
+    '',
+    input.topMistakes?.length ? 'Eng ko\'p ball yeb ketgan xatolar (band · necha marta · jami yo\'qotilgan ball):' : '',
+    ...(input.topMistakes || []).map((m) => `  ${m.label} · ${m.count} marta · −${m.points_lost} ball`),
+    input.lostReasons?.length ? '\nBitim yo\'qolgan sabablar:' : '',
+    ...(input.lostReasons || []).map((l) => `  ${l.reason} (${l.count} ta)`),
     '',
     'Skript bandlari bo\'yicha o\'rtacha bajarish (eng kuchsizdan):',
     ...input.stages.map((s) => `  ${s.pct}% — ${s.title}`),

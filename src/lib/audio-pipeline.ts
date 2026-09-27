@@ -21,6 +21,21 @@ export interface LostReason {
   reason_text: string;
 }
 
+/* Suhbatning MUHIM joyi — vaqt belgisi bilan. Vaqt sekundda; dashboard
+ * uni "02:14" qilib ko'rsatadi va bosilganda audio o'sha joyga o'tadi. */
+export interface KeyMoment {
+  time: number;
+  label: string;
+  kind: 'good' | 'bad' | 'neutral';
+}
+
+/* Qo'ng'iroq muammoli deb belgilanishi — rahbar darhol ko'rishi uchun. */
+export interface CallProblem {
+  is_problem: boolean;
+  severity: 'low' | 'medium' | 'high';
+  reason: string;
+}
+
 export interface CallAnalysis {
   sentiment: 'positive' | 'negative' | 'neutral';
   client_mood: string;
@@ -33,6 +48,8 @@ export interface CallAnalysis {
   next_steps: string[];
   lost_reasons: LostReason[];
   criteria_scores: CriteriaScore[];
+  key_moments: KeyMoment[];
+  problem: CallProblem;
   // Sessiya-darajasidagi sub-metrikalar — audio yozuv bitta suhbatdan tashkil
   // topgan bo'lsa ham, ba'zan bir nechta qo'ng'iroq/lid ketma-ket ovoz
   // yozuvida bo'lishi mumkin, shu sabab Gemini transkriptdan sanab beradi.
@@ -302,6 +319,30 @@ function extractGeminiRetryDelayMs(error: unknown, fallbackMs: number): number {
 }
 
 // Gemini — Aisha bergan transkriptni qo'ng'iroq tahlil skripti (mezonlari) bo'yicha baholaydi.
+/** Segmentlardan "[MM:SS] Kim: gap" ko'rinishidagi matn yasaydi.
+ *
+ * GPT key_moments uchun HAQIQIY vaqtlarni ko'rsatishi kerak — shu sabab
+ * unga oddiy matn emas, vaqt belgilari qo'yilgan transkript beriladi.
+ * Segmentlar bo'lmasa oddiy matn qaytadi. */
+export function withTimeCodes(transcript: string, segments: unknown[]): string {
+  if (!Array.isArray(segments) || segments.length === 0) return transcript;
+  const clock = (sec: number) => {
+    const s = Math.max(0, Math.round(sec));
+    return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  };
+  const speakers = new Map<string, string>();
+  const lines: string[] = [];
+  for (const raw of segments as any[]) {
+    const text = String(raw?.text || '').trim();
+    if (!text) continue;
+    const key = String(raw?.speaker || '');
+    if (key && !speakers.has(key)) speakers.set(key, speakers.size === 0 ? 'Sotuvchi' : 'Mijoz');
+    const who = speakers.get(key) || 'Suhbat';
+    lines.push(`[${clock(Number(raw?.start) || 0)}] ${who}: ${text}`);
+  }
+  return lines.length ? lines.join('\n') : transcript;
+}
+
 export async function analyzeTranscript(
   transcript: string,
   extraRules = '',
@@ -479,6 +520,26 @@ function normalizeAnalysisJson(text: string, source: string, stages?: ScriptStag
           .map((r) => ({ reason_text: r.reason_text }))
       : [],
     criteria_scores: criteria,
+    key_moments: Array.isArray((parsed as any).key_moments)
+      ? ((parsed as any).key_moments as any[])
+          .filter((k) => k && typeof k.label === 'string' && k.label.trim() !== '' && Number.isFinite(Number(k.time)))
+          .slice(0, 10)
+          .map((k) => ({
+            time: Math.max(0, Math.round(Number(k.time))),
+            label: String(k.label).trim().slice(0, 120),
+            kind: k.kind === 'good' || k.kind === 'bad' ? k.kind : 'neutral',
+          }))
+      : [],
+    problem: (() => {
+      const p = (parsed as any).problem;
+      const isProblem = !!p?.is_problem;
+      const sev = p?.severity === 'high' || p?.severity === 'medium' ? p.severity : 'low';
+      return {
+        is_problem: isProblem,
+        severity: sev as CallProblem['severity'],
+        reason: isProblem && typeof p?.reason === 'string' ? String(p.reason).trim().slice(0, 300) : '',
+      };
+    })(),
     // Har doim kamida 1 ta qo'ng'iroq deb hisoblanadi — audit qilinayotgan
     // audioning o'zi allaqachon bitta suhbatning dalili.
     total_calls: Math.max(1, intMin0(parsed.total_calls)),
