@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 
 process.env.STT_HEALTH_WINDOW = '10';
 process.env.STT_EMPTY_THRESHOLD = '0.7';
-process.env.STT_HEALTH_MIN_DURATION_SEC = '20';
+process.env.STT_HEALTH_MIN_DURATION_SEC = '60';
 
 // DIQQAT: `import` iboralari ko'tariladi (hoisted), shuning uchun yuqoridagi
 // env qiymatlari ta'sir qilishi uchun modul require() bilan olinadi.
@@ -19,8 +19,8 @@ process.env.STT_HEALTH_MIN_DURATION_SEC = '20';
 const health = require('./sttHealth') as typeof import('./sttHealth');
 const { recordOutcome, isPaused, resetHealthForTest, countsTowardHealth, healthSnapshot } = health;
 
-/** N ta natijani ketma-ket qayd etadi (davomiylik standart 60s). */
-function feed(outcomes: boolean[], durationSec = 60): void {
+/** N ta natijani ketma-ket qayd etadi (standart: hisobga olinadigan uzunlik). */
+function feed(outcomes: boolean[], durationSec = 120): void {
   for (const empty of outcomes) recordOutcome(empty, durationSec);
 }
 
@@ -41,10 +41,27 @@ test('oyna to\'lmaguncha pauza yoqilmaydi', () => {
 
 test('normal kun darajasi (20% bo\'sh) pauza YOQMAYDI', () => {
   resetHealthForTest();
-  // 23-sentabrdagi haqiqiy daraja: ≥20s qo'ng'iroqlarning 19.7% i bo'sh.
   feed([true, true, false, false, false, false, false, false, false, false]);
   assert.equal(isPaused(), false, '20% bo\'sh — bu normal, pauza bo\'lmasin');
   assert.equal(healthSnapshot().emptyRatio, 0.2);
+});
+
+test('JIRINGLASH qo\'ng\'iroqlari pauza YOQMAYDI (60 soniyadan qisqa)', () => {
+  // UTel jiringlash vaqtini ham davomiylik deb yozadi: 30-50 soniyalik
+  // "qo'ng'iroq" aslida javobsiz jiringlash bo'lishi mumkin va bo'sh matn
+  // bunda TO'G'RI natija. Birinchi kalibrlash (≥20s) shu sababdan
+  // noto'g'ri ishga tushgan edi.
+  resetHealthForTest();
+  for (const d of [20, 25, 30, 35, 40, 45, 50, 55, 59]) {
+    assert.equal(countsTowardHealth(d), false, `${d}s jiringlash hisobga olinmasin`);
+  }
+  feed(Array(30).fill(true), 35); // 30 ta javobsiz jiringlash
+  assert.equal(isPaused(), false, 'jiringlashlar pauza yoqmasligi kerak');
+  assert.equal(healthSnapshot().samples, 0);
+
+  // 60 soniyadan uzun audiodan bo'sh matn — bu haqiqatan nosozlik belgisi.
+  assert.equal(countsTowardHealth(60), true);
+  assert.equal(countsTowardHealth(300), true);
 });
 
 test('chegara aynan 70% da yoqiladi, 60% da yoqilmaydi', () => {
@@ -71,8 +88,8 @@ test('muvaffaqiyatli natija hech qachon pauza yoqmaydi', () => {
 
 test('qisqa qo\'ng\'iroqlar sog\'liq o\'lchoviga KIRMAYDI', () => {
   resetHealthForTest();
-  assert.equal(countsTowardHealth(19), false);
-  assert.equal(countsTowardHealth(20), true);
+  assert.equal(countsTowardHealth(59), false);
+  assert.equal(countsTowardHealth(60), true);
 
   feed(Array(30).fill(true), 5); // 5 soniyalik javobsizlar
   assert.equal(isPaused(), false, 'haqiqiy javobsiz qisqa qo\'ng\'iroqlar pauza yoqmasligi kerak');

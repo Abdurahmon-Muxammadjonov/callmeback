@@ -12,13 +12,34 @@
 // Shuning uchun himoya GLOBAL: oxirgi N ta YETARLICHA UZUN qo'ng'iroqning
 // ko'pchiligi bo'sh chiqsa, bu endi tasodif emas — xizmat nosoz.
 //
-// CHEGARA QAYERDAN OLINGAN (haqiqiy ma'lumotdan kalibrlangan):
-//   23-sentabr (normal kun)    : ≥20s qo'ng'iroqlarning 19.7% i bo'sh
-//   24-sentabr ertalab (normal): 14.7% i bo'sh
-//   nosozlik davri             : 100% i bo'sh
-// Standart chegara 70% — normal shovqindan ancha yuqori, uzilishdan
-// ancha past. p=0.20 bo'lganda 20 tadan 14 tasi bo'sh chiqish ehtimoli
-// ~2e-6, ya'ni yolg'on ishga tushish amalda bo'lmaydi.
+// QAYSI QO'NG'IROQ HISOBGA OLINADI — 60 SONIYADAN UZUN (kalibrlangan).
+//
+// BIRINCHI KALIBRLASH XATO EDI (2026-09-27, jonli sinovda aniqlandi):
+// chegara ≥20s edi va circuit breaker NOTO'G'RI ishga tushdi. Sabab —
+// UTel JIRINGLASH vaqtini ham qo'ng'iroq davomiyligi deb yozadi. Ya'ni
+// 35 soniyalik "qo'ng'iroq" aslida 35 soniya jiringlagan, javob
+// bo'lmagan: audioda ovoz bor (-20 dB, jiringlash ohangi), lekin nutq
+// yo'q. Bo'sh matn bunda TO'G'RI natija, nosozlik emas.
+//
+// Haqiqiy ma'lumotda o'lchandi — bo'sh matn ulushi:
+//     chegara    normal kun    nosozlik davri
+//     ≥20s          16.5%           —
+//     ≥45s           3.9%           —
+//     ≥60s           0.2%         93.6%     <-- tanlandi
+//     ≥300s          0.0%         90.8%
+//
+// ≥60s ikki holatni deyarli mukammal ajratadi: normal kunda 419 ta
+// qo'ng'iroqdan faqat 1 tasi bo'sh, nosozlikda esa 94% i. Jiringlash
+// 60 soniyadan oshmaydi, shuning uchun 60 soniyadan uzun audiodan
+// bo'sh matn kelishi haqiqatan nosozlik belgisi.
+//
+// Oyna 10 ga tushirildi: ≥60s qo'ng'iroqlar kamroq uchraydi, 20 talik
+// oyna bilan aniqlash 1.5-2 soatga cho'zilardi. p=0.002 bo'lganda
+// 10 tadan 7 tasi bo'sh chiqish ehtimoli amalda nol.
+//
+// DIQQAT: nosozlikni TEZ sezish uchun asosiy vosita — pauza emas,
+// 30 daqiqalik jimlik ogohlantirishi (maybeAlertAdmin). U pauza
+// yoqilgan-yoqilmaganidan qat'i nazar ishlaydi.
 //
 // PAUZA HOLATIDA qo'ng'iroq "Javobsiz" deb YOZILMAYDI — u 'stt_suspect'
 // holatida qoladi. Bu holat 'done' emas, demak xizmat tiklangach navbat
@@ -41,9 +62,9 @@ const num = (raw: string | undefined, fallback: number): number => {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
 
-const WINDOW = Math.max(3, Math.round(num(process.env.STT_HEALTH_WINDOW, 20)));
+const WINDOW = Math.max(3, Math.round(num(process.env.STT_HEALTH_WINDOW, 10)));
 const THRESHOLD = Math.min(1, num(process.env.STT_EMPTY_THRESHOLD, 0.7));
-const MIN_DURATION_SEC = num(process.env.STT_HEALTH_MIN_DURATION_SEC, 20);
+const MIN_DURATION_SEC = num(process.env.STT_HEALTH_MIN_DURATION_SEC, 60);
 const PROBE_INTERVAL_MS = num(process.env.STT_PROBE_INTERVAL_MS, 10 * 60_000);
 const ALERT_AFTER_MS = num(process.env.STT_ALERT_AFTER_MS, 30 * 60_000);
 

@@ -755,10 +755,14 @@ export function startUtelWorker(): void {
           await new Promise((r) => setTimeout(r, 5 * 60_000));
           continue;
         }
+        // OGOHLANTIRISH PAUZADAN QAT'I NAZAR: ish vaqtida 30 daqiqa
+        // birorta matn chiqmasa admin xabar oladi. Bu pauzadan TEZROQ
+        // sezadi — pauza uchun 10 ta uzun qo'ng'iroq kerak, jimlik esa
+        // vaqt bo'yicha o'lchanadi.
+        await maybeAlertAdmin(await countWaiting(), true);
+
         // XIZMAT NOSOZ DEB BELGILANGAN: odatdagi to'plam olinmaydi.
-        // Faqat vaqti-vaqti bilan bitta sinov + adminni ogohlantirish.
         if (isSttPaused()) {
-          await maybeAlertAdmin(await countWaiting(), isWorkTime());
           if (shouldProbe()) {
             markProbed();
             await probeOnce();
