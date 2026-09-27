@@ -5,6 +5,10 @@ import os from 'node:os';
 import { supabase } from '../lib/supabase';
 import { processTranscriptToCall } from './analyze-call';
 import { submitAudioForAnalysis, waitForAnalysis, waitBudgetMs, isSalesAiConfigured } from '../lib/salesAiClient';
+import {
+  recordOutcome, isPaused as isSttPaused, shouldProbe, markProbed,
+  maybeAlertAdmin, countsTowardHealth, SUSPECT_STATUS,
+} from '../lib/sttHealth';
 import { isWorkTime, workWindowLabel } from '../lib/workHours';
 import { probeWavDurationSec } from '../lib/audioDuration';
 import { classifyShortCall } from '../lib/openaiAnalyzer';
@@ -223,7 +227,31 @@ export async function analyzeUtelCall(
     // qilinadi: sababi aniqlanadi ("Aloqa sifati yomon", "Javobsiz",
     // "Noto'g'ri raqam" ...) va izohga yoziladi.
     const text = res.fullText || '';
+    const trimmed = text.trim();
     const SHORT_LIMIT = 250; // belgidan qisqa = to'liq suhbat emas
+
+    // ============================================================
+    // CIRCUIT BREAKER (2026-09-27)
+    //
+    // Bo'sh matnni bitta qo'ng'iroq darajasida haqiqiy javobsizdan
+    // ajratib bo'lmaydi. Shuning uchun GLOBAL o'lchov: oxirgi N ta
+    // yetarlicha uzun qo'ng'iroqning ko'pchiligi bo'sh chiqsa —
+    // xizmat nosoz, navbat pauza qilinadi.
+    //
+    // Pauza paytida qo'ng'iroq "Javobsiz" deb YOZILMAYDI: u
+    // 'stt_suspect' holatida qoladi. Bu holat 'done' emas, demak
+    // xizmat tiklangach navbat uni o'zi qayta oladi.
+    // ============================================================
+    const isEmpty = trimmed.length < 50;
+    const justTripped = recordOutcome(isEmpty, durSec);
+    if (isEmpty && (justTripped || isSttPaused())) {
+      await supabase.from('calls').update({
+        status: SUSPECT_STATUS,
+        error: 'STT bo\'sh matn qaytardi — xizmat nosoz deb belgilandi, keyin qayta urinamiz.',
+      }).eq('id', rowId);
+      console.warn(`UTel: row=${rowId} 'stt_suspect' holatida qoldirildi (xizmat pauzada).`);
+      return;
+    }
 
     // ============================================================
     // STT TUGAMAGAN BO'LSA — BU "SUHBAT BO'LMAGAN" DEGANI EMAS.
@@ -244,14 +272,14 @@ export async function analyzeUtelCall(
     // nosozligi, "javobsiz" emas — 60 soniyadan uzun qo'ng'iroqda
     // amalda gap bo'lmasligi mumkin emas.
     // ============================================================
-    const emptyFromLongAudio = durSec >= 60 && text.trim().length < 50;
+    const emptyFromLongAudio = durSec >= 60 && isEmpty;
     if (res.status !== 'done' || emptyFromLongAudio) {
       throw new Error(
-        `STT natija bermadi (status=${res.status}, audio ${durSec}s, matn ${text.trim().length} belgi) — qayta urinamiz.`,
+        `STT natija bermadi (status=${res.status}, audio ${durSec}s, matn ${trimmed.length} belgi) — qayta urinamiz.`,
       );
     }
 
-    if (text.trim().length < SHORT_LIMIT) {
+    if (trimmed.length < SHORT_LIMIT) {
       const dur = durSec;
       const { category, note } = await classifyShortCall(text, dur);
       await supabase.from('calls').update({
@@ -349,7 +377,7 @@ async function analyzedSecondsToday(companyId: string, ext: string, atIso: strin
   const { from, to } = tashkentDayBounds(atIso);
   const { data } = await supabase
     .from('calls')
-    .select('duration, dropped_reason, transcript, kpi_score')
+    .select('duration, dropped_reason, transcript, kpi_score, status')
     .eq('company_id', companyId)
     .eq('operator_ext', ext)
     .gte('created_at', from)
@@ -358,19 +386,38 @@ async function analyzedSecondsToday(companyId: string, ext: string, atIso: strin
   return (data || [])
     // Limit tufayli o'tkazib yuborilganlar hisobga kirmaydi.
     .filter((r: any) => r.dropped_reason !== LIMIT_REASON)
+    // Qayta navbatdagi eski qo'ng'iroqlar ham byudjetni yemaydi.
+    .filter((r: any) => r.status !== REQUEUED_STATUS)
     // Faqat haqiqatan ishlov berilganlar (matn olingan yoki baholangan).
     .filter((r: any) => r.transcript || Number(r.kpi_score) > 0 || r.dropped_reason)
     .reduce((s: number, r: any) => s + Math.max(0, Number(r.duration) || 0), 0);
 }
+
+// QAYTA NAVBATGA QO'YILGAN (eski) QO'NG'IROQ BELGISI (2026-09-27).
+//
+// 24-sentabrdagi STT uzilishi tufayli tahlilsiz qolgan qo'ng'iroqlar
+// qo'lda qayta navbatga qo'yiladi. Ular status='requeued' bilan
+// belgilanadi va shu belgi ikki narsani beradi:
+//   1) KUNLIK LIMITGA KIRMAYDI — aks holda o'sha kunning byudjeti
+//      allaqachon sarflangani uchun hammasi darhol "Kunlik limitdan
+//      oshdi" bo'lib qaytardi. Global limit (3600) jonli qo'ng'iroqlar
+//      uchun o'zgarishsiz qoladi.
+//   2) PAST USTUVORLIK — navbat avval jonli qo'ng'iroqlarni oladi
+//      (runQueueOnce'ga qarang).
+// Yangi DB ustuni kerak emas: navbat `.neq('status','done')` bilan
+// tanlagani uchun 'requeued' ham o'z-o'zidan olinadi.
+export const REQUEUED_STATUS = 'requeued';
 
 // Qo'ng'iroqni tahlil qilsa bo'ladimi? Bo'lmasa — belgilab, false qaytaradi.
 async function passesDailyLimit(rowId: string): Promise<boolean> {
   if (!OPERATOR_DAILY_LIMIT_SEC) return true;
   const { data: row } = await supabase
     .from('calls')
-    .select('company_id, operator_ext, duration, created_at')
+    .select('company_id, operator_ext, duration, created_at, status')
     .eq('id', rowId)
     .maybeSingle();
+  // Qayta navbatdagi eski qo'ng'iroq — kunlik limit qo'llanmaydi.
+  if (row?.status === REQUEUED_STATUS) return true;
   const ext = String(row?.operator_ext || '').trim();
   if (!row?.company_id || !ext) return true; // operator noma'lum — limit qo'llanmaydi
 
@@ -538,22 +585,42 @@ async function runQueueOnce(): Promise<number> {
   // 2) Matnsizlar — to'liq quvur (audio -> matn -> tahlil).
   //    AUDIO_TOO_LARGE bo'lganlar tashlab ketiladi: qayta urinish befoyda
   //    va navbatni bloklaydi.
-  const { data, error } = await excludeCooling(supabase
-    .from('calls')
-    .select('id, audio_url, company_id, client_phone, error')
-    .ilike('audio_url', '%utel%')
-    .is('transcript', null)
-    .neq('status', 'done')
-    .gte('created_at', QUEUE_SINCE)
-    .lt('created_at', cutoff))
-    .order('created_at', { ascending: true })
-    .limit(BATCH * 5);
-  if (error) { console.warn('UTel navbat so\'rovi xatosi:', error.message); return needAnalysis.length; }
-  const rows = ((data || []) as any[])
-    .filter((r: any) => typeof r.audio_url === 'string' && r.audio_url.includes('utel'))
-    .filter((r: any) => !String(r.error || '').includes('AUDIO_TOO_LARGE'))
-    .filter((r: any) => !isCoolingDown(r.id) && !inFlight.has(r.id))
-    .slice(0, BATCH);
+  //
+  //    USTUVORLIK (2026-09-27): avval JONLI qo'ng'iroqlar, keyin bo'sh
+  //    joy qolsa — qayta navbatga qo'yilgan eskilari. Aks holda tartib
+  //    created_at bo'yicha bo'lgani uchun 2000 ta eski qo'ng'iroq butun
+  //    to'plamni egallab, ertalab kelayotgan jonli qo'ng'iroq soatlab
+  //    navbat kutardi.
+  const selectQueue = async (requeued: boolean, limit: number) => {
+    let q = excludeCooling(supabase
+      .from('calls')
+      .select('id, audio_url, company_id, client_phone, error')
+      .ilike('audio_url', '%utel%')
+      .is('transcript', null)
+      .neq('status', 'done')
+      .gte('created_at', QUEUE_SINCE)
+      .lt('created_at', cutoff));
+    q = requeued ? q.eq('status', REQUEUED_STATUS) : q.neq('status', REQUEUED_STATUS);
+    const { data, error } = await q.order('created_at', { ascending: true }).limit(limit * 5);
+    if (error) { console.warn('UTel navbat so\'rovi xatosi:', error.message); return null; }
+    return ((data || []) as any[])
+      .filter((r: any) => typeof r.audio_url === 'string' && r.audio_url.includes('utel'))
+      .filter((r: any) => !String(r.error || '').includes('AUDIO_TOO_LARGE'))
+      .filter((r: any) => !isCoolingDown(r.id) && !inFlight.has(r.id))
+      .slice(0, limit);
+  };
+
+  const live = await selectQueue(false, BATCH);
+  if (live === null) return needAnalysis.length;
+  let rows = live;
+  // Jonli qo'ng'iroqlar to'plamni to'ldirmasa — qolgan joyga eskilarini olamiz.
+  if (rows.length < BATCH) {
+    const old = await selectQueue(true, BATCH - rows.length);
+    if (old?.length) {
+      rows = [...rows, ...old];
+      console.log(`UTel navbat: ${live.length} jonli + ${old.length} qayta navbatdagi.`);
+    }
+  }
   if (rows.length === 0) return needAnalysis.length;
 
   console.log(`UTel navbat: ${rows.length} ta audio tahlilga.`);
@@ -572,6 +639,53 @@ async function runQueueOnce(): Promise<number> {
     }
   }));
   return needAnalysis.length + rows.length;
+}
+
+// ============================================================================
+// PAUZA REJIMI YORDAMCHILARI (2026-09-27)
+//
+// Circuit breaker yoqilganda navbat odatdagi to'plamni OLMAYDI — aks holda
+// nosoz xizmatga minglab so'rov yuborilardi. Buning o'rniga har
+// STT_PROBE_INTERVAL_MS da BITTA kutayotgan qo'ng'iroq sinab ko'riladi.
+// Matn kelsa recordOutcome() pauzani o'zi ochadi.
+//
+// Alohida sinov audiosi saqlanmaydi: sinov sifatida haqiqiy kutayotgan
+// qo'ng'iroq ishlatiladi — muvaffaqiyatli bo'lsa u ham tahlil qilinadi.
+// ============================================================================
+
+/** Tahlil kutayotgan (matnsiz, 'done' emas) qo'ng'iroqlar soni. */
+async function countWaiting(): Promise<number> {
+  const { count } = await supabase
+    .from('calls')
+    .select('id', { count: 'exact', head: true })
+    .ilike('audio_url', '%utel%')
+    .is('transcript', null)
+    .neq('status', 'done')
+    .gte('created_at', QUEUE_SINCE);
+  return count ?? 0;
+}
+
+/** Pauzada: bitta kutayotgan qo'ng'iroqni sinab ko'radi (tiklanish tekshiruvi). */
+async function probeOnce(): Promise<void> {
+  const { data } = await supabase
+    .from('calls')
+    .select('id, audio_url, company_id, client_phone')
+    .ilike('audio_url', '%utel%')
+    .is('transcript', null)
+    .neq('status', 'done')
+    .gte('created_at', QUEUE_SINCE)
+    .gte('duration', 20)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  const row = (data || [])[0] as any;
+  if (!row) return;
+  console.log(`STT tiklanish sinovi: row=${row.id}`);
+  inFlight.add(row.id);
+  try {
+    await analyzeUtelCall(row.id, row.audio_url, row.company_id ?? null, row.client_phone ?? undefined);
+  } catch { /* sinov — xato normal, holat recordOutcome orqali yangilanadi */ } finally {
+    inFlight.delete(row.id);
+  }
 }
 
 // TO'XTOVSIZ ISHCHI (foydalanuvchi talabi 2026-09-23: "hammasini ketma-ket
@@ -597,6 +711,17 @@ export function startUtelWorker(): void {
         // tunda to'plangan qo'ng'iroqlarni o'zi oladi.
         if (!isWorkTime()) {
           await new Promise((r) => setTimeout(r, 5 * 60_000));
+          continue;
+        }
+        // XIZMAT NOSOZ DEB BELGILANGAN: odatdagi to'plam olinmaydi.
+        // Faqat vaqti-vaqti bilan bitta sinov + adminni ogohlantirish.
+        if (isSttPaused()) {
+          await maybeAlertAdmin(await countWaiting(), isWorkTime());
+          if (shouldProbe()) {
+            markProbed();
+            await probeOnce();
+          }
+          await new Promise((r) => setTimeout(r, 60_000));
           continue;
         }
         const processed = await runQueueOnce();
