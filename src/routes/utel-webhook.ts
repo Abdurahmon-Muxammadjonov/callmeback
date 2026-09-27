@@ -9,7 +9,7 @@ import {
   recordOutcome, isPaused as isSttPaused, shouldProbe, markProbed,
   maybeAlertAdmin, countsTowardHealth, SUSPECT_STATUS, logHealthConfig,
 } from '../lib/sttHealth';
-import { isWorkTime, workWindowLabel, isTodayTashkent } from '../lib/workHours';
+import { isWorkTime, workWindowLabel } from '../lib/workHours';
 import { probeWavDurationSec } from '../lib/audioDuration';
 import { classifyShortCall } from '../lib/openaiAnalyzer';
 
@@ -247,7 +247,10 @@ export async function analyzeUtelCall(
     const justTripped = recordOutcome(isEmpty, durSec);
     if (isEmpty && (justTripped || isSttPaused())) {
       await supabase.from('calls').update({
-        status: SUSPECT_STATUS,
+        // Qayta navbatdagi qatorda 'requeued' belgisi saqlanadi (kunlik
+        // limitdan ozodlik yo'qolmasin). Ikkala holat ham 'done' EMAS,
+        // demak xizmat tiklangach navbat qatorni o'zi qayta oladi.
+        status: opts.skipDailyLimit ? REQUEUED_STATUS : SUSPECT_STATUS,
         error: 'STT bo\'sh matn qaytardi — xizmat nosoz deb belgilandi, keyin qayta urinamiz.',
       }).eq('id', rowId);
       console.warn(`UTel: row=${rowId} 'stt_suspect' holatida qoldirildi (xizmat pauzada).`);
@@ -314,7 +317,13 @@ export async function analyzeUtelCall(
     console.log(`UTel analiz done (row=${rowId}, so'z: ${res.wordsCount})`);
   } catch (e: any) {
     console.error(`UTel analiz xatosi (row=${rowId}):`, e?.message || e);
-    await supabase.from('calls').update({ status: 'failed', error: String(e?.message || e).slice(0, 500) }).eq('id', rowId).then(undefined, () => {});
+    // Qayta navbatdagi qatorda 'requeued' belgisi SAQLANADI — 'failed'
+    // yozilsa kunlik limitdan ozodlik yo'qolib, keyingi urinishda
+    // qo'ng'iroq "Kunlik limitdan oshdi" bo'lib qolardi.
+    await supabase.from('calls').update({
+      status: opts.skipDailyLimit ? REQUEUED_STATUS : 'failed',
+      error: String(e?.message || e).slice(0, 500),
+    }).eq('id', rowId).then(undefined, () => {});
   }
 }
 
@@ -325,8 +334,10 @@ async function reanalyzeTranscriptOnly(row: {
   transcript: string;
   transcript_segments: unknown;
   company_id: string | null;
+  status?: string | null;
 }): Promise<void> {
-  if (!(await passesDailyLimit(row.id))) return;
+  const requeued = row.status === REQUEUED_STATUS;
+  if (!(await passesDailyLimit(row.id, requeued))) return;
   try {
     await processTranscriptToCall(
       supabase,
@@ -337,7 +348,11 @@ async function reanalyzeTranscriptOnly(row: {
     );
   } catch (e: any) {
     console.error(`UTel qayta tahlil xatosi (row=${row.id}):`, e?.message || e);
-    await supabase.from('calls').update({ status: 'failed', error: String(e?.message || e).slice(0, 500) }).eq('id', row.id).then(undefined, () => {});
+    // 'requeued' belgisi saqlanadi — kunlik limitdan ozodlik yo'qolmasin.
+    await supabase.from('calls').update({
+      status: requeued ? REQUEUED_STATUS : 'failed',
+      error: String(e?.message || e).slice(0, 500),
+    }).eq('id', row.id).then(undefined, () => {});
   }
 }
 
@@ -425,11 +440,12 @@ async function passesDailyLimit(rowId: string, skipLimit = false): Promise<boole
     .maybeSingle();
   // Qayta navbatdagi eski qo'ng'iroq — kunlik limit qo'llanmaydi.
   if (row?.status === REQUEUED_STATUS) return true;
-  // CHIDAMLI ZAXIRA: kunlik limit BUGUNGI jonli yuklamani cheklash uchun.
-  // O'tgan kunlardagi qo'ng'iroqni qayta tahlil qilishda u ma'nosiz —
-  // o'sha kunning byudjeti allaqachon sarflangan. Bu tekshiruv status
-  // o'chirilsa ham (restart, 'processing') ishlaydi.
-  if (row?.created_at && !isTodayTashkent(row.created_at)) return true;
+  // DIQQAT: "bugungi kun emas -> limitdan ozod" qoidasi BO'LMASLIGI kerak.
+  // 23:00 dan keyin kelib ertasi kuni ertalab tahlil qilinadigan JONLI
+  // qo'ng'iroqlar ham o'sha teshikdan chiqib ketardi va kunlik limit
+  // amalda ishlamay qolardi. Ozodlik FAQAT qayta navbatga qo'yilgan
+  // qatorlarga tegishli: 'requeued' belgisi (yuqorida) yoki navbatning
+  // aniq skipLimit flagi.
   const ext = String(row?.operator_ext || '').trim();
   if (!row?.company_id || !ext) return true; // operator noma'lum — limit qo'llanmaydi
 
@@ -568,7 +584,7 @@ async function runQueueOnce(): Promise<number> {
   // kvotasini bekorga yeb qo'yardi.
   const { data: pending } = await excludeCooling(supabase
     .from('calls')
-    .select('id, transcript, transcript_segments, company_id')
+    .select('id, transcript, transcript_segments, company_id, status')
     .not('transcript', 'is', null)
     .neq('status', 'done')
     .ilike('audio_url', '%utel%')
@@ -586,7 +602,10 @@ async function runQueueOnce(): Promise<number> {
       markAttempted(r.id);
       inFlight.add(r.id);
       try {
-        await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
+        // Qayta navbatdagi qatorda status'ga tegmaymiz (belgi saqlanadi).
+        if (r.status !== REQUEUED_STATUS) {
+          await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
+        }
         await reanalyzeTranscriptOnly(r as any);
       } finally {
         inFlight.delete(r.id);
@@ -646,7 +665,13 @@ async function runQueueOnce(): Promise<number> {
     markAttempted(r.id);
     inFlight.add(r.id);
     try {
-      await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
+      // QAYTA NAVBATDAGI qatorda status'ga TEGMAYMIZ: 'requeued' belgisi
+      // kunlik limitdan ozodlikni bildiradi va u restart/xatodan keyin
+      // ham saqlanishi kerak. Bir vaqtda ikki marta olinishiga inFlight
+      // to'sqinlik qiladi.
+      if (r.__requeued !== true) {
+        await supabase.from('calls').update({ status: 'processing' }).eq('id', r.id);
+      }
       await analyzeUtelCall(
         r.id, r.audio_url as string, r.company_id ?? null, r.client_phone ?? undefined,
         { skipDailyLimit: r.__requeued === true },

@@ -514,45 +514,81 @@ async function uploadAudioToStorage(
   }
 }
 
-// calls jadvalining ustun qiymatlari (yakka va batch rejim uchun umumiy).
+// ============================================================================
+// calls jadvaliga YOZILADIGAN USTUNLAR — OQ RO'YXAT (2026-09-27)
 //
-// DAVOMIYLIK NEGA SHARTLI YOZILADI (2026-09-27):
-// audit.duration GPT javobidan keladi, GPT esa "duration" maydonini
-// qaytarmaydi -> normalizeAuditResult uni 0 qiladi. Natijada HAR QAYTA
-// TAHLIL calls.duration ni 0 ga tushirardi: qo'ng'iroq bazada bor, audio
-// eshitiladi, lekin gaplashilgan vaqt yo'qolardi (kunlik daqiqalar,
-// operator statistikasi va kunlik limit hisobi buzilardi).
+// QOIDA: GPT javobidan FAQAT TAHLIL maydonlari yoziladi. FAKTIK maydonlar
+// (davomiylik, yo'nalish, telefon, operator, vaqt, audio) HECH QACHON
+// GPT'dan yozilmaydi — ularning manbai PBX (UTel) va audio faylning o'zi.
 //
-// Bu 2026-09-24 da "432 ta qo'ng'iroqda davomiylik 0" holatining ham
-// ildiz sababi edi — o'sha paytda ma'lumot to'ldirilgan, sabab esa
-// topilmagan. Endi: 0 bo'lsa ustun UMUMAN yozilmaydi, ya'ni mavjud
-// haqiqiy qiymat (UTel yoki audiodan o'lchangan) saqlanadi.
+// NEGA BU QOIDA KERAK (haqiqiy zarar):
+//   1) duration — GPT "duration" maydonini qaytarmaydi, shuning uchun
+//      normalizeAuditResult uni 0 qilardi va HAR QAYTA TAHLIL qo'ng'iroqning
+//      gaplashilgan vaqtini o'chirib tashlardi. 2026-09-24 dagi "432 ta
+//      qo'ng'iroqda davomiylik 0" holatining ildiz sababi shu edi.
+//   2) incoming_count / outgoing_count — GPT ularni TAXMIN qilardi va
+//      o'lchash ko'rsatdi: ballangan 546 qo'ng'iroqning 431 tasida (78.9%)
+//      bu qiymatlar PBX bergan haqiqiy `direction` bilan QARAMA-QARSHI edi
+//      (chiquvchi qo'ng'iroq "kiruvchi" deb yozilgan).
+//
+// Shu sabab bu maydonlar quyidagi ro'yxatda YO'Q. Ularni factRowFields()
+// PBX ma'lumotidan hisoblaydi.
+// ============================================================================
 function callRowFields(audit: AuditResult) {
   return {
-    total_calls: audit.total_calls,
-    incoming_count: audit.incoming_count,
-    outgoing_count: audit.outgoing_count,
-    ...(audit.duration > 0 ? { duration: audit.duration } : {}),
-    unanswered_count: audit.unanswered_count,
+    // --- Ball va pul ---
+    kpi_score: audit.kpi_score,
+    penalty_amount: audit.penalty_amount,
+    bonus_amount: audit.bonus_amount,
+    // --- Matn va izoh ---
+    rop_comment: audit.rop_comment,
+    transcript: audit.transcript,
+    transcript_segments: audit.transcript_segments,
+    summary: audit.summary,
+    // --- Suhbat mazmuni bo'yicha AI xulosasi ---
+    sentiment: audit.sentiment,
+    risk: audit.risk,
+    client_info: audit.client_info,
+    final_agreement: audit.final_agreement,
+    next_steps: audit.next_steps,
+    // --- Lid holati: bu AI baholashi, faktik o'lchov emas ---
     bad_leads_count: audit.bad_leads_count,
     new_leads_count: audit.new_leads_count,
     sent_to_dealer_count: audit.sent_to_dealer_count,
     closed_deals_count: audit.closed_deals_count,
-    kpi_score: audit.kpi_score,
-    penalty_amount: audit.penalty_amount,
-    bonus_amount: audit.bonus_amount,
-    rop_comment: audit.rop_comment,
-    transcript: audit.transcript,
-    sentiment: audit.sentiment,
-    risk: audit.risk,
-    transcript_segments: audit.transcript_segments,
-    summary: audit.summary,
-    client_info: audit.client_info,
-    final_agreement: audit.final_agreement,
-    next_steps: audit.next_steps,
     bad_lead: audit.bad_leads_count > 0,
   };
 }
+
+/**
+ * FAKTIK ustunlar — PBX bergan `direction` dan hisoblanadi, GPT'dan emas.
+ *
+ * duration bu yerda ham YO'Q: u qo'ng'iroq saqlanganda UTel'dan yoki
+ * audio faylning o'zidan o'lchanadi va keyin hech qachon ustidan
+ * yozilmaydi.
+ */
+export function factRowFields(direction: string | null | undefined) {
+  const incoming = direction === 'incoming';
+  const outgoing = direction === 'outgoing';
+  return {
+    total_calls: 1,
+    incoming_count: incoming ? 1 : 0,
+    outgoing_count: outgoing ? 1 : 0,
+    // Baholangan qo'ng'iroqda suhbat bo'lgan — javobsiz emas.
+    unanswered_count: 0,
+  };
+}
+
+/** Faqat testlar uchun: oq ro'yxatdagi kalitlar. */
+export const CALL_ROW_ANALYSIS_KEYS = [
+  'kpi_score', 'penalty_amount', 'bonus_amount',
+  'rop_comment', 'transcript', 'transcript_segments', 'summary',
+  'sentiment', 'risk', 'client_info', 'final_agreement', 'next_steps',
+  'bad_leads_count', 'new_leads_count', 'sent_to_dealer_count',
+  'closed_deals_count', 'bad_lead',
+] as const;
+
+export { callRowFields as callRowFieldsForTest };
 
 // Bog'liq jadvallarga (conversions/lost_reasons/call_criteria_scores) yozish promise'lari.
 function childWritePromises(supabase: SupabaseClient, callId: string, audit: AuditResult) {
@@ -827,6 +863,14 @@ export async function processTranscriptToCall(
   dialogSegments: unknown[],
   companyId: string | null,
 ): Promise<void> {
+  // FAKTIK MA'LUMOT bazadan olinadi, GPT'dan emas (2026-09-27 qoidasi):
+  // davomiylik — vaqt belgilarini tekshirish uchun, yo'nalish —
+  // kiruvchi/chiquvchi hisobi uchun.
+  const { data: factRow } = await supabase
+    .from('calls').select('duration, direction').eq('id', callId).maybeSingle();
+  const realDuration = Math.max(0, Number((factRow as any)?.duration) || 0);
+  const realDirection = (factRow as any)?.direction as string | null | undefined;
+
   const activeCriteria = await fetchActiveCriteria(supabase, companyId);
   const { script, extra } = splitScriptCriteria(activeCriteria);
   const extraRules = buildDynamicRules(extra);
@@ -877,7 +921,10 @@ export async function processTranscriptToCall(
   // tushirilmagan bo'lsa, insert ularni tashlab qayta uriniladi —
   // qo'ng'iroq baribir saqlanadi.
   // GPT bergan vaqtlarni haqiqiy segmentlarga yopishtiramiz.
-  const moments = snapKeyMoments(analysis.key_moments, dialogSegments, audit.duration);
+  // audit.duration EMAS: u GPT javobidan keladi va doim 0 bo'ladi, ya'ni
+  // vaqt chegarasi ishlamay qolardi va audio tashqarisidagi belgilar
+  // o'tib ketardi. Bazadagi haqiqiy davomiylik ishlatiladi.
+  const moments = snapKeyMoments(analysis.key_moments, dialogSegments, realDuration);
   const aiFields = {
     key_moments: moments.length ? moments : null,
     is_problem: analysis.problem.is_problem,
@@ -887,13 +934,19 @@ export async function processTranscriptToCall(
 
   let upd = await supabase
     .from('calls')
-    .update({ ...callRowFields(audit), ...extraFields, ...aiFields, status: 'done', error: null })
+    .update({
+      ...callRowFields(audit), ...factRowFields(realDirection),
+      ...extraFields, ...aiFields, status: 'done', error: null,
+    })
     .eq('id', callId);
   if (upd.error && /key_moments|is_problem|problem_severity|problem_reason/i.test(upd.error.message || '')) {
     console.warn('calls.key_moments ustunlari yo\'q — supabase/add_key_moments_and_problem.sql ishga tushirilsin.');
     upd = await supabase
       .from('calls')
-      .update({ ...callRowFields(audit), ...extraFields, status: 'done', error: null })
+      .update({
+        ...callRowFields(audit), ...factRowFields(realDirection),
+        ...extraFields, status: 'done', error: null,
+      })
       .eq('id', callId);
   }
   const { error } = upd;

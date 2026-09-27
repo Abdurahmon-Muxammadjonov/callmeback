@@ -193,6 +193,25 @@ async function sendAdminTelegram(text: string): Promise<void> {
 }
 
 /**
+ * OGOHLANTIRISH YO'LINI SINAB KO'RADI (ops uchun).
+ *
+ * Haqiqiy nosozlikda xabar birinchi marta yuborilganda buzuq chiqmasligi
+ * uchun aynan shu yo'l (sendAdminTelegram) oldindan sinaladi.
+ * Ishlatish: node -e "require('./dist/lib/sttHealth.js').sendTestAlert()"
+ */
+export async function sendTestAlert(note = ''): Promise<void> {
+  const cfg = healthSnapshot();
+  await sendAdminTelegram(
+    '✅ <b>SalesPulse: STT monitoring sinovi</b>\n\n'
+    + 'Bu sinov xabari — nosozlik YO\'Q.\n'
+    + `Chegara: oxirgi ${cfg.window} ta (≥${cfg.minDurationSec}s) qo'ng'iroqning `
+    + `≥${Math.round(cfg.threshold * 100)}% i bo'sh chiqsa navbat pauza qilinadi.\n`
+    + `Hozirgi holat: ${cfg.paused ? 'PAUZA' : 'ishlayapti'}\n`
+    + (note ? `\n${note}` : ''),
+  );
+}
+
+/**
  * Ish vaqtida uzoq jimlik bo'lsa adminni ogohlantiradi.
  * Takroriy xabar yubormaslik uchun ALERT_AFTER_MS oralig'ida bir marta.
  */
