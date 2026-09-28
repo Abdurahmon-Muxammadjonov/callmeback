@@ -33,10 +33,16 @@ const LOOKBACK_DAYS = Math.max(1, Number(process.env.INSIGHT_LOOKBACK_DAYS || 7)
 const MIN_RATED = Math.max(1, Number(process.env.INSIGHT_MIN_RATED || 5));
 const MAX_TIP_CHARS = 90;
 
-/** GPT javobi shakli — §10 qat'iy belgilagan. */
+// GPT javobi shakli. Uzunlik BU YERDA tekshirilmaydi — pastdagi
+// enforceLength() bilan alohida qo'llanadi.
+//
+// NEGA AJRATILDI (2026-09-28, jonli sinovda aniqlandi): schema'da
+// .max(90) bo'lganda model bitta uzun gap yozsa BUTUN javob rad etilardi
+// va operator umuman tavsiyasiz qolardi — 11 tadan 5 tasi shunday ketdi.
+// Tavsiyasiz qolgandan ko'ra so'z chegarasida qisqartirilgani yaxshiroq.
 const TipsSchema = z.object({
-  uz: z.array(z.string().trim().min(1).max(MAX_TIP_CHARS)).length(3),
-  ru: z.array(z.string().trim().min(1).max(MAX_TIP_CHARS)).length(3),
+  uz: z.array(z.string().trim().min(1)).length(3),
+  ru: z.array(z.string().trim().min(1)).length(3),
 });
 export type Tips = z.infer<typeof TipsSchema>;
 
@@ -152,6 +158,24 @@ function buildUserPrompt(input: OperatorInput): string {
   ].filter(Boolean).join('\n');
 }
 
+/** So'z chegarasida qisqartiradi (gap o'rtasidan kesmaydi). */
+export function trimTip(text: string, max = MAX_TIP_CHARS): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max - 1);
+  const lastSpace = cut.lastIndexOf(' ');
+  return `${(lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
+/** Barcha tavsiyalar chegaraga sig'adimi? */
+function fitsLength(tips: Tips): boolean {
+  return [...tips.uz, ...tips.ru].every((t) => t.length <= MAX_TIP_CHARS);
+}
+
+function applyTrim(tips: Tips): Tips {
+  return { uz: tips.uz.map((t) => trimTip(t)), ru: tips.ru.map((t) => trimTip(t)) };
+}
+
 /** Bitta operator uchun tavsiya oladi. Xato bo'lsa null (job to'xtamaydi). */
 export async function generateTips(input: OperatorInput): Promise<{ tips: Tips; tokens: number } | null> {
   const key = process.env.OPENAI_API_KEY;
@@ -159,7 +183,7 @@ export async function generateTips(input: OperatorInput): Promise<{ tips: Tips; 
     console.warn('operator_insights: OPENAI_API_KEY yo\'q — tavsiya yozilmadi.');
     return null;
   }
-  try {
+  const ask = async (extra: string): Promise<{ tips: Tips; tokens: number } | null> => {
     const resp = await fetch(API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
@@ -168,7 +192,7 @@ export async function generateTips(input: OperatorInput): Promise<{ tips: Tips; 
         temperature: 0.3,
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: SYSTEM },
+          { role: 'system', content: SYSTEM + extra },
           { role: 'user', content: buildUserPrompt(input) },
         ],
       }),
@@ -182,6 +206,25 @@ export async function generateTips(input: OperatorInput): Promise<{ tips: Tips; 
       return null;
     }
     return { tips: parsed.data, tokens: Number(json?.usage?.total_tokens) || 0 };
+  };
+
+  try {
+    let res = await ask('');
+    if (!res) return null;
+    // Uzun chiqsa BIR marta qaytadan so'raymiz, keyin qisqartiramiz.
+    if (!fitsLength(res.tips)) {
+      const retry = await ask(
+        `\n\nDIQQAT: oldingi javobingiz juda uzun edi. Har bir tavsiya QAT'IY ${MAX_TIP_CHARS} belgidan qisqa bo'lsin.`,
+      );
+      if (retry) {
+        res = { tips: retry.tips, tokens: res.tokens + retry.tokens };
+      }
+      if (!fitsLength(res.tips)) {
+        console.warn(`operator_insights: ${input.ext} — tavsiyalar so'z chegarasida qisqartirildi.`);
+        res = { tips: applyTrim(res.tips), tokens: res.tokens };
+      }
+    }
+    return res;
   } catch (e: any) {
     console.warn(`operator_insights: ${input.ext} uchun xato — ${e?.message || e}`);
     return null;
