@@ -103,7 +103,10 @@ test('tiklanganda pauza O\'CHADI va oyna tozalanadi', () => {
 
   recordOutcome(false, 60); // matn keldi
   assert.equal(isPaused(), false, 'matn kelishi bilan pauza ochilishi kerak');
-  assert.equal(healthSnapshot().samples, 0, 'oyna tozalanishi kerak');
+  // Oyna tozalanadi, so'ng SHU muvaffaqiyat yangi oynaga birinchi namuna
+  // bo'lib tushadi — eski bo'shlar hisobdan chiqadi, yangi hisob boshlanadi.
+  assert.equal(healthSnapshot().samples, 1, 'oyna yangilanib, bitta muvaffaqiyat qolsin');
+  assert.equal(healthSnapshot().emptyRatio, 0, 'yangi oynada bo\'sh yo\'q');
 });
 
 test('tiklangandan keyin yana buzilsa — qaytadan yoqiladi', () => {
@@ -122,4 +125,45 @@ test('pauza yoqilgan chaqiruv true qaytaradi, keyingilari false', () => {
   assert.equal(results.filter(Boolean).length, 1, 'faqat bitta chaqiruv "yangi yoqildi" desin');
   assert.equal(results[9], true, 'oxirgisi yoqqan bo\'lsin');
   assert.equal(recordOutcome(true, 60), false, 'allaqachon pauzada — takror yoqilmaydi');
+});
+
+// --- Pauzaning qotib qolishi (2026-09-28 da production'da yuz berdi) ---
+//
+// Tiklanish tekshiruvi `countsTowardHealth` darvozasi ortida turardi. Navbat
+// pauzada bo'lganda tiklanish sinovi QISQA qo'ng'iroqni tanlashi mumkin; u
+// matn qaytarsa ham darvozadan o'tmasdi va pauza ochilmasdi. 19:27 da
+// yoqilgan pauza 22:30 da ham ochiq turgan edi.
+
+test('QISQA qo\'ng\'iroqdan kelgan matn ham pauzani OCHADI', () => {
+  resetHealthForTest();
+  feed(Array(10).fill(true));
+  assert.equal(isPaused(), true, 'avval pauza yoqilsin');
+
+  // 5 soniyalik qo'ng'iroq matn qaytardi — xizmat tirik demakdir.
+  recordOutcome(false, 5);
+  assert.equal(isPaused(), false, 'qisqa bo\'lsa ham matn kelgani pauzani ochishi kerak');
+});
+
+test('qisqa muvaffaqiyat sog\'liq oynasiga KIRMAYDI', () => {
+  resetHealthForTest();
+  recordOutcome(false, 5);
+  assert.equal(healthSnapshot().samples, 0, 'qisqa qo\'ng\'iroq o\'lchovga kirmasin');
+  assert.equal(isPaused(), false);
+});
+
+test('qisqa BO\'SH javob pauza yoqmaydi va oynani buzmaydi', () => {
+  resetHealthForTest();
+  feed(Array(50).fill(true), 5);
+  assert.equal(isPaused(), false, 'qisqa javobsizlar pauza yoqmasligi kerak');
+  assert.equal(healthSnapshot().samples, 0);
+});
+
+test('uzun qo\'ng\'iroqdan kelgan matn ham pauzani ochadi (eski xulq saqlanadi)', () => {
+  resetHealthForTest();
+  feed(Array(10).fill(true));
+  assert.equal(isPaused(), true);
+  recordOutcome(false, 300);
+  assert.equal(isPaused(), false);
+  assert.equal(healthSnapshot().samples, 1, 'oyna yangilanib, bitta muvaffaqiyat qolsin');
+  assert.equal(healthSnapshot().emptyRatio, 0);
 });

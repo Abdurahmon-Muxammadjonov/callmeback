@@ -628,7 +628,9 @@ async function probeOnce(): Promise<void> {
     .is('transcript', null)
     .neq('status', 'done')
     .gte('created_at', QUEUE_SINCE)
-    .gte('duration', 20)
+    // Sinov uchun UZUN qo'ng'iroq afzal: uning natijasi ham pauzani ochadi,
+    // ham sog'liq o'lchoviga kiradi (qisqasi faqat birinchisini qiladi).
+    .gte('duration', 60)
     .order('created_at', { ascending: false })
     .limit(1);
   const row = (data || [])[0] as any;

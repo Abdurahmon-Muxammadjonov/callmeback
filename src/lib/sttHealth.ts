@@ -105,21 +105,37 @@ function emptyRatio(): number {
  * @returns pauza AYNI SHU chaqiruvda yoqilgan bo'lsa true.
  */
 export function recordOutcome(empty: boolean, durationSec: number): boolean {
-  if (!countsTowardHealth(durationSec)) return false;
-
-  state.recent.push(empty);
-  if (state.recent.length > WINDOW) state.recent.shift();
-
+  // ==========================================================================
+  // TIKLANISH DAVOMIYLIKKA BOG'LIQ EMAS (2026-09-28 da tuzatildi).
+  //
+  // Ilgari bu tekshiruv `countsTowardHealth` darvozasi ORTIDA turardi va
+  // pauza qotib qolardi: navbat pauzada bo'lsa, tiklanish sinovi qisqa
+  // qo'ng'iroqni tanlashi mumkin, u matn qaytarsa ham darvozadan o'tmasdi va
+  // pauza ochilmasdi. Production'da aynan shu yuz berdi — 19:27 da yoqilgan
+  // pauza 22:30 da ham ochilmagan edi.
+  //
+  // Mantiq: matn KELGANI xizmat tirikligini isbotlaydi — qo'ng'iroq 5
+  // soniyalik bo'ladimi yoki 15 daqiqalik, farqi yo'q. Davomiylik chegarasi
+  // faqat NOSOZLIKNI ANIQLASH uchun kerak (jiringlashni bo'sh matn deb
+  // sanamaslik uchun), tiklanish uchun emas.
+  // ==========================================================================
   if (!empty) {
     state.lastSuccessAt = Date.now();
-    // Matn keldi — xizmat tirik. Pauzani darhol ochamiz.
     if (state.paused) {
       state.paused = false;
       state.recent = [];
       console.log('STT sog\'lig\'i: matn qaytdi — pauza OCHILDI.');
     }
-    return false;
   }
+
+  // Bundan keyingisi — sog'liq o'lchovi. Unga faqat yetarlicha uzun
+  // qo'ng'iroqlar kiradi (jiringlash bo'sh matn beradi, bu normal).
+  if (!countsTowardHealth(durationSec)) return false;
+
+  state.recent.push(empty);
+  if (state.recent.length > WINDOW) state.recent.shift();
+
+  if (!empty) return false;
 
   // Oyna to'lmaguncha qaror qabul qilmaymiz (kichik namunada tasodif ko'p).
   if (state.paused || state.recent.length < WINDOW) return false;
