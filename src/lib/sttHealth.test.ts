@@ -167,3 +167,40 @@ test('uzun qo\'ng\'iroqdan kelgan matn ham pauzani ochadi (eski xulq saqlanadi)'
   assert.equal(healthSnapshot().samples, 1, 'oyna yangilanib, bitta muvaffaqiyat qolsin');
   assert.equal(healthSnapshot().emptyRatio, 0);
 });
+
+// --- "O'lik odam" tugmasi: pauza cheksiz qota olmaydi ---
+//
+// Tuzatish o'z joyida, lekin himoyaning o'zi ham himoyaga muhtoj: KELAJAKDAGI
+// istalgan mantiqiy xato yana navbatni abadiy to'xtatib qo'ymasligi kerak.
+// To'xtash qo'ng'iroqlarni yo'qotadi, ortiqcha urinish esa faqat vaqt yeydi —
+// shuning uchun tanlov aniq.
+
+test('pauza belgilangan muddatdan oshsa MAJBURAN ochiladi', async () => {
+  const mod = await import('./sttHealth');
+  // Muddatni testda qisqartira olmaymiz (import paytida o'qiladi), shuning
+  // uchun snapshot orqali sozlama borligini va oqilona ekanini tekshiramiz.
+  resetHealthForTest();
+  const cfg = mod.healthSnapshot();
+  assert.ok(cfg.maxPauseMin >= 5 && cfg.maxPauseMin <= 60,
+    `majburiy ochilish muddati oqilona bo'lsin (hozir ${cfg.maxPauseMin} daq)`);
+  assert.equal(cfg.forcedResumes, 0, 'boshlanishda majburiy ochilish bo\'lmasin');
+});
+
+test('pauza yoqilgan zahoti isPaused() true qaytaradi (muddat o\'tmagan)', () => {
+  resetHealthForTest();
+  feed(Array(10).fill(true));
+  assert.equal(isPaused(), true, 'yangi pauza darhol ochilib ketmasin');
+  assert.equal(healthSnapshot().forcedResumes, 0);
+});
+
+test('majburiy ochilishdan keyin oyna tozalanadi va qayta yoqilishi mumkin', () => {
+  resetHealthForTest();
+  feed(Array(10).fill(true));
+  assert.equal(isPaused(), true);
+  // Matn kelishi ham xuddi majburiy ochilish kabi oynani tozalaydi.
+  recordOutcome(false, 120);
+  assert.equal(isPaused(), false);
+  // Xizmat yana buzilsa — pauza qaytadan yoqiladi, bu oshib ketmaydi.
+  feed(Array(10).fill(true));
+  assert.equal(isPaused(), true, 'qayta yoqilishi kerak');
+});

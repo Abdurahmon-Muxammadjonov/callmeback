@@ -68,6 +68,21 @@ const MIN_DURATION_SEC = num(process.env.STT_HEALTH_MIN_DURATION_SEC, 60);
 const PROBE_INTERVAL_MS = num(process.env.STT_PROBE_INTERVAL_MS, 10 * 60_000);
 const ALERT_AFTER_MS = num(process.env.STT_ALERT_AFTER_MS, 30 * 60_000);
 
+// ============================================================================
+// "O'LIK ODAM" TUGMASI — pauza HECH QACHON cheksiz qotib qolmaydi.
+//
+// NEGA (2026-09-28): pauza 3 soatdan ortiq ochilmay qoldi, chunki tiklanish
+// sharti noto'g'ri joyda edi. Xato tuzatildi, lekin himoyaning o'zi ham
+// himoyaga muhtoj: KELAJAKDAGI istalgan mantiqiy xato yana shunga olib
+// kelmasligi kerak.
+//
+// Shuning uchun pauza bu muddatdan oshsa MAJBURAN ochiladi va navbat
+// odatdagidek ishlaydi. Xizmat haqiqatan nosoz bo'lsa, 10 ta namunadan
+// keyin pauza qaytadan yoqiladi — ya'ni eng yomon holatda sekin tebranish
+// bo'ladi, abadiy to'xtash emas. To'xtash esa qo'ng'iroqlarni yo'qotadi.
+// ============================================================================
+const MAX_PAUSE_MS = num(process.env.STT_MAX_PAUSE_MS, 20 * 60_000);
+
 /** Pauza paytida qo'ng'iroq shu holatda qoladi ('done' EMAS — qayta olinadi). */
 export const SUSPECT_STATUS = 'stt_suspect';
 
@@ -79,6 +94,8 @@ interface State {
   lastSuccessAt: number;
   lastProbeAt: number;
   lastAlertAt: number;
+  /** Necha marta majburan ochilgani — diagnostika uchun. */
+  forcedResumes: number;
 }
 
 const state: State = {
@@ -88,6 +105,7 @@ const state: State = {
   lastSuccessAt: Date.now(),
   lastProbeAt: 0,
   lastAlertAt: 0,
+  forcedResumes: 0,
 };
 
 /** Shu davomiylikdagi qo'ng'iroq sog'liq o'lchoviga kiradimi? */
@@ -153,7 +171,20 @@ export function recordOutcome(empty: boolean, durationSec: number): boolean {
 }
 
 export function isPaused(): boolean {
-  return state.paused;
+  if (!state.paused) return false;
+  // Muddat o'tgan bo'lsa — majburan ochamiz (yuqoridagi izohga qarang).
+  if (Date.now() - state.pausedAt >= MAX_PAUSE_MS) {
+    state.paused = false;
+    state.recent = [];
+    state.forcedResumes += 1;
+    console.warn(
+      `STT sog'lig'i: pauza ${Math.round(MAX_PAUSE_MS / 60_000)} daqiqadan oshdi — `
+      + `MAJBURAN ochildi (${state.forcedResumes}-marta). Xizmat hali nosoz bo'lsa `
+      + 'pauza qaytadan yoqiladi; navbat abadiy to\'xtab qolmaydi.',
+    );
+    return false;
+  }
+  return true;
 }
 
 /** Pauza paytida tiklanishni tekshirish vaqti keldimi? */
@@ -178,6 +209,7 @@ export function logHealthConfig(): void {
 export function healthSnapshot(): {
   paused: boolean; emptyRatio: number; window: number; samples: number;
   lastSuccessAt: string; pausedAt: string | null; minDurationSec: number; threshold: number;
+  forcedResumes: number; maxPauseMin: number;
 } {
   return {
     paused: state.paused,
@@ -188,6 +220,8 @@ export function healthSnapshot(): {
     pausedAt: state.pausedAt ? new Date(state.pausedAt).toISOString() : null,
     minDurationSec: MIN_DURATION_SEC,
     threshold: THRESHOLD,
+    forcedResumes: state.forcedResumes,
+    maxPauseMin: Math.round(MAX_PAUSE_MS / 60_000),
   };
 }
 
@@ -199,6 +233,7 @@ export function resetHealthForTest(): void {
   state.lastSuccessAt = Date.now();
   state.lastProbeAt = 0;
   state.lastAlertAt = 0;
+  state.forcedResumes = 0;
 }
 
 // ---------------------------------------------------------------------------
