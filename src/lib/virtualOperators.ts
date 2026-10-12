@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { supabase, fetchAllRows } from './supabase';
+import { reportRpc } from './reportRpc';
 
 // "Virtual operator" — bazada XODIM sifatida yozilmagan, lekin qo'ng'iroq
 // qilgan PBX ichki raqami (calls.operator_ext).
@@ -38,41 +38,33 @@ export function virtualManagerId(companyId: string, ext: string): string {
 }
 
 // Kompaniyaning "xodimga biriktirilmagan" qo'ng'iroqlaridagi operatorlar.
+//
+// TEZLIK (2026-10-12): avval kompaniyaning butun tarixidagi xodimsiz
+// qo'ng'iroqlari (15 000+ qator) fetchAllRows bilan tortilib Node'da
+// guruhlanardi — har safar xodimlar ro'yxati ochilganda o'nlab so'rov.
+// Endi guruhlash bazada (supabase/perf_08_virtual_operators.sql): ichki
+// raqam (bo'shliqlari kesilgan), qo'ng'iroqlar soni va birinchi qo'ng'iroq.
 export async function listVirtualOperators(companyId: string): Promise<VirtualOperator[]> {
-  const rows = await fetchAllRows<{ operator_ext: string | null; created_at: string }>((from, to) =>
-    supabase
-      .from('calls')
-      .select('operator_ext, created_at')
-      .eq('company_id', companyId)
-      .is('manager_id', null)
-      .not('operator_ext', 'is', null)
-      .range(from, to));
+  const items = await reportRpc<VirtualOperatorRow[]>('company_virtual_operators', { p_company_id: companyId });
+  return virtualOperatorsFromRows(companyId, items || []);
+}
 
-  const byExt = new Map<string, { count: number; first: string }>();
-  for (const r of rows) {
-    const ext = String(r.operator_ext || '').trim();
-    if (!ext) continue;
-    const cur = byExt.get(ext);
-    if (cur) {
-      cur.count += 1;
-      if (r.created_at < cur.first) cur.first = r.created_at;
-    } else {
-      byExt.set(ext, { count: 1, first: r.created_at });
-    }
-  }
+export interface VirtualOperatorRow { ext: string; count: number; first: string | null }
 
-  return Array.from(byExt.entries())
-    .sort((a, b) => b[1].count - a[1].count)
-    .map(([ext, v]) => ({
-      id: virtualManagerId(companyId, ext),
-      name: `Operator ${ext}`,
-      pbx_id: ext,
+// SOF funksiya — bazaga murojaat qilmaydi (test/solishtirish uchun alohida).
+export function virtualOperatorsFromRows(companyId: string, rows: VirtualOperatorRow[]): VirtualOperator[] {
+  return [...rows]
+    .sort((a, b) => Number(b.count) - Number(a.count) || (a.ext < b.ext ? -1 : a.ext > b.ext ? 1 : 0))
+    .map((v) => ({
+      id: virtualManagerId(companyId, v.ext),
+      name: `Operator ${v.ext}`,
+      pbx_id: v.ext,
       status: 'active',
       role: null,
       platform_id: null,
       daily_call_target: 0,
       created_at: v.first || null,
-      call_count: v.count,
+      call_count: Number(v.count) || 0,
       virtual: true as const,
     }));
 }

@@ -1,22 +1,11 @@
 import { Router, Request, Response } from 'express';
-import { supabase, fetchAllRows } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
-import { getCompanyManagerIds } from '../lib/companyScope';
-import { relationshipDynamicsInNode } from '../lib/analyticsFallback';
+import { relationshipDynamics } from '../lib/analyticsAggregates';
+import { reportRpc } from '../lib/reportRpc';
+import { addDays, buildConversionHistory, type BucketRow, type ConversionDayRow } from '../lib/reportBuilders';
 
 const router = Router();
-
-// Sana kaliti (UTC, YYYY-MM-DD)
-const dayKey = (d: Date) => d.toISOString().slice(0, 10);
-function startOfTodayUTC(): Date {
-  const n = new Date();
-  return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()));
-}
-function daysAgo(base: Date, n: number): Date {
-  const d = new Date(base);
-  d.setUTCDate(d.getUTCDate() - n);
-  return d;
-}
 
 // GET /api/management/platforms — mavjud platformalar ro'yxati.
 // DIQQAT: bu jadval kompaniyaga tegishli MA'LUMOT emas — reklama
@@ -49,13 +38,16 @@ router.get('/platforms', async (_req: Request, res: Response) => {
 // tenant_scoped_aggregates.sql hali ishga tushirilmagan bo'lsa (eski imzo),
 // xuddi shu tenant chegarasi bilan Node'da hisoblanadi (analyticsFallback.ts) —
 // boshqa tenant ma'lumoti hech qachon ko'rsatilmaydi.
+//
+// TEZLIK (2026-10-12): Node'dagi hisob (14 kunlik barcha qatorni tortish)
+// o'rniga calls_bucket_stats (supabase/perf_03) — company_id bo'yicha.
 router.get('/relationship-dynamics', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
     const companyId = req.auth!.companyId as string;
     const platformId = typeof req.query.platform_id === 'string' && req.query.platform_id ? req.query.platform_id : null;
     // Chegara company_id bo'yicha (analytics/overview bilan bir xil sabab):
     // xodim bog'lanmagan qo'ng'iroqlar ham hisobga kirsin.
-    const data = await relationshipDynamicsInNode(companyId, platformId);
+    const data = await relationshipDynamics(companyId, platformId);
     return res.status(200).json({ success: true, data });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Relationship dynamics xatolik.' });
@@ -73,56 +65,23 @@ router.get('/conversion-history', requireAuth, async (req: CompanyAuthedRequest,
     const companyId = req.auth!.companyId as string;
     const platformId = typeof req.query.platform_id === 'string' && req.query.platform_id ? req.query.platform_id : null;
     const days = Math.min(90, Math.max(1, parseInt(String(req.query.days || '14'), 10) || 14));
-    const todayStart = startOfTodayUTC();
-    const start = daysAgo(todayStart, days - 1);
+    const today = new Date().toISOString().slice(0, 10); // UTC kuni
+    const start = `${addDays(today, -(days - 1))}T00:00:00Z`;
 
-    // Konversiyalar (calls bilan join — platforma VA kompaniya filtri uchun) —
-    // sahifalab, 1000 qatorlik standart chegaradan oshsa ham hammasi yig'ib
-    // olinishi uchun.
-    const convRows = await fetchAllRows<{ traffic_conversion: number | null; sales_conversion: number | null; created_at: string }>((from, to) => {
-      let cq = supabase
-        .from('conversions')
-        .select('traffic_conversion, sales_conversion, created_at, calls!inner(platform_id, company_id)')
-        .eq('calls.company_id', companyId)
-        .gte('created_at', start.toISOString())
-        .range(from, to);
-      if (platformId) cq = cq.eq('calls.platform_id', platformId);
-      return cq;
-    });
-
-    // Kunlik qo'ng'iroqlar soni
-    const callRows = await fetchAllRows<{ created_at: string }>((from, to) => {
-      let kq = supabase.from('calls').select('created_at').eq('company_id', companyId).gte('created_at', start.toISOString()).range(from, to);
-      if (platformId) kq = kq.eq('platform_id', platformId);
-      return kq;
-    });
-
-    // Kun bo'yicha guruhlash
-    const agg: Record<string, { t: number; s: number; n: number }> = {};
-    convRows.forEach((c) => {
-      const k = dayKey(new Date(c.created_at));
-      (agg[k] ||= { t: 0, s: 0, n: 0 });
-      agg[k].t += Number(c.traffic_conversion) || 0;
-      agg[k].s += Number(c.sales_conversion) || 0;
-      agg[k].n += 1;
-    });
-    const callsPerDay: Record<string, number> = {};
-    callRows.forEach((c) => {
-      const k = dayKey(new Date(c.created_at));
-      callsPerDay[k] = (callsPerDay[k] || 0) + 1;
-    });
+    // TEZLIK (2026-10-12): konversiyalar va qo'ng'iroqlar endi Node'ga
+    // tortilmaydi — ikkita parallel RPC, kun bo'yicha yig'indi bazada
+    // (supabase/perf_10_conversions_daily.sql, perf_03_calls_bucket_stats.sql).
+    const [convRows, callRows] = await Promise.all([
+      reportRpc<ConversionDayRow[]>('company_conversions_daily', {
+        p_company_id: companyId, p_from: start, p_tz: 'UTC', p_platform_id: platformId,
+      }),
+      reportRpc<BucketRow[]>('calls_bucket_stats', {
+        p_company_id: companyId, p_from: start, p_tz: 'UTC', p_platform_id: platformId,
+      }),
+    ]);
 
     // Har bir kun uchun qator (bo'sh kunlar 0 bilan)
-    const out = Array.from({ length: days }, (_, i) => {
-      const date = dayKey(daysAgo(todayStart, days - 1 - i));
-      const a = agg[date];
-      return {
-        date,
-        traffic_conversion: a && a.n ? Number((a.t / a.n).toFixed(2)) : 0,
-        sales_conversion: a && a.n ? Number((a.s / a.n).toFixed(2)) : 0,
-        calls: callsPerDay[date] || 0,
-      };
-    });
+    const out = buildConversionHistory(convRows || [], callRows || [], days, today);
 
     return res.status(200).json({ success: true, data: out });
   } catch (err: any) {

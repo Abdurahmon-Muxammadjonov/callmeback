@@ -1,5 +1,7 @@
 import { Router, Response } from 'express';
-import { supabase, withSchemaReloadRetry, fetchAllRows } from '../lib/supabase';
+import { supabase, withSchemaReloadRetry } from '../lib/supabase';
+import { reportRpc } from '../lib/reportRpc';
+import { buildManagerStats, type ManagerStatsRow } from '../lib/reportBuilders';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 import { listVirtualOperators } from '../lib/virtualOperators';
 
@@ -217,38 +219,22 @@ router.get('/:id/stats', requireAuth, async (req: CompanyAuthedRequest, res: Res
     const today = new Date();
     const todayStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())).toISOString();
 
-    let list: Array<{ duration: number | null; kpi_score: number | null; penalty_amount: number | null; bonus_amount: number | null }>;
-    let callsToday: number | null;
+    // TEZLIK (2026-10-12): xodimning butun tarixidagi qo'ng'iroqlari
+    // fetchAllRows bilan tortilib Node'da o'rtacha olinardi. Endi bitta
+    // RPC (supabase/perf_09_manager_call_stats.sql) — company_id sharti bilan.
+    let row: ManagerStatsRow | undefined;
     try {
-      const [rows, { count, error: tErr }] = await Promise.all([
-        fetchAllRows<{ duration: number | null; kpi_score: number | null; penalty_amount: number | null; bonus_amount: number | null }>((from, to) =>
-          supabase.from('calls').select('duration, kpi_score, penalty_amount, bonus_amount').eq('manager_id', id).range(from, to)),
-        supabase.from('calls').select('id', { count: 'exact', head: true }).eq('manager_id', id).gte('created_at', todayStart),
-      ]);
-      if (tErr) return res.status(500).json({ success: false, error: `Database Error: ${tErr.message}` });
-      list = rows;
-      callsToday = count;
+      const rows = await reportRpc<ManagerStatsRow[]>('manager_call_stats', {
+        p_company_id: companyId,
+        p_manager_id: id,
+        p_today_start: todayStart,
+      });
+      row = (rows || [])[0];
     } catch (e: any) {
       return res.status(500).json({ success: false, error: `Database Error: ${e?.message || e}` });
     }
 
-    const totalCalls = list.length;
-    const sum = (f: (c: any) => number) => list.reduce((a, c) => a + f(c), 0);
-    const avg = (f: (c: any) => number) => (totalCalls ? sum(f) / totalCalls : 0);
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        manager,
-        total_calls: totalCalls,
-        avg_kpi_score: Number(avg((c) => Number(c.kpi_score) || 0).toFixed(2)),
-        avg_duration_sec: Math.round(avg((c) => Number(c.duration) || 0)),
-        total_penalty: Number(sum((c) => Number(c.penalty_amount) || 0).toFixed(2)),
-        total_bonus: Number(sum((c) => Number(c.bonus_amount) || 0).toFixed(2)),
-        daily_call_target: (manager as any).daily_call_target ?? 20,
-        calls_today: callsToday ?? 0,
-      },
-    });
+    return res.status(200).json({ success: true, data: buildManagerStats(manager, row) });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to get manager stats.' });
   }

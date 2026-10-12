@@ -41,23 +41,28 @@ const LLM_MARKERS = [
   'generativelanguage',     // Gemini
 ];
 
-test('analytics.ts (barcha GET endpointlar) LLM chaqirmaydi', () => {
-  const src = read('routes/analytics.ts');
-  for (const marker of LLM_MARKERS) {
-    assert.equal(
-      src.includes(marker), false,
-      `analytics.ts ichida "${marker}" topildi — GET so'rovi LLM chaqirmasligi kerak (§0.4)`,
-    );
+// 2026-10-12 dan javob JSON'i lib/reportBuilders.ts'da yig'iladi —
+// u ham GET yo'lida, shuning uchun ikkala fayl tekshiriladi.
+test('analytics.ts va reportBuilders.ts (barcha GET endpointlar) LLM chaqirmaydi', () => {
+  for (const file of ['routes/analytics.ts', 'lib/reportBuilders.ts']) {
+    const src = read(file);
+    for (const marker of LLM_MARKERS) {
+      assert.equal(
+        src.includes(marker), false,
+        `${file} ichida "${marker}" topildi — GET so'rovi LLM chaqirmasligi kerak (§0.4)`,
+      );
+    }
   }
 });
 
 test('staff-stats tavsiyani operator_insights jadvalidan o\'qiydi', () => {
   const src = readRaw('routes/analytics.ts');
+  const builders = read('lib/reportBuilders.ts');
   assert.ok(src.includes("from('operator_insights')"),
     'staff-stats operator_insights jadvalidan o\'qishi kerak');
-  assert.ok(src.includes('deriveFaults'),
+  assert.ok(builders.includes('deriveFaults('),
     'ayblar determinisik deriveFaults() bilan hisoblanishi kerak');
-  assert.ok(src.includes('advice_generated_at'),
+  assert.ok(builders.includes('advice_generated_at'),
     'javobda tavsiya qachon tayyorlangani bo\'lishi kerak (UI ko\'rsatadi)');
 });
 
