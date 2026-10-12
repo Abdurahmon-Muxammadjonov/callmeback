@@ -6,7 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { processLocalAudio, processLongAudio, analyzeTranscript, withTimeCodes } from '../lib/audio-pipeline';
 import { snapKeyMoments, type ScriptStage } from '../lib/evaluationScript';
-import { fetchAllRows } from '../lib/supabase';
+import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
+import { reportRpc } from '../lib/reportRpc';
+import { buildAnalyticsRoot, type AnalyticsRootRaw } from '../lib/reportBuilders';
 import { isSectionUnlocked } from '../lib/companySections';
 import { getCompanySettings } from '../lib/companySettings';
 
@@ -80,9 +82,6 @@ interface CriticalAlert {
   timestamp: string;
 }
 
-let cachedMetrics: any = null;
-let lastCacheTime = 0;
-const CACHE_TTL_MS = 10000;
 
 function getSupabaseAdmin(): SupabaseClient {
   const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
@@ -1134,8 +1133,23 @@ export async function enqueueBatchCalls(items: BatchCallItem[], supabase: Supaba
 }
 
 // Qo'lda qayta tiklash: osilib qolgan 'processing' + 'failed' qo'ng'iroqlarni qayta tahlilga qo'yadi.
-// Frontend "Qayta urinish" tugmasi yoki CRM webhook shuni chaqirishi mumkin.
-router.post('/recover', async (_req: Request, res: Response) => {
+//
+// XAVFSIZLIK (2026-10-12): avval autentifikatsiyasiz edi — har kim BARCHA
+// kompaniyalarning yiqilgan qo'ng'iroqlarini qayta tahlilga (pullik
+// STT/Gemini) qo'ya olardi. recoverStuckCalls kompaniyalararo amal, shu
+// sabab kompaniya admini emas, PLATFORMA admini chaqiradi: boshqa admin
+// endpointlari (/crm/admin/sync-calls, /company/admin/section-codes) kabi
+// x-admin-sync-token sarlavhasi (ADMIN_SYNC_TOKEN env). Frontend bu
+// endpointni ishlatmaydi (2026-10-12 tekshirildi).
+router.post('/recover', async (req: Request, res: Response) => {
+  const expectedToken = (process.env.ADMIN_SYNC_TOKEN || '').trim();
+  if (!expectedToken) {
+    return res.status(500).json({ success: false, error: 'ADMIN_SYNC_TOKEN sozlanmagan.' });
+  }
+  const provided = (typeof req.headers['x-admin-sync-token'] === 'string' ? req.headers['x-admin-sync-token'] : '').trim();
+  if (provided !== expectedToken) {
+    return res.status(401).json({ success: false, error: 'Admin token noto\'g\'ri.' });
+  }
   try {
     const out = await recoverStuckCalls({ includeFailed: true });
     return res.status(200).json({ success: true, ...out });
@@ -1368,56 +1382,23 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
   }
 });
 
-router.get('/', async (_req: Request, res: Response) => {
+// GET /api/analyze-call — umumiy analitika (totalCalls, o'rtacha davomiylik,
+// konversiyalar, yo'qotish sabablari).
+//
+// XAVFSIZLIK (2026-10-12): avval requireAuth'siz va kompaniya filtrisiz edi —
+// har kim (login qilmasdan) BARCHA kompaniyalarning calls/conversions/
+// lost_reasons'ini fetchAllRows bilan sanab olardi (ham ma'lumot sizishi,
+// ham 30+ ketma-ket so'rov). Endi requireAuth + req.auth.companyId va
+// GET /analytics bilan AYNAN bir xil hisob (supabase/perf_07_company_totals.sql).
+// Frontend bu yerni emas, /analytics'ni chaqiradi (2026-10-12 tekshirildi) —
+// endpoint orqaga moslik uchun qoldirildi.
+router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
-    const now = Date.now();
-    if (cachedMetrics && (now - lastCacheTime < CACHE_TTL_MS)) {
-      return res.status(200).json({
-        success: true,
-        data: cachedMetrics,
-        cached: true,
-      });
-    }
-
-    const supabase = getSupabaseAdmin();
-
-    const [callRows, convRows, lostReasonRows] = await Promise.all([
-      fetchAllRows<{ id: string; duration: number | null }>((from, to) =>
-        supabase.from('calls').select('id, duration').range(from, to)),
-      fetchAllRows<{ traffic_conversion: number | null; sales_conversion: number | null }>((from, to) =>
-        supabase.from('conversions').select('traffic_conversion, sales_conversion').range(from, to)),
-      fetchAllRows<{ reason_text: string }>((from, to) =>
-        supabase.from('lost_reasons').select('reason_text').range(from, to)),
-    ]);
-
-    const totalCalls = callRows.length;
-    const avgDuration = totalCalls > 0
-      ? callRows.reduce((acc, c) => acc + (c.duration || 0), 0) / totalCalls
-      : 0;
-
-    const totalConversions = convRows.length;
-    const averages = {
-      traffic_conversion: totalConversions > 0 ? convRows.reduce((acc, s) => acc + Number(s.traffic_conversion || 0), 0) / totalConversions : 0,
-      sales_conversion: totalConversions > 0 ? convRows.reduce((acc, s) => acc + Number(s.sales_conversion || 0), 0) / totalConversions : 0,
-    };
-
-    const lostReasonsSummary: Record<string, number> = {};
-    lostReasonRows.forEach((lr) => {
-      lostReasonsSummary[lr.reason_text] = (lostReasonsSummary[lr.reason_text] || 0) + 1;
-    });
-
-    cachedMetrics = {
-      totalCalls,
-      averageDurationSeconds: Math.round(avgDuration),
-      averages,
-      lostReasonsSummary,
-      cachedAt: new Date().toISOString(),
-    };
-    lastCacheTime = now;
-
+    const companyId = req.auth!.companyId as string;
+    const raw = await reportRpc<AnalyticsRootRaw>('company_analytics_root', { p_company_id: companyId });
     return res.status(200).json({
       success: true,
-      data: cachedMetrics,
+      data: buildAnalyticsRoot(raw, new Date()),
       cached: false,
     });
   } catch (error: any) {

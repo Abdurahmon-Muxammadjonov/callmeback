@@ -80,6 +80,12 @@ export async function withSchemaReloadRetry<T>(
   return action();
 }
 
+// FAQAT src/scripts/ UCHUN (2026-10-12). API route'larida ISHLATILMASIN:
+// u minglab qatorni 1000 tadan KETMA-KET tortadi (har biri ~0.6 s) — sahifa
+// o'nlab soniya yuklanardi. Hisobotlar uchun supabase/perf_*.sql dagi
+// funksiyalar va lib/reportRpc.ts. Qoida analytics.no-llm.test.ts yonidagi
+// testda qulflangan.
+//
 // PostgREST har bir so'rovga 1000 qatorlik standart chegara qo'yadi — shu sababli
 // `.select(...)`ni to'g'ridan-to'g'ri `.length`/`.reduce()` bilan agregatsiya qilish
 // jadval 1000 qatordan oshgan zahoti (masalan "jami qo'ng'iroqlar soni") noto'g'ri,
