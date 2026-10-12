@@ -376,20 +376,30 @@ export async function analyzeUtelCall(
 
 // Matni ALLAQACHON bor qo'ng'iroq: faqat Gemini tahlilini qayta bajaramiz
 // (audio yuklanmaydi, STT takrorlanmaydi — bir necha soniya).
+//
+// Matn va segmentlar SHU YERDA, faqat shu bitta qator uchun o'qiladi
+// (2026-10-12). Avval navbat so'rovi 40 ta qatorning hammasini og'ir
+// transcript/transcript_segments bilan tortardi — har ~8 soniyada.
 async function reanalyzeTranscriptOnly(row: {
   id: string;
-  transcript: string;
-  transcript_segments: unknown;
   company_id: string | null;
   status?: string | null;
 }): Promise<void> {
   const requeued = row.status === REQUEUED_STATUS;
   try {
+    const { data: full, error: readErr } = await supabase
+      .from('calls')
+      .select('transcript, transcript_segments')
+      .eq('id', row.id)
+      .maybeSingle();
+    if (readErr) throw new Error(readErr.message);
+    const transcript = typeof full?.transcript === 'string' ? full.transcript : '';
+    if (!transcript.trim()) return; // so'rov va o'qish orasida matn o'chirilgan — o'tkazamiz
     await processTranscriptToCall(
       supabase,
       row.id,
-      row.transcript,
-      Array.isArray(row.transcript_segments) ? row.transcript_segments : [],
+      transcript,
+      Array.isArray(full?.transcript_segments) ? full.transcript_segments : [],
       row.company_id,
     );
   } catch (e: any) {
@@ -552,10 +562,19 @@ async function runQueueOnce(): Promise<number> {
   // ilike '%utel%' — FAQAT UTel qo'ng'iroqlari. Aks holda eski (boshqa
   // manbadagi) o'n minglab qo'ng'iroq ham shu navbatga tushib, Gemini
   // kvotasini bekorga yeb qo'yardi.
+  //
+  // INDEKS (2026-10-12): status <> 'done' va audio_url ILIKE '%utel%'
+  // shartlari supabase/perf_11_utel_queue_index.sql dagi partial indeks
+  // predikati bilan AYNAN bir xil — o'zgartirsangiz, indeksni ham.
+  // Transkript matni TORTILMAYDI: "matn bormi" sharti bazada
+  // (transcript ~ '\S' — kamida bitta bo'sh bo'lmagan belgi, eski
+  // trim() !== '' tekshiruvi bilan bir xil); matn reanalyzeTranscriptOnly
+  // ichida faqat olingan qator uchun o'qiladi.
   const { data: pending } = await excludeCooling(supabase
     .from('calls')
-    .select('id, transcript, transcript_segments, company_id, status')
+    .select('id, company_id, status')
     .not('transcript', 'is', null)
+    .filter('transcript', 'match', '\\S')
     .neq('status', 'done')
     .ilike('audio_url', '%utel%')
     .gte('created_at', QUEUE_SINCE)
@@ -563,7 +582,6 @@ async function runQueueOnce(): Promise<number> {
     .order('created_at', { ascending: true })
     .limit(BATCH * 5);
   const needAnalysis = ((pending || []) as any[])
-    .filter((r: any) => typeof r.transcript === 'string' && r.transcript.trim() !== '')
     .filter((r: any) => !isCoolingDown(r.id) && !inFlight.has(r.id))
     .slice(0, BATCH);
   if (needAnalysis.length > 0) {
@@ -677,6 +695,18 @@ async function countWaiting(): Promise<number> {
   return count ?? 0;
 }
 
+// countWaiting DAQIQASIGA BIR MARTA (2026-10-12). Avval ishchi har
+// aylanishda (~8 soniyada) count:'exact' qilardi, son esa faqat admin'ga
+// ogohlantirish matnida (30 daqiqalik jimlikdan keyin) kerak.
+const WAITING_TTL_MS = 60_000;
+let waitingCache: { at: number; n: number } | null = null;
+async function countWaitingThrottled(): Promise<number> {
+  if (waitingCache && Date.now() - waitingCache.at < WAITING_TTL_MS) return waitingCache.n;
+  const n = await countWaiting();
+  waitingCache = { at: Date.now(), n };
+  return n;
+}
+
 /** Pauzada: bitta kutayotgan qo'ng'iroqni sinab ko'radi (tiklanish tekshiruvi). */
 async function probeOnce(): Promise<void> {
   const { data } = await supabase
@@ -731,7 +761,7 @@ export function startUtelWorker(): void {
         // birorta matn chiqmasa admin xabar oladi. Bu pauzadan TEZROQ
         // sezadi — pauza uchun 10 ta uzun qo'ng'iroq kerak, jimlik esa
         // vaqt bo'yicha o'lchanadi.
-        await maybeAlertAdmin(await countWaiting(), true);
+        await maybeAlertAdmin(await countWaitingThrottled(), true);
 
         // XIZMAT NOSOZ DEB BELGILANGAN: odatdagi to'plam olinmaydi.
         if (isSttPaused()) {
