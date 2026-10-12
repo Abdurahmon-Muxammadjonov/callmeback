@@ -13,6 +13,7 @@ import { isWorkTime, workWindowLabel } from '../lib/workHours';
 import { probeWavDurationSec } from '../lib/audioDuration';
 import { classifyShortCall } from '../lib/openaiAnalyzer';
 import { parseTashkentLocal } from '../lib/tashkentTime';
+import { runsBackgroundJobs } from '../lib/processRole';
 
 // ============================================================================
 // UTel (utc381.utel.uz) — O'zbek virtual PBX / bulutli telefoniya webhook.
@@ -186,9 +187,10 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
     // UTel ko'pincha duration=0 yuboradi — bunda davomiylikni audio
     // faylning o'zidan (WAV sarlavhasi + hajm) o'lchaymiz.
     duration: durationSec,
-    // Ish vaqtida bo'lsa darhol tahlilga ketadi; tashqarisida 'queued'
-    // bo'lib turadi va ertalab 09:00 da navbat oladi.
-    status: isWorkTime() ? 'processing' : 'queued',
+    // Ish vaqtida va shu process tahlil qilsa (ROLE=all) — darhol
+    // 'processing'. Aks holda 'queued': ROLE=api'da tahlilni worker
+    // navbatdan oladi; ish vaqtidan tashqarida ertalab 09:00 da oladi.
+    status: isWorkTime() && runsBackgroundJobs() ? 'processing' : 'queued',
   };
 
   let insert = await supabase.from('calls').insert({ ...baseRow, operator_ext: src || null }).select('id').single();
@@ -201,6 +203,15 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
   const { data: call, error: insErr } = insert;
   if (insErr || !call) {
     console.error(`UTel call_saved: calls insert xatosi (call_id=${callId}):`, insErr?.message);
+    return;
+  }
+
+  // ROLE=api (2026-10-12): og'ir tahlil (audio yuklab olish, ffmpeg, STT,
+  // Gemini) API process'ida QILINMAYDI — qator 'queued' bilan yozildi,
+  // ROLE=worker servisidagi navbat (startUtelWorker) uni o'zi oladi
+  // (created_at qo'ng'iroq boshlangan vaqt bo'lgani uchun deyarli darhol).
+  if (!runsBackgroundJobs()) {
+    console.log(`UTel: ${callId} saqlandi (queued) — tahlilni worker navbatdan oladi.`);
     return;
   }
 

@@ -24,6 +24,7 @@ import managementRouter from './routes/management';
 import notificationsRouter from './routes/notifications';
 import shiftsRouter from './routes/shifts';
 import crmRouter, { runScheduledCrmSync } from './routes/crm';
+import { processRole, runsBackgroundJobs, servesApi } from './lib/processRole';
 
 const app = express();
 
@@ -135,6 +136,64 @@ app.use('/crm', crmRouter);
 // Server DOIM shu portda ishlaydi (boshqasiga "qochmaydi").
 const PORT = parseInt(process.env.PORT || '5001', 10);
 
+// ROLE=worker: HTTP'da faqat /health — Railway sog'liq tekshiruvi uchun.
+// API route'lari worker'da ATAYLAB ulanmaydi (u ommaviy domen olmaydi,
+// lekin baribir ortiqcha kirish nuqtasi bo'lmasin).
+const workerApp = express();
+workerApp.get('/health', (_req, res) => {
+  return res.status(200).json({ success: true, status: 'ok', role: 'worker' });
+});
+
+// Fon ishlari — faqat ROLE=worker (yoki ROLE=all) da. ROLE=api da
+// ishga tushmaydi: ffmpeg/Gemini API'ning CPU'sini yemasin (lib/processRole.ts).
+function startBackgroundJobs(): void {
+  // Restart/deploy natijasida 'processing' da osilib qolgan qo'ng'iroqlarni qayta tiklash.
+  // CRM batch'i yarim qolib server qayta ishga tushsa ham — qo'ng'iroqlar yo'qolmaydi.
+  recoverStuckCalls()
+    .then((r) => { if (r.recovered) console.log(`♻️  ${r.recovered} ta osilib qolgan qo'ng'iroq qayta tahlilga qo'yildi.`); })
+    .catch((e) => console.error('Boot recovery failed:', e?.message));
+
+  // Watchdog — har 5 daqiqada osilib qolgan 'processing' larni tekshiradi
+  // (fon loop jim o'lib qolsa ham qo'ng'iroqlar tiklanadi).
+  const watchdog = setInterval(() => {
+    recoverStuckCalls().catch((e) => console.error('Watchdog recovery failed:', e?.message));
+  }, 5 * 60 * 1000);
+  watchdog.unref(); // process'ni tirik ushlab turmasin
+
+  // UTel tahlil navbati — TO'XTOVSIZ ishchi: bir to'plam tugashi bilan
+  // darhol keyingisini oladi (navbat bo'shaguncha). ROLE=api'dagi webhook
+  // qo'ng'iroqni faqat bazaga yozadi — tahlil SHU YERDA, navbatdan.
+  // Eski failed'lar ham shu navbatdan o'tadi.
+  startUtelWorker();
+
+  // OPERATOR TAVSIYALARI (API v2 §10) — staff-stats GET so'rovi GPT
+  // chaqirmaydi, matn shu jobda tayyorlanib operator_insights jadvaliga
+  // yoziladi. Reja: 13:00, 20:00 va 02:30 (Asia/Tashkent).
+  // Worker BITTA replika bo'lgani uchun xotiradagi qo'riqchi yetarli.
+  startOperatorInsightsSchedule(async () => {
+    const { data } = await sharedSupabase.from('companies').select('id').limit(100);
+    return (data || []).map((c: { id: string }) => c.id);
+  });
+
+  // amoCRM davriy sync — ulangan bo'lsa menejerlarni avtomatik yangilab turadi.
+  // CRM_SYNC_MINUTES=0 bo'lsa o'chiriladi (default 10 daqiqa).
+  const crmSyncMin = parseInt(process.env.CRM_SYNC_MINUTES || '10', 10);
+  if (crmSyncMin > 0) {
+    runScheduledCrmSync().catch(() => {}); // boot'da bir marta
+    const crmCron = setInterval(() => {
+      runScheduledCrmSync().catch((e) => console.error('CRM cron failed:', e?.message));
+    }, crmSyncMin * 60 * 1000);
+    crmCron.unref();
+  }
+
+  // Realtime listener — ixtiyoriy (REALTIME_LISTENER=true bo'lsa yoqiladi).
+  if (process.env.REALTIME_LISTENER === 'true') {
+    import('./lib/realtime-listener')
+      .then((m) => m.startRealtimeListener())
+      .catch((e) => console.error('Realtime listener start failed:', e?.message));
+  }
+}
+
 // Portni egallagan jarayon(lar)ni o'chiradi (macOS/Linux: lsof + kill).
 function freePort(port: number): void {
   try {
@@ -155,55 +214,14 @@ function freePort(port: number): void {
 }
 
 function startServer(port: number, isRetry = false): void {
-  const server = app.listen(port, () => {
-    console.log(`⚡ server is running in ${port} port`);
-
-    // Restart/deploy natijasida 'processing' da osilib qolgan qo'ng'iroqlarni qayta tiklash.
-    // CRM batch'i yarim qolib server qayta ishga tushsa ham — qo'ng'iroqlar yo'qolmaydi.
-    recoverStuckCalls()
-      .then((r) => { if (r.recovered) console.log(`♻️  ${r.recovered} ta osilib qolgan qo'ng'iroq qayta tahlilga qo'yildi.`); })
-      .catch((e) => console.error('Boot recovery failed:', e?.message));
-
-    // Watchdog — har 5 daqiqada osilib qolgan 'processing' larni tekshiradi
-    // (fon loop jim o'lib qolsa ham qo'ng'iroqlar tiklanadi).
-    const watchdog = setInterval(() => {
-      recoverStuckCalls().catch((e) => console.error('Watchdog recovery failed:', e?.message));
-    }, 5 * 60 * 1000);
-    watchdog.unref(); // process'ni tirik ushlab turmasin
-
-    // UTel tahlil navbati — TO'XTOVSIZ ishchi: bir to'plam tugashi bilan
-    // darhol keyingisini oladi (navbat bo'shaguncha). Webhook fon ishlovi
-    // uzilsa ham qo'ng'iroqlar YO'QOLMAYDI (processing'da yozilgan) va shu
-    // yerda tugatiladi. Eski failed'lar ham shu navbatdan o'tadi.
-    startUtelWorker();
-
-    // OPERATOR TAVSIYALARI (API v2 §10) — staff-stats GET so'rovi endi GPT
-    // chaqirmaydi, matn shu jobda tayyorlanib operator_insights jadvaliga
-    // yoziladi. Reja: 13:00, 20:00 va 02:30 (Asia/Tashkent).
-    //
-    // DIQQAT: worker servis paydo bo'lganda bu chaqiruv o'sha yerga ko'chadi
-    // (§3) va xotiradagi qo'riqchi advisory-lock bilan almashtiriladi.
-    startOperatorInsightsSchedule(async () => {
-      const { data } = await sharedSupabase.from('companies').select('id').limit(100);
-      return (data || []).map((c: { id: string }) => c.id);
-    });
-
-    // amoCRM davriy sync — ulangan bo'lsa menejerlarni avtomatik yangilab turadi.
-    // CRM_SYNC_MINUTES=0 bo'lsa o'chiriladi (default 10 daqiqa).
-    const crmSyncMin = parseInt(process.env.CRM_SYNC_MINUTES || '10', 10);
-    if (crmSyncMin > 0) {
-      runScheduledCrmSync().catch(() => {}); // boot'da bir marta
-      const crmCron = setInterval(() => {
-        runScheduledCrmSync().catch((e) => console.error('CRM cron failed:', e?.message));
-      }, crmSyncMin * 60 * 1000);
-      crmCron.unref();
-    }
-
-    // Realtime listener — ixtiyoriy (REALTIME_LISTENER=true bo'lsa yoqiladi).
-    if (process.env.REALTIME_LISTENER === 'true') {
-      import('./lib/realtime-listener')
-        .then((m) => m.startRealtimeListener())
-        .catch((e) => console.error('Realtime listener start failed:', e?.message));
+  const role = processRole();
+  const server = (servesApi() ? app : workerApp).listen(port, () => {
+    console.log(`⚡ server is running in ${port} port (ROLE=${role})`);
+    if (runsBackgroundJobs()) {
+      startBackgroundJobs();
+    } else {
+      console.log('ROLE=api — fon ishlari (UTel navbati, watchdog, CRM cron) bu process\'da ISHGA TUSHMAYDI. '
+        + 'Ular ROLE=worker servisida yurishi kerak (README → "API va worker").');
     }
   });
   server.once('error', (err: any) => {

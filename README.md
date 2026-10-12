@@ -26,7 +26,7 @@ Frontend yoki dashboard `NEXT_PUBLIC_API_URL` orqali backend'ga ulangan bo'lsa, 
 
 ```
 src/
-  server.ts        # Express ilova + barcha route'larni ulash
+  server.ts        # Express ilova + barcha route'larni ulash; ROLE bo'yicha fon ishlari
   env.ts           # .env yuklash / tekshirish
   lib/             # supabase klient, presence, realtime listener
   routes/          # users, calls, analyze-call, analytics, managers, ...
@@ -45,6 +45,50 @@ Minimal kerakli o'zgaruvchilar:
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `AISHA_API_KEY` (Aisha.group nutqni matnga aylantirish)
 - `GEMINI_API_KEY` (Google Gemini — transkriptni tahlil qilish)
+
+- `ROLE` — `api` (standart), `worker` yoki `all` (pastga qarang)
+
+## API va worker (ROLE)
+
+Bitta repo ikki xil process sifatida ishlaydi (`src/lib/processRole.ts`):
+
+| `ROLE`           | Nima qiladi                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------------- |
+| `api` (standart) | Faqat HTTP. UTel webhook qo'ng'iroqni bazaga `queued` bilan yozadi, tahlil qilmaydi.                           |
+| `worker`         | UTel navbati (audio + ffmpeg + STT + Gemini), watchdog/recover, operator tavsiyalari, CRM cron, realtime. HTTP'da faqat `/health`. |
+| `all`            | Ikkalasi bitta process'da (eski rejim) — lokal ishlab chiqish yoki o'tish davri uchun.                        |
+
+Nega: ffmpeg va parallel audio yuklab olish CPU'ni egallaganda API javoblari
+sekinlashardi. Endi og'ir ish alohida servisda.
+
+Lokal: `ROLE=all npm run dev` — hammasi bitta process'da. Ikkalasini alohida
+ishga tushirsangiz `PORT` har xil bo'lsin (port band bo'lsa server uni
+egallagan jarayonni o'chiradi).
+
+### Railway'da worker servisini ochish
+
+1. **Avval** `supabase/perf_*.sql` fayllari ishga tushirilgan bo'lsin
+   (aks holda hisobot endpointlari 500 qaytaradi va qaysi faylni ishga
+   tushirish kerakligini aytadi).
+2. Mavjud (API) servisda `ROLE` o'zgaruvchisini qo'ymang yoki `ROLE=api`
+   qiling va yangi kodni deploy qiling. Shu paytdan yangi qo'ng'iroqlar
+   `queued` bo'lib saqlanadi — **yo'qolmaydi**, worker ochilguncha kutadi.
+3. Railway → loyiha → **New → GitHub Repo** → shu repozitoriya, branch `main`.
+4. Yangi servis → **Variables → Raw Editor**: API servisining barcha
+   o'zgaruvchilarini nusxalang (Supabase, `SALES_AI_API_KEY`,
+   `GEMINI_API_KEY`, `OPENAI_API_KEY`, `UTEL_QUEUE_SINCE`, `UTEL_BATCH`,
+   `WORK_START_HOUR`/`WORK_END_HOUR`, Telegram/`ADMIN_*`, PBX/CRM ...) va
+   qo'shing: `ROLE=worker`.
+5. **Settings**: Build/Start buyruqlari API bilan bir xil (`npm run build`,
+   `npm start`). **Replicas = 1** (navbat holati process xotirasida — ikki
+   worker bir audioni ikki marta tahlil qiladi). Ommaviy domen kerak emas.
+   Healthcheck yoqilsa yo'li: `/health`.
+6. Deploy logida `⚡ server is running ... (ROLE=worker)` va
+   `UTel navbat ishchisi ishga tushdi` chiqishini tekshiring. API logida esa
+   `ROLE=api — fon ishlari ... ISHGA TUSHMAYDI` bo'ladi.
+
+2-qadam bilan 6-qadam orasida tahlil faqat kechikadi. Ikki servisni bir
+vaqtda `ROLE=all`/`worker` bilan qoldirmang — ikkita navbat ishchisi bo'lib qoladi.
 
 ## Deploy tartibi
 
