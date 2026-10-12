@@ -4,11 +4,11 @@ import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAut
 import { getCompanyManagerIds } from '../lib/companyScope';
 import { popStats, overviewStats } from '../lib/analyticsAggregates';
 import { getCompanySettings } from '../lib/companySettings';
-import { dayBounds, isHhMm, tashkentDay } from '../lib/tashkentTime';
+import { addDays, dayBounds, isHhMm, tashkentDay, tashkentDayStart } from '../lib/tashkentTime';
 import { reportRpc } from '../lib/reportRpc';
 import {
   buildAnalyticsRoot, buildDailySummary, buildHourly, buildDailyMinutes, buildStaffStats,
-  buildAnalysisStatus, addDays,
+  buildAnalysisStatus,
   type AnalyticsRootRaw, type BucketRow, type OperatorDailyItem, type StaffOpItem,
   type AnalysisStatusRaw, type OperatorInsight,
 } from '../lib/reportBuilders';
@@ -83,17 +83,19 @@ router.get('/daily-plan', requireAuth, async (req: CompanyAuthedRequest, res: Re
     const { data: managerRow } = await supabase.from('managers').select('id').eq('id', managerId).eq('company_id', companyId).maybeSingle();
     if (!managerRow) return res.status(404).json({ success: false, error: 'Manager topilmadi.' });
 
-    const dateStr = typeof req.query.date === 'string' && req.query.date ? req.query.date : new Date().toISOString().slice(0, 10);
-    const dayStart = new Date(`${dateStr}T00:00:00.000Z`);
+    // Kun TOSHKENT bo'yicha (2026-10-12; avval UTC edi — 00:00–05:00
+    // dagi qo'ng'iroqlar kechagi rejaga yozilardi).
+    const dateStr = typeof req.query.date === 'string' && req.query.date ? req.query.date : tashkentDay(new Date());
+    const dayStart = /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? tashkentDayStart(dateStr) : new Date(NaN);
     if (isNaN(dayStart.getTime())) {
       return res.status(400).json({ success: false, error: 'date YYYY-MM-DD formatda bo\'lishi kerak.' });
     }
-    const dayEnd = new Date(dayStart);
-    dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
+    const dayEnd = tashkentDayStart(addDays(dateStr, 1));
 
     const [targetRes, achievedRes] = await Promise.all([
       supabase.from('daily_targets').select('daily_target, notes').eq('manager_id', managerId).eq('target_date', dateStr).maybeSingle(),
-      supabase.from('calls').select('id', { count: 'exact', head: true }).eq('manager_id', managerId)
+      supabase.from('calls').select('id', { count: 'exact', head: true })
+        .eq('company_id', companyId).eq('manager_id', managerId)
         .gte('created_at', dayStart.toISOString()).lt('created_at', dayEnd.toISOString()),
     ]);
     if (targetRes.error) throw new Error(targetRes.error.message);
@@ -132,7 +134,7 @@ router.post('/daily-plan', requireAuth, async (req: CompanyAuthedRequest, res: R
     if (daily_target === undefined || Number(daily_target) < 0) {
       return res.status(400).json({ success: false, error: 'daily_target manfiy bo\'lmagan son bo\'lishi kerak.' });
     }
-    const date = target_date || new Date().toISOString().slice(0, 10);
+    const date = target_date || tashkentDay(new Date()); // Toshkent kuni
     const { data, error } = await supabase
       .from('daily_targets')
       .upsert(
@@ -229,20 +231,22 @@ router.get('/daily-minutes', requireAuth, async (req: CompanyAuthedRequest, res:
   try {
     const companyId = req.auth!.companyId as string;
     const days = Math.min(90, Math.max(1, parseInt(String(req.query.days || '30'), 10) || 30));
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    // Oyna = bugun + oldingi (days-1) TO'LIQ Toshkent kuni (daily-summary bilan bir xil).
+    const since = tashkentDayStart(addDays(tashkentDay(new Date()), -(days - 1))).toISOString();
 
-    const [items, managers] = await Promise.all([
-      // FAQAT OPERATOR QO'NG'IROQLARI (foydalanuvchi talabi 2026-09-23):
-      // egasi aniqlanmagan ("noma'lum") audiolar hisobga OLINMAYDI —
-      // hisobotda faqat kim gaplashgani aniq bo'lgan qo'ng'iroqlar turadi.
+    const [items, dayRows, managers] = await Promise.all([
+      // Operator kesimi — FAQAT egasi aniq qo'ng'iroqlar (foydalanuvchi
+      // talabi 2026-09-23): "noma'lum" audiolar operatorlar ro'yxatiga kirmaydi.
       reportRpc<OperatorDailyItem[]>('calls_operator_daily', { p_company_id: companyId, p_from: since }),
+      // Kunlik jami (calls / operator_calls) — boshqa endpointlar bilan bir xil manba.
+      reportRpc<BucketRow[]>('calls_bucket_stats', { p_company_id: companyId, p_from: since }),
       supabase.from('managers').select('id, name, pbx_id').eq('company_id', companyId),
     ]);
 
     const nameById = new Map<string, string>();
     for (const m of managers.data || []) nameById.set(m.id, m.name);
 
-    const { data, summary } = buildDailyMinutes(items || [], nameById);
+    const { data, summary } = buildDailyMinutes(items || [], nameById, dayRows || []);
     return res.status(200).json({ success: true, data, summary });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Kunlik daqiqalarni hisoblashda xatolik.' });
@@ -261,47 +265,20 @@ router.get('/daily-minutes', requireAuth, async (req: CompanyAuthedRequest, res:
 //   - qisqa "Ayblar" ro'yxati va "Tavsiya" ro'yxati (GPT yozadi, lekin
 //     FAQAT haqiqiy raqamlar va o'sha kunning xato qatorlari asosida)
 //
-// Kun TOSHKENT vaqti bo'yicha; kun tugagach (23:00) raqamlar o'zgarmaydi.
-// Natija 30 daqiqaga keshlanadi — har sahifa ochilganda GPT chaqirilmasin.
+// Kun TOSHKENT vaqti bo'yicha. Raqamlar har so'rovda yangi (kesh yo'q);
+// AI tavsiyasi fon jobidan (operator_insights) o'qiladi, GPT chaqirilmaydi.
 // ============================================================================
 // ============================================================================
-// HISOBOT KESHI (2026-09-25)
+// KESH YO'Q (2026-10-12).
 //
-// daily-summary va hourly agregatsiyani Node'da bajaradi, ya'ni kunlik
-// qatorlarni bazadan tortadi. Kuniga 1300+ qo'ng'iroq kelayotgani uchun
-// 30 kunlik so'rov 3000+ qator bo'lib qoldi (o'lchandi: ~3.2 s), va
-// dashboard bir sahifada bir necha marta chaqiradi.
-//
-// Shu sabab natija QISQA muddat keshlanadi. Ma'lumot sekin o'zgaradi
-// (qo'ng'iroq tahlili 20-30 soniya davom etadi), sahifalar esa har
-// 20-60 soniyada o'zi yangilanadi — shuning uchun 60 soniyalik kesh
-// ko'rinishni eskirtirmaydi.
-//
-// Kesh kaliti KOMPANIYA bilan boshlanadi — boshqa tenant ma'lumoti
-// hech qachon boshqasiga ko'rinmaydi.
+// Avval daily-summary/hourly/analysis-status 60 s, staff-stats 30 daqiqa
+// PROCESS XOTIRASIDA keshlanardi. Railway'da bir nechta replika (yoki
+// restart) bo'lsa har biri o'z keshidan har xil vaqtdagi sonni berardi —
+// sahifa yangilanganda kunlik son "sakrardi". Hisob endi bazada bitta
+// RPC (tez), shuning uchun raqamlar HAR DOIM yangi o'qiladi.
+// staff-stats'dagi AI tavsiyasi baribir operator_insights jadvalidan
+// (fon jobi yozadi) — u GET'da hisoblanmaydi.
 // ============================================================================
-const reportCache = new Map<string, { at: number; body: unknown }>();
-const REPORT_TTL_MS = 60_000;
-
-function cachedReport(key: string): unknown | null {
-  const hit = reportCache.get(key);
-  if (hit && Date.now() - hit.at < REPORT_TTL_MS) return hit.body;
-  if (hit) reportCache.delete(key);
-  return null;
-}
-
-function putReport(key: string, body: unknown): unknown {
-  reportCache.set(key, { at: Date.now(), body });
-  // Kesh cheksiz o'smasin (ko'p kompaniya + ko'p sana).
-  if (reportCache.size > 200) {
-    const oldest = [...reportCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
-    if (oldest) reportCache.delete(oldest[0]);
-  }
-  return body;
-}
-
-const staffStatsCache = new Map<string, { at: number; data: unknown }>();
-const STAFF_STATS_TTL_MS = 30 * 60 * 1000;
 
 router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
   try {
@@ -310,12 +287,6 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
     const date = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)
       ? req.query.date
       : today;
-
-    const cacheKey = `${companyId}::${date}`;
-    const hit = staffStatsCache.get(cacheKey);
-    if (hit && Date.now() - hit.at < STAFF_STATS_TTL_MS) {
-      return res.status(200).json({ success: true, date, data: hit.data, cached: true });
-    }
 
     // Kun chegarasi: Toshkent kuni -> UTC oraliq [kun boshi, keyingi kun boshi).
     const { from } = dayBounds(date);
@@ -358,7 +329,6 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
     // javobda advice_generated_at — UI "qachon tayyorlangan"ni ko'rsatadi.
     const result = buildStaffStats(items || [], nameById, insightByExt);
 
-    staffStatsCache.set(cacheKey, { at: Date.now(), data: result });
     return res.status(200).json({ success: true, date, data: result, cached: false });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Xodimlar statistikasida xatolik.' });
@@ -386,16 +356,15 @@ router.get('/daily-summary', requireAuth, async (req: CompanyAuthedRequest, res:
   try {
     const companyId = req.auth!.companyId as string;
     const days = Math.min(120, Math.max(1, parseInt(String(req.query.days || '30'), 10) || 30));
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    // OYNA TOSHKENT KUNI BOSHIDAN (2026-10-12): bugun + oldingi (days-1)
+    // to'liq kun. Avval since = hozir - days*24h edi (suriluvchi oyna):
+    // eng eski kun yarim kesilib, vaqt o'tgani sari soni KAMAYIB borardi.
+    const since = tashkentDayStart(addDays(tashkentDay(new Date()), -(days - 1))).toISOString();
 
     // "until=HH:MM" — kunning FAQAT shu vaqtgacha bo'lgan qismi. Delta shu
     // bilan hisoblanadi: bugun 10:17 da bo'lsa, kecha ham 10:17 gacha
     // olinadi. Aks holda kun boshida har doim "-100%" chiqardi.
     const until = isHhMm(req.query.until) ? (req.query.until as string) : null;
-
-    const cacheKey = `daily:${companyId}:${days}:${until ?? ''}`;
-    const cached = cachedReport(cacheKey);
-    if (cached) return res.status(200).json(cached);
 
     // Uzun qo'ng'iroq chegarasi — "KPI normalari"dan (standart 60 s).
     const settings = await getCompanySettings(supabase, companyId);
@@ -412,7 +381,7 @@ router.get('/daily-summary', requireAuth, async (req: CompanyAuthedRequest, res:
     });
     const data = buildDailySummary(rows || []);
 
-    return res.status(200).json(putReport(cacheKey, { success: true, data, long_call_seconds: longSec, until }));
+    return res.status(200).json({ success: true, data, long_call_seconds: longSec, until });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Kunlik yakun hisoblashda xatolik.' });
   }
@@ -437,10 +406,6 @@ router.get('/hourly', requireAuth, async (req: CompanyAuthedRequest, res: Respon
       ? req.query.operator_ext.trim()
       : null;
 
-    const cacheKey = `hourly:${companyId}:${date}:${operatorExt ?? ''}`;
-    const cached = cachedReport(cacheKey);
-    if (cached) return res.status(200).json(cached);
-
     const settings = await getCompanySettings(supabase, companyId);
     const longSec = Math.max(1, Number(settings.qualified_call_seconds) || 60);
     const { from } = dayBounds(date);
@@ -457,27 +422,12 @@ router.get('/hourly', requireAuth, async (req: CompanyAuthedRequest, res: Respon
     });
     const hours = buildHourly(rows || []);
 
-    return res.status(200).json(putReport(cacheKey, { success: true, date, long_call_seconds: longSec, data: hours }));
+    return res.status(200).json({ success: true, date, long_call_seconds: longSec, data: hours });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Soatlik kesimni hisoblashda xatolik.' });
   }
 });
 
-// ============================================================================
-// GET /analytics/staff-stats?date=YYYY-MM-DD
-// XODIMLAR STATISTIKASI — har bir operatorning kunlik ko'rsatkichi, kuchsiz
-// tomonlari (AYB) va ularni tuzatish uchun TAVSIYA.
-//
-// Maqsad (foydalanuvchi talabi 2026-09-24): "sotuvchining aybini topib,
-// sotuvga yordam berish". Shuning uchun har operator uchun:
-//   - kunlik ball (10 ballik), qo'ng'iroq soni, gaplashgan vaqti
-//   - skript bandlari bo'yicha o'rtacha foiz (eng kuchsizi birinchi)
-//   - qisqa "Ayblar" ro'yxati va "Tavsiya" ro'yxati (GPT yozadi, lekin
-//     FAQAT haqiqiy raqamlar va o'sha kunning xato qatorlari asosida)
-//
-// Kun TOSHKENT vaqti bo'yicha; kun tugagach (23:00) raqamlar o'zgarmaydi.
-// Natija 30 daqiqaga keshlanadi — har sahifa ochilganda GPT chaqirilmasin.
-// ============================================================================
 // ============================================================================
 // GET /analytics/analysis-status?date=YYYY-MM-DD
 // TAHLIL HOLATI — nechta qo'ng'iroq tahlil qilindi, nechtasi qilinmadi va
@@ -496,21 +446,17 @@ router.get('/analysis-status', requireAuth, async (req: CompanyAuthedRequest, re
     const { from } = dayBounds(date);
     const to = dayBounds(addDays(date, 1)).from;
 
-    const cacheKey = `status:${companyId}:${date}`;
-    const cached = cachedReport(cacheKey);
-    if (cached) return res.status(200).json(cached);
-
     // TEZLIK (2026-10-12): sanash bazada (supabase/perf_06_calls_analysis_status.sql);
     // transkript matni endi umuman o'qilmaydi.
     const raw = await reportRpc<AnalysisStatusRaw>('calls_analysis_status', {
       p_company_id: companyId, p_from: from, p_to: to,
     });
 
-    return res.status(200).json(putReport(cacheKey, {
+    return res.status(200).json({
       success: true,
       date,
       data: buildAnalysisStatus(raw),
-    }));
+    });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Tahlil holatini hisoblashda xatolik.' });
   }

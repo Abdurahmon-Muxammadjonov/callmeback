@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  addDays, buildHourly, buildDailySummary, buildConversionHistory, buildStaffStats,
+  addDays, buildHourly, buildDailySummary, buildConversionHistory, buildStaffStats, buildDailyMinutes,
   buildRelationshipDynamics, buildPopStats, popRanges, type BucketRow, type StaffOpItem,
 } from './reportBuilders';
 
@@ -49,13 +49,13 @@ test('daily-summary: yangi kun yuqorida, lid = takrorlanmas raqam + raqamsiz', (
 test('conversion-history: oynadagi har kun bor, bo\'sh kun nol', () => {
   const out = buildConversionHistory(
     [{ day: '2026-10-11', conv_n: 2, traffic_avg: 54.04, sales_avg: 10 }],
-    [{ day: '2026-10-12', calls: 7 }],
+    [{ day: '2026-10-12', calls: 7, operator_calls: 4 }],
     3, '2026-10-12',
   );
   assert.deepEqual(out, [
-    { date: '2026-10-10', traffic_conversion: 0, sales_conversion: 0, calls: 0 },
-    { date: '2026-10-11', traffic_conversion: 54.04, sales_conversion: 10, calls: 0 },
-    { date: '2026-10-12', traffic_conversion: 0, sales_conversion: 0, calls: 7 },
+    { date: '2026-10-10', traffic_conversion: 0, sales_conversion: 0, calls: 0, operator_calls: 0 },
+    { date: '2026-10-11', traffic_conversion: 54.04, sales_conversion: 10, calls: 0, operator_calls: 0 },
+    { date: '2026-10-12', traffic_conversion: 0, sales_conversion: 0, calls: 7, operator_calls: 4 },
   ]);
 });
 
@@ -84,6 +84,19 @@ test('staff-stats: teng qiymatlarda tartib barqaror (har so\'rovda bir xil top-6
   assert.deepEqual(a.top_mistakes.map((m) => m.label), ['A', 'B', 'C', 'D', 'E', 'F']);
 });
 
+test('daily-minutes: calls = barcha, operator_calls/operator_minutes = faqat operator', () => {
+  const r = buildDailyMinutes(
+    [{ day: '2026-10-12', manager_id: null, operator_ext: '101', calls: 3, seconds: 180 }],
+    new Map(),
+    [{ day: '2026-10-12', calls: 5, operator_calls: 3, seconds: 300 }],
+  );
+  assert.deepEqual(r.data[0], {
+    date: '2026-10-12', calls: 5, operator_calls: 3, seconds: 300, minutes: 5, operator_minutes: 3,
+    operators: [{ name: 'Operator 101', calls: 3, minutes: 3 }],
+  });
+  assert.deepEqual(r.summary, { days: 1, calls: 5, operator_calls: 3, minutes: 5, operator_minutes: 3 });
+});
+
 test('PoP: 6 ta oyna va eski JSON shakli', () => {
   const now = new Date('2026-10-12T10:00:00Z');
   assert.equal(popRanges(now).length, 6);
@@ -92,6 +105,7 @@ test('PoP: 6 ta oyna va eski JSON shakli', () => {
     { idx: 1, calls: 5, operator_calls: 5, seconds: 300, kpi_sum: 10, kpi_n: 5 },
   ], now);
   assert.deepEqual(out.daily.calls, { current: 10, previous: 5, change_pct: 100 });
+  assert.deepEqual(out.daily.operator_calls, { current: 8, previous: 5, change_pct: 60 });
   assert.deepEqual(out.daily.duration_minutes, { current: 10, previous: 5, change_pct: 100 });
   assert.deepEqual(out.daily.avg_kpi, { current: 5, previous: 2, change_pct: 150 });
   assert.deepEqual(out.weekly.calls, { current: 0, previous: 0, change_pct: 0 });

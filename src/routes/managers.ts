@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { supabase, withSchemaReloadRetry } from '../lib/supabase';
 import { reportRpc } from '../lib/reportRpc';
 import { buildManagerStats, type ManagerStatsRow } from '../lib/reportBuilders';
+import { tashkentDay, tashkentDayStart } from '../lib/tashkentTime';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 import { listVirtualOperators } from '../lib/virtualOperators';
 
@@ -215,9 +216,9 @@ router.get('/:id/stats', requireAuth, async (req: CompanyAuthedRequest, res: Res
     if (mErr) return res.status(500).json({ success: false, error: `Database Error: ${mErr.message}` });
     if (!manager) return res.status(404).json({ success: false, error: 'Manager topilmadi.' });
 
-    // Bugungi (UTC 00:00 dan) qo'ng'iroqlar soni — kunlik reja uchun.
-    const today = new Date();
-    const todayStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())).toISOString();
+    // Bugungi (TOSHKENT 00:00 dan) qo'ng'iroqlar soni — kunlik reja uchun.
+    // 2026-10-12 gacha UTC edi: 00:00–05:00 dagi qo'ng'iroqlar "kecha"ga tushardi.
+    const todayStart = tashkentDayStart(tashkentDay(new Date())).toISOString();
 
     // TEZLIK (2026-10-12): xodimning butun tarixidagi qo'ng'iroqlari
     // fetchAllRows bilan tortilib Node'da o'rtacha olinardi. Endi bitta

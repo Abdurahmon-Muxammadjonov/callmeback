@@ -12,6 +12,7 @@ import {
 import { isWorkTime, workWindowLabel } from '../lib/workHours';
 import { probeWavDurationSec } from '../lib/audioDuration';
 import { classifyShortCall } from '../lib/openaiAnalyzer';
+import { parseTashkentLocal } from '../lib/tashkentTime';
 
 // ============================================================================
 // UTel (utc381.utel.uz) — O'zbek virtual PBX / bulutli telefoniya webhook.
@@ -94,6 +95,26 @@ async function findManagerByExt(companyId: string, ext: string): Promise<string 
   return data?.id ?? null;
 }
 
+// QO'NG'IROQ BOSHLANGAN VAQT (2026-10-12).
+//
+// NEGA: calls.created_at avval yozilmas edi — ya'ni bazaga INSERT vaqti
+// bo'lardi. Webhook kech kelsa (navbat, UTel qayta yuborishi, server
+// restart) qo'ng'iroq boshqa kunga/soatga tushib, kunlik son vaqt o'tib
+// o'zgarardi. sync-pbx-history.ts esa haqiqiy boshlanish vaqtini yozadi —
+// ikki manba bir xil qo'ng'iroqni turli kunga qo'yardi.
+//
+// UTel payload'ida (2026-10-12 Railway logidan tekshirildi):
+//   call_history.date_time = "2026-10-12 20:17:00" — qo'ng'iroq BOSHLANISHI,
+//     Toshkent mahalliy vaqti, ZONASIZ (log vaqti 15:17:53Z; date_time +
+//     duration = payload'dagi "time" — hodisa vaqti);
+//   payload.time — hodisa (call_saved) vaqti, shu formatda.
+// Topilmasa yoki ishonchsiz bo'lsa (kelajakda 10 daqiqadan ko'p) — hozirgi vaqt.
+export function utelCallStartedAt(ch: any, nowMs: number = Date.now()): string {
+  const d = parseTashkentLocal(ch?.date_time);
+  if (d && d.getTime() <= nowMs + 10 * 60_000) return d.toISOString();
+  return new Date(nowMs).toISOString();
+}
+
 function companyIdForDomain(domain?: unknown): string | null {
   if (typeof domain !== 'string' || !domain) return null;
   const host = domain.replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase().trim();
@@ -153,6 +174,8 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
   // operator_ext ustunida (supabase/add_operator_ext.sql).
   const baseRow: Record<string, unknown> = {
     company_id: companyId,
+    // Qo'ng'iroq o'z kuniga tushsin — webhook kech kelsa ham (yuqoriga qarang).
+    created_at: utelCallStartedAt(ch),
     manager_id: managerId,
     audio_url: audioUrl,
     audio_source_url: audioUrl,
@@ -193,7 +216,14 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
   // ishlov uzilib qolsa (deploy/restart/timeout), qo'ng'iroq 'processing'
   // qoladi va navbat uni keyin qayta oladi. Shu sabab bu yerda
   // await qilib kutmaymiz — void.
-  void analyzeUtelCall(call.id, audioUrl, companyId, resolveClientNumber(ch) ?? undefined);
+  //
+  // inFlight (2026-10-12): created_at endi qo'ng'iroq BOSHLANGAN vaqt,
+  // ya'ni yangi qator navbatning "45 soniyadan eski" shartidan darhol
+  // o'tadi. inFlight'ga qo'shilmasa, navbat shu audioni webhook tahlil
+  // qilayotgan paytda ikkinchi marta STT'ga yuborardi (ikki barobar xarajat).
+  inFlight.add(call.id);
+  void analyzeUtelCall(call.id, audioUrl, companyId, resolveClientNumber(ch) ?? undefined)
+    .finally(() => inFlight.delete(call.id));
 }
 
 // Bitta UTel qo'ng'irog'ini tahlil qiladi: audio -> sales-ai (matn) ->
@@ -308,6 +338,15 @@ export async function analyzeUtelCall(
       transcript_segments: Array.isArray(res.dialog) ? res.dialog : [],
     };
     // STT xizmati davomiylikni bilsa — shuni yozamiz (UTel 0 yuborgan bo'lishi mumkin).
+    //
+    // DIQQAT (2026-10-12): bu NORMAL, lekin hisobotga ta'siri bor. UTel
+    // bergan duration jiringlash vaqtini ham o'z ichiga oladi (masalan
+    // duration=75, conversation=61) yoki 0 bo'ladi; STT esa audio faylning
+    // haqiqiy uzunligini beradi. Shu sabab qo'ng'iroq tahlil qilingach
+    // o'sha kunning "daqiqalar" (minutes, talk_seconds) va "uzun qo'ng'iroq"
+    // (long_calls, KPI chegarasidan uzun) ko'rsatkichlari biroz o'zgarishi
+    // mumkin. Qo'ng'iroqlar SONI va kuni o'zgarmaydi (created_at qo'ng'iroq
+    // boshlangan vaqt, u qayta yozilmaydi).
     if (Number(res.durationSec) > 0) upd.duration = Math.round(Number(res.durationSec));
     await supabase.from('calls').update(upd).eq('id', rowId);
 
@@ -386,12 +425,20 @@ const BATCH = Math.max(1, Number(process.env.UTEL_BATCH || 8));
 // o'zgaruvchisi shu chegarani belgilaydi; berilmasa — server ishga tushgan
 // vaqt (ya'ni eski hech narsa olinmaydi).
 //
+// ZAXIRA 3 SOAT (2026-10-12): created_at endi qo'ng'iroq BOSHLANGAN vaqt
+// (webhook kelgan vaqt emas). UTEL_QUEUE_SINCE berilmagan bo'lsa va
+// standart "ishga tushgan vaqt" ishlatilsa, ishchi restartidan oldin
+// boshlanib, keyin saqlangan qo'ng'iroq navbatdan tushib qolardi. Shu
+// sabab standart chegara 3 soat oldinga suriladi (uzun qo'ng'iroq +
+// webhook kechikishi uchun yetarli; eski to'plangan audiolar baribir
+// olinmaydi). Production'da UTEL_QUEUE_SINCE o'rnatilgan.
+//
 // DIQQAT: bu navbat (qayta tiklash) uchun. Webhook orqali ENDI kelayotgan
 // qo'ng'iroq baribir darhol tahlil qilinadi — u navbatdan o'tmaydi.
 const QUEUE_SINCE = (() => {
   const raw = process.env.UTEL_QUEUE_SINCE;
   const t = raw ? Date.parse(raw) : NaN;
-  return Number.isFinite(t) ? new Date(t).toISOString() : new Date().toISOString();
+  return Number.isFinite(t) ? new Date(t).toISOString() : new Date(Date.now() - 3 * 60 * 60_000).toISOString();
 })();
 
 // Yiqilgan qo'ng'iroqni DARHOL qayta urinmaymiz. Aks holda navbat eng eski

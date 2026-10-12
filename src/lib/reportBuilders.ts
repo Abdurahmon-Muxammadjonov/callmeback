@@ -1,4 +1,7 @@
 import { deriveFaults } from './coaching';
+import { addDays, mondayOf, monthStartOf, minusMonthsTashkent, tashkentDay, tashkentDayStart } from './tashkentTime';
+
+export { addDays };
 
 // ============================================================================
 // HISOBOT JSON QURUVCHILARI (2026-10-12).
@@ -28,12 +31,6 @@ const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** "YYYY-MM-DD" sanaga n kun qo'shadi (mintaqadan mustaqil, kalendar bo'yicha). */
-export function addDays(day: string, n: number): string {
-  const [y, m, d] = day.split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
-}
-
 // ----------------------------------------------------------------------------
 // /analytics/pop va /analytics/overview — calls_range_stats (perf_02)
 // ----------------------------------------------------------------------------
@@ -43,42 +40,38 @@ export interface RangeStatRow {
   idx: number; calls: number; operator_calls: number; seconds: number; kpi_sum: number; kpi_n: number;
 }
 
-function startOfDayUTC(d: Date): Date {
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-}
-// Postgres date_trunc('week') — dushanba.
-function startOfWeekUTC(d: Date): Date {
-  const day = startOfDayUTC(d);
-  const dow = (day.getUTCDay() + 6) % 7; // dushanba=0
-  day.setUTCDate(day.getUTCDate() - dow);
-  return day;
-}
-function startOfMonthUTC(d: Date): Date {
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
-}
 function minus(d: Date, ms: number): Date { return new Date(d.getTime() - ms); }
-function minusMonths(d: Date, n: number): Date {
-  const c = new Date(d);
-  c.setUTCMonth(c.getUTCMonth() - n);
-  return c;
-}
 
 /**
  * PoP oynalari, tartib: kun (joriy, oldingi), hafta (joriy, oldingi),
  * oy (joriy, oldingi). Oldingi davr ham "shu vaqtgacha" olinadi —
  * adolatli solishtirish uchun.
+ *
+ * KUN/HAFTA/OY TOSHKENT BO'YICHA (2026-10-12). Avval UTC edi: Toshkent
+ * 00:00–05:00 dagi qo'ng'iroqlar overview'da "kecha"ga tushar va
+ * daily-summary bilan bir xil kun boshqa son ko'rsatardi. Hafta —
+ * dushanbadan. Oldingi oy oynasining oxiri Toshkent devor soati bo'yicha
+ * "1 oy oldin" (31-sana => oy oxiri); eski JS setUTCMonth 31-martda
+ * 3-martni berib, joriy oyning qatorlarini "o'tgan oy"ga qo'shib yuborardi.
+ *
+ * Joriy oyna davr OXIRIGACHA (keyingi kun/hafta/oy boshi) — avval
+ * chegarasiz edi: soati noto'g'ri, kelajak sanali qator overview'ning
+ * "bugun"iga tushib, daily-summary'dagi o'sha kundan farq qilardi.
  */
 export function popRanges(now: Date): TimeRange[] {
-  const dayStart = startOfDayUTC(now);
-  const weekStart = startOfWeekUTC(now);
-  const monthStart = startOfMonthUTC(now);
+  const today = tashkentDay(now);
+  const dayStart = tashkentDayStart(today);
+  const weekStart = tashkentDayStart(mondayOf(today));
+  const monthStart = tashkentDayStart(monthStartOf(today));
+  const prevMonthStart = minusMonthsTashkent(monthStart, 1);
+  const nextMonthStart = minusMonthsTashkent(monthStart, -1);
   return [
-    { from: dayStart, to: null },
+    { from: dayStart, to: tashkentDayStart(addDays(today, 1)) },
     { from: minus(dayStart, DAY_MS), to: minus(now, DAY_MS) },
-    { from: weekStart, to: null },
+    { from: weekStart, to: tashkentDayStart(addDays(mondayOf(today), 7)) },
     { from: minus(weekStart, 7 * DAY_MS), to: minus(now, 7 * DAY_MS) },
-    { from: monthStart, to: null },
-    { from: minusMonths(monthStart, 1), to: minusMonths(now, 1) },
+    { from: monthStart, to: nextMonthStart },
+    { from: prevMonthStart, to: minusMonthsTashkent(now, 1) },
   ];
 }
 
@@ -94,12 +87,18 @@ function popPct(cur: number, prev: number): number {
 
 function rangeAgg(r: RangeStatRow | undefined) {
   const kpiN = num(r?.kpi_n);
-  return { calls: num(r?.calls), dur: num(r?.seconds), kpi: kpiN ? num(r?.kpi_sum) / kpiN : 0 };
+  return {
+    calls: num(r?.calls), opCalls: num(r?.operator_calls),
+    dur: num(r?.seconds), kpi: kpiN ? num(r?.kpi_sum) / kpiN : 0,
+  };
 }
 
 function popBlock(cur: ReturnType<typeof rangeAgg>, prev: ReturnType<typeof rangeAgg>) {
   return {
     calls: { current: cur.calls, previous: prev.calls, change_pct: popPct(cur.calls, prev.calls) },
+    // calls — BARCHA qo'ng'iroqlar; operator_calls — faqat operatorniki
+    // (ichki raqami yoki xodimi bor). Bir maydon ikki ma'noda ishlatilmaydi.
+    operator_calls: { current: cur.opCalls, previous: prev.opCalls, change_pct: popPct(cur.opCalls, prev.opCalls) },
     duration_minutes: { current: round1(cur.dur / 60), previous: round1(prev.dur / 60), change_pct: popPct(cur.dur, prev.dur) },
     avg_kpi: { current: round2(cur.kpi), previous: round2(prev.kpi), change_pct: popPct(cur.kpi, prev.kpi) },
   };
@@ -222,13 +221,17 @@ export interface ConversionDayRow { day: string; conv_n: number; traffic_avg: nu
 
 export function buildConversionHistory(
   convRows: ConversionDayRow[],
-  callRows: Array<Pick<BucketRow, 'day' | 'calls'>>,
+  callRows: Array<Pick<BucketRow, 'day' | 'calls' | 'operator_calls'>>,
   days: number,
   today: string,
 ) {
   const conv = new Map(convRows.map((r) => [r.day, r]));
   const calls = new Map<string, number>();
-  for (const r of callRows) calls.set(r.day, (calls.get(r.day) || 0) + num(r.calls));
+  const opCalls = new Map<string, number>();
+  for (const r of callRows) {
+    calls.set(r.day, (calls.get(r.day) || 0) + num(r.calls));
+    opCalls.set(r.day, (opCalls.get(r.day) || 0) + num(r.operator_calls));
+  }
   return Array.from({ length: days }, (_, i) => {
     const date = addDays(today, -(days - 1 - i));
     const a = conv.get(date);
@@ -237,7 +240,8 @@ export function buildConversionHistory(
       date,
       traffic_conversion: n ? num(a?.traffic_avg) : 0,
       sales_conversion: n ? num(a?.sales_avg) : 0,
-      calls: calls.get(date) || 0,
+      calls: calls.get(date) || 0,                   // BARCHA qo'ng'iroqlar
+      operator_calls: opCalls.get(date) || 0,        // faqat operator qo'ng'iroqlari
     };
   });
 }
@@ -250,14 +254,39 @@ export interface OperatorDailyItem {
   day: string; manager_id: string | null; operator_ext: string | null; calls: number; seconds: number;
 }
 
-export function buildDailyMinutes(items: OperatorDailyItem[], nameById: Map<string, string>) {
-  const byDay = new Map<string, { calls: number; seconds: number; ops: Map<string, { name: string; calls: number; seconds: number }> }>();
+/**
+ * MAYDONLAR MA'NOSI (2026-10-12, "bir maydon — bitta ma'no"):
+ *   calls / seconds / minutes        — kundagi BARCHA qo'ng'iroqlar (daily-summary,
+ *                                      hourly, analysis-status bilan bir xil)
+ *   operator_calls / operator_minutes — faqat operator qo'ng'iroqlari
+ *   operators[]                      — operator kesimi (egasi aniq bo'lganlar;
+ *                                      foydalanuvchi talabi 2026-09-23)
+ * Avval kun darajasidagi calls/minutes FAQAT operator qo'ng'iroqlarini
+ * sanardi — daily-summary'dagi "calls" bilan bir xil nomda boshqa son edi.
+ */
+export function buildDailyMinutes(
+  items: OperatorDailyItem[],
+  nameById: Map<string, string>,
+  dayRows: Array<Pick<BucketRow, 'day' | 'calls' | 'operator_calls' | 'seconds'>>,
+) {
+  type Ops = Map<string, { name: string; calls: number; seconds: number }>;
+  const byDay = new Map<string, { calls: number; opCalls: number; seconds: number; opSeconds: number; ops: Ops }>();
+  const entryOf = (day: string) => {
+    const e = byDay.get(day) || { calls: 0, opCalls: 0, seconds: 0, opSeconds: 0, ops: new Map() };
+    byDay.set(day, e);
+    return e;
+  };
+  for (const r of dayRows) {
+    const e = entryOf(r.day);
+    e.calls += num(r.calls);
+    e.opCalls += num(r.operator_calls);
+    e.seconds += num(r.seconds);
+  }
   for (const it of items) {
-    const entry = byDay.get(it.day) || { calls: 0, seconds: 0, ops: new Map() };
+    const entry = entryOf(it.day);
     const calls = num(it.calls);
     const sec = num(it.seconds);
-    entry.calls += calls;
-    entry.seconds += sec;
+    entry.opSeconds += sec;
 
     const opKey = it.manager_id || (it.operator_ext ? `ext:${it.operator_ext}` : 'ext:—');
     const opName = it.manager_id
@@ -269,8 +298,6 @@ export function buildDailyMinutes(items: OperatorDailyItem[], nameById: Map<stri
     op.calls += calls;
     op.seconds += sec;
     entry.ops.set(opKey, op);
-
-    byDay.set(it.day, entry);
   }
 
   const data = [...byDay.entries()]
@@ -278,20 +305,25 @@ export function buildDailyMinutes(items: OperatorDailyItem[], nameById: Map<stri
     .map(([date, v]) => ({
       date,
       calls: v.calls,
+      operator_calls: v.opCalls,
       seconds: v.seconds,
       minutes: minutesOf(v.seconds),
+      operator_minutes: minutesOf(v.opSeconds),
       operators: [...v.ops.values()]
         .sort((a, b) => b.seconds - a.seconds || byText(a.name, b.name))
         .map((o) => ({ name: o.name, calls: o.calls, minutes: minutesOf(o.seconds) })),
     }));
 
-  const totalSeconds = data.reduce((s, d) => s + d.seconds, 0);
+  const sum = (f: (d: (typeof data)[number]) => number) => data.reduce((s, d) => s + f(d), 0);
+  const opSecondsTotal = [...byDay.values()].reduce((s, v) => s + v.opSeconds, 0);
   return {
     data,
     summary: {
       days: data.length,
-      calls: data.reduce((s, d) => s + d.calls, 0),
-      minutes: minutesOf(totalSeconds),
+      calls: sum((d) => d.calls),
+      operator_calls: sum((d) => d.operator_calls),
+      minutes: minutesOf(sum((d) => d.seconds)),
+      operator_minutes: minutesOf(opSecondsTotal),
     },
   };
 }
@@ -384,7 +416,8 @@ export interface AnalysisStatusRaw {
 
 export function buildAnalysisStatus(raw: AnalysisStatusRaw) {
   return {
-    total: num(raw.total),
+    total: num(raw.total),                   // BARCHA qo'ng'iroqlar (= daily-summary calls)
+    operator_calls: num(raw.operator_calls), // ulardan operator qo'ng'iroqlari
     analyzed: num(raw.analyzed),
     analyzed_minutes: minutesOf(num(raw.analyzed_seconds)),
     not_analyzed: num(raw.not_analyzed),

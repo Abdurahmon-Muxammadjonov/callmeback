@@ -1,8 +1,9 @@
 import { reportRpc } from './reportRpc';
 import {
-  popRanges, rangesArg, buildPopStats, buildRelationshipDynamics, addDays,
+  popRanges, rangesArg, buildPopStats, buildRelationshipDynamics,
   type RangeStatRow, type BucketRow,
 } from './reportBuilders';
+import { addDays, tashkentDay, tashkentDayStart } from './tashkentTime';
 
 // ============================================================================
 // /analytics/pop, /analytics/overview va /api/management/relationship-dynamics
@@ -16,6 +17,9 @@ import {
 //
 // TENANT CHEGARASI: calls.company_id (xodimga biriktirilmagan qo'ng'iroqlar
 // ham kirsin — 2026-09-23 dan qo'ng'iroq xodim yaratmasdan yoziladi).
+//
+// KUN CHEGARASI: Toshkent (2026-10-12; avval UTC edi va bir kun uchun
+// daily-summary bilan boshqa son chiqardi).
 // ============================================================================
 
 export async function popStats(companyId: string): Promise<Record<string, unknown>> {
@@ -33,11 +37,10 @@ export async function overviewStats(companyId: string): Promise<Record<string, u
 }
 
 export async function relationshipDynamics(companyId: string, platformId: string | null): Promise<unknown[]> {
-  const today = new Date().toISOString().slice(0, 10); // UTC kuni
+  const today = tashkentDay(new Date());
   const rows = await reportRpc<BucketRow[]>('calls_bucket_stats', {
     p_company_id: companyId,
-    p_from: `${addDays(today, -13)}T00:00:00Z`,
-    p_tz: 'UTC',
+    p_from: tashkentDayStart(addDays(today, -13)).toISOString(),
     p_platform_id: platformId,
   });
   return buildRelationshipDynamics(rows || [], today);

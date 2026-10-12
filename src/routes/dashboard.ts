@@ -2,12 +2,14 @@ import { Router, Response } from 'express';
 import { supabase } from '../lib/supabase';
 import { reportRpc } from '../lib/reportRpc';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
+import { monthStartOf, tashkentDay, tashkentDayStart } from '../lib/tashkentTime';
 
 const router = Router();
 
-function startOfMonthUTC(): string {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+// Oy boshi TOSHKENT bo'yicha (2026-10-12; avval UTC edi — oyning 1-kuni
+// 00:00–05:00 dagi qo'ng'iroqlar o'tgan oyga tushardi).
+function startOfMonthTashkent(): string {
+  return tashkentDayStart(monthStartOf(tashkentDay(new Date()))).toISOString();
 }
 
 // ============================================================================
@@ -25,7 +27,7 @@ router.get('/stats', requireAuth, async (req: CompanyAuthedRequest, res: Respons
     const [totals, activeAgentsRes] = await Promise.all([
       reportRpc<Array<{ total_calls: number; calls_since: number; kpi_sum: number }>>('company_call_totals', {
         p_company_id: companyId,
-        p_since: startOfMonthUTC(),
+        p_since: startOfMonthTashkent(),
       }),
       supabase.from('managers').select('id', { count: 'exact', head: true }).eq('company_id', companyId).eq('status', 'active'),
     ]);

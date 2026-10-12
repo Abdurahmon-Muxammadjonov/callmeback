@@ -4,6 +4,11 @@ import { supabase } from './supabase';
 // menejerlar id ro'yxati" — calls_overview_stats/calls_pop_stats/
 // calls_relationship_dynamics RPC'lari p_manager_ids uuid[] orqali filtrlaydi.
 //
+// KESH 15 s (2026-10-12; avval 60 s): kesh process xotirasida — Railway'da
+// bir nechta replika bo'lsa har biri o'zinikini ko'radi. Qisqa TTL bilan
+// yangi xodim tezroq aks etadi, sahifa ichidagi takror so'rovlar esa
+// baribir bitta so'rovga tushadi.
+//
 // OPTIMALLASH (2026-09-23): Analitika sahifasi bir zumda bir necha
 // endpoint chaqiradi (overview + pop + management), har biri shu funksiyani
 // chaqirar va har chaqiruv alohida Supabase so'rovi (~0.6s) edi — ular
@@ -11,7 +16,7 @@ import { supabase } from './supabase';
 // qisqa muddat (60s) keshlanadi: ketma-ket va tez-tez qayta chaqiruvlar
 // bitta so'rovga tushadi. Yangi xodim/qo'ng'iroq qo'shilishi 60s ichida
 // aks etmasligi mumkin — analitika uchun bu maqbul (real-time shart emas).
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL_MS = 15_000;
 const cache = new Map<string, { at: number; ids: string[] }>();
 
 export async function getCompanyManagerIds(companyId: string): Promise<string[]> {

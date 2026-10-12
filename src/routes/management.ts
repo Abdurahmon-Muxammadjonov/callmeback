@@ -3,7 +3,8 @@ import { supabase } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 import { relationshipDynamics } from '../lib/analyticsAggregates';
 import { reportRpc } from '../lib/reportRpc';
-import { addDays, buildConversionHistory, type BucketRow, type ConversionDayRow } from '../lib/reportBuilders';
+import { buildConversionHistory, type BucketRow, type ConversionDayRow } from '../lib/reportBuilders';
+import { addDays, tashkentDay, tashkentDayStart } from '../lib/tashkentTime';
 
 const router = Router();
 
@@ -65,18 +66,19 @@ router.get('/conversion-history', requireAuth, async (req: CompanyAuthedRequest,
     const companyId = req.auth!.companyId as string;
     const platformId = typeof req.query.platform_id === 'string' && req.query.platform_id ? req.query.platform_id : null;
     const days = Math.min(90, Math.max(1, parseInt(String(req.query.days || '14'), 10) || 14));
-    const today = new Date().toISOString().slice(0, 10); // UTC kuni
-    const start = `${addDays(today, -(days - 1))}T00:00:00Z`;
+    // Kun chegarasi TOSHKENT bo'yicha (2026-10-12; avval UTC edi).
+    const today = tashkentDay(new Date());
+    const start = tashkentDayStart(addDays(today, -(days - 1))).toISOString();
 
     // TEZLIK (2026-10-12): konversiyalar va qo'ng'iroqlar endi Node'ga
     // tortilmaydi — ikkita parallel RPC, kun bo'yicha yig'indi bazada
     // (supabase/perf_10_conversions_daily.sql, perf_03_calls_bucket_stats.sql).
     const [convRows, callRows] = await Promise.all([
       reportRpc<ConversionDayRow[]>('company_conversions_daily', {
-        p_company_id: companyId, p_from: start, p_tz: 'UTC', p_platform_id: platformId,
+        p_company_id: companyId, p_from: start, p_platform_id: platformId,
       }),
       reportRpc<BucketRow[]>('calls_bucket_stats', {
-        p_company_id: companyId, p_from: start, p_tz: 'UTC', p_platform_id: platformId,
+        p_company_id: companyId, p_from: start, p_platform_id: platformId,
       }),
     ]);
 
