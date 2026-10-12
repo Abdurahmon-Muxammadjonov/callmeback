@@ -3,6 +3,7 @@ import { Readable } from 'node:stream';
 import { supabase } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 import { virtualManagerId } from '../lib/virtualOperators';
+import { addDays, tashkentDayStart } from '../lib/tashkentTime';
 import { signAudioToken, verifyAudioToken, pbxAuthHeaders, isSupabaseStorageUrl } from '../lib/audioAccess';
 
 const router = Router();
@@ -64,6 +65,11 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
       .select('id, manager_id, operator_ext, direction, is_problem, problem_severity, problem_reason, platform_id, audio_url, duration, kpi_score, penalty_amount, bonus_amount, rop_comment, dropped_reason, status, created_at, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count')
       .eq('company_id', companyId)
       .order('created_at', { ascending: false })
+      // BARQAROR TARTIB (2026-10-12): created_at teng qatorlar sahifalar
+      // orasida har safar boshqa tartibda kelardi — offset bilan
+      // sahifalaydigan frontend bir qatorni ikki marta oladi yoki
+      // tashlab ketardi va undan hisoblangan son "o'zidan o'zgarardi".
+      .order('id', { ascending: false })
       .range(offset, offset + limit - 1);
     if (managerId) query = query.eq('manager_id', managerId);
     if (platformId) query = query.eq('platform_id', platformId);
@@ -88,9 +94,11 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
 
     const date = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date) ? req.query.date : undefined;
     if (date) {
+      // [kun boshi, keyingi kun boshi) — hisobotlar (daily-summary,
+      // analysis-status) bilan aynan bir xil chegara (2026-10-12).
       query = query
-        .gte('created_at', new Date(`${date}T00:00:00+05:00`).toISOString())
-        .lte('created_at', new Date(`${date}T23:59:59.999+05:00`).toISOString());
+        .gte('created_at', tashkentDayStart(date).toISOString())
+        .lt('created_at', tashkentDayStart(addDays(date, 1)).toISOString());
     }
 
     const { data, error } = await query;

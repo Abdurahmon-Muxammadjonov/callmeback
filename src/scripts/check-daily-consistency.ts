@@ -10,6 +10,7 @@
 //   /analytics/overview             — daily.calls.current (faqat BUGUN uchun)
 //   /analytics/daily-minutes        — o'sha kun qatori
 //   /api/management/conversion-history — o'sha kun qatori
+//   /api/management/daily-panel     — "Boshqaruv paneli" (oxirgi 31 kun)
 //   baza (to'g'ridan-to'g'ri count) — haqiqat manbai
 // Ikkala ta'rif alohida solishtiriladi:
 //   calls          — BARCHA qo'ng'iroqlar
@@ -116,6 +117,12 @@ async function collect(): Promise<Count[]> {
         return { source: '/management/conversion-history', calls: num(row?.calls ?? 0), operator_calls: num(row?.operator_calls ?? 0) };
       }),
     );
+  }
+  if (span <= 31) {
+    tasks.push(get(`/api/management/daily-panel?days=${span}`).then((b) => {
+      const row = (b.data?.days || []).find((r: any) => r.date === date);
+      return { source: '/management/daily-panel', calls: num(row?.calls ?? 0), operator_calls: num(row?.operator_calls ?? 0) };
+    }));
   }
   if (date === today) {
     tasks.push(get('/analytics/overview').then((b) => ({

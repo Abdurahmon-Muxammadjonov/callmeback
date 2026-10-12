@@ -3,7 +3,11 @@ import { supabase } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 import { relationshipDynamics } from '../lib/analyticsAggregates';
 import { reportRpc } from '../lib/reportRpc';
-import { buildConversionHistory, type BucketRow, type ConversionDayRow } from '../lib/reportBuilders';
+import {
+  buildConversionHistory, buildDailyPanel,
+  type BucketRow, type ConversionDayRow, type OperatorDailyItem,
+} from '../lib/reportBuilders';
+import { getCompanySettings } from '../lib/companySettings';
 import { addDays, tashkentDay, tashkentDayStart } from '../lib/tashkentTime';
 
 const router = Router();
@@ -88,6 +92,47 @@ router.get('/conversion-history', requireAuth, async (req: CompanyAuthedRequest,
     return res.status(200).json({ success: true, data: out });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Conversion history xatolik.' });
+  }
+});
+
+// GET /api/management/daily-panel?days=14&platform_id=
+// "Boshqaruv paneli" uchun kunlik yig'indilar, soatlar va bugungi xodim
+// bo'yicha sonlar — bitta javobda (2026-10-12). Avval frontend 14 kunlik
+// barcha qo'ng'iroqni /api/calls'dan ~90 ta ketma-ket so'rov bilan tortib
+// o'zi sanardi: sekin va sahifalar surilib son "o'zidan o'zgarardi".
+// Tafsilot: lib/reportBuilders.ts -> buildDailyPanel.
+router.get('/daily-panel', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
+  try {
+    const companyId = req.auth!.companyId as string;
+    const platformId = typeof req.query.platform_id === 'string' && req.query.platform_id && req.query.platform_id !== 'live'
+      ? req.query.platform_id : null;
+    const days = Math.min(31, Math.max(1, parseInt(String(req.query.days || '14'), 10) || 14));
+    const today = tashkentDay(new Date());
+
+    const settings = await getCompanySettings(supabase, companyId);
+    const longSec = Math.max(1, Number(settings.qualified_call_seconds) || 60);
+
+    const [hourRows, todayItems] = await Promise.all([
+      reportRpc<BucketRow[]>('calls_bucket_stats', {
+        p_company_id: companyId,
+        p_from: tashkentDayStart(addDays(today, -(days - 1))).toISOString(),
+        p_to: tashkentDayStart(addDays(today, 1)).toISOString(),
+        p_by_hour: true,
+        p_long_sec: longSec,
+        p_platform_id: platformId,
+      }),
+      reportRpc<OperatorDailyItem[]>('calls_operator_daily', {
+        p_company_id: companyId,
+        p_from: tashkentDayStart(today).toISOString(),
+      }),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: { window_days: days, long_call_seconds: longSec, ...buildDailyPanel(hourRows || [], todayItems || [], companyId, today, days) },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Boshqaruv paneli ma\'lumotida xatolik.' });
   }
 });
 

@@ -1,5 +1,6 @@
 import { deriveFaults } from './coaching';
 import { addDays, mondayOf, monthStartOf, minusMonthsTashkent, tashkentDay, tashkentDayStart } from './tashkentTime';
+import { virtualManagerId } from './virtualOperators';
 
 export { addDays };
 
@@ -123,6 +124,7 @@ export interface BucketRow {
   calls: number; operator_calls: number; seconds: number; long_calls: number;
   with_transcript: number; analyzed_any: number;
   scored: number; score_sum: number; low_score: number;
+  kpi_sum: number; low_any: number; penalized: number;
   incoming: number; outgoing: number;
   invited: number; closed: number; bad_leads: number; unanswered: number;
   lead_phones: number; leads_no_phone: number;
@@ -244,6 +246,79 @@ export function buildConversionHistory(
       operator_calls: opCalls.get(date) || 0,        // faqat operator qo'ng'iroqlari
     };
   });
+}
+
+// ----------------------------------------------------------------------------
+// /api/management/daily-panel — "Boshqaruv paneli" (perf_03 soatlik + perf_04)
+// ----------------------------------------------------------------------------
+
+const round2Money = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * NEGA (2026-10-12): panel avval 14 kunlik BARCHA qo'ng'iroqni /api/calls'dan
+ * 200 tadan offset bilan (~90 ketma-ket so'rov) tortib brauzerda sanardi.
+ * Sahifalash paytida yangi qo'ng'iroq kelsa sahifalar surilib, bir qator
+ * ikki marta sanalardi — "Bugungi qo'ng'iroqlar" o'zidan o'zgarib turardi;
+ * vaqt intervallari esa BRAUZER soati bo'yicha edi. Endi hammasi serverda,
+ * Toshkent bo'yicha, boshqa hisobotlar bilan bir xil ta'rifda.
+ *
+ *   days[0] = bugun ... days[n-1]; har kun:
+ *     calls / operator_calls — daily-summary bilan bir xil
+ *     kpi_sum   — barcha qo'ng'iroqlar kpi yig'indisi (panel o'rtachasi = kpi_sum / calls)
+ *     seconds   — sum(max(0, duration))
+ *     low       — kpi < 50 (baholanmaganlar ham — panelning eski ta'rifi)
+ *     penalized — jarimali qo'ng'iroqlar soni
+ *     short     — uzun bo'lmaganlar = calls - long_calls (chegara KPI normalaridan)
+ *     bonus_sum / penalty_sum
+ *   hours[h]   — oyna bo'yicha h-soatdagi qo'ng'iroqlar (Toshkent soati)
+ *   today_by_manager — bugungi qo'ng'iroqlar xodim (yoki virtual operator) id bo'yicha
+ */
+export function buildDailyPanel(
+  hourRows: BucketRow[],
+  todayItems: OperatorDailyItem[],
+  companyId: string,
+  today: string,
+  windowDays: number,
+) {
+  const blankDay = (date: string) => ({
+    date, calls: 0, operator_calls: 0, kpi_sum: 0, seconds: 0, low: 0, penalized: 0, short: 0,
+    bonus_sum: 0, penalty_sum: 0,
+  });
+  const index = new Map<string, number>();
+  const days = Array.from({ length: windowDays }, (_, i) => {
+    const date = addDays(today, -i);
+    index.set(date, i);
+    return blankDay(date);
+  });
+  const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, calls: 0 }));
+
+  for (const r of hourRows) {
+    const i = index.get(r.day);
+    if (i === undefined) continue; // oynadan tashqari (masalan soati noto'g'ri, kelajak sanali qator)
+    const d = days[i];
+    const calls = num(r.calls);
+    d.calls += calls;
+    d.operator_calls += num(r.operator_calls);
+    d.kpi_sum += num(r.kpi_sum);
+    d.seconds += num(r.seconds);
+    d.low += num(r.low_any);
+    d.penalized += num(r.penalized);
+    d.short += calls - num(r.long_calls);
+    d.bonus_sum = round2Money(d.bonus_sum + num(r.bonus_sum));
+    d.penalty_sum = round2Money(d.penalty_sum + num(r.penalty_sum));
+    const h = hours[num(r.hour)];
+    if (h) h.calls += calls;
+  }
+
+  const todayByManager: Record<string, number> = {};
+  for (const it of todayItems) {
+    if (it.day !== today) continue;
+    // /api/calls bilan bir xil kalit: xodim yoki ichki raqamdan virtual id.
+    const id = it.manager_id || (it.operator_ext ? virtualManagerId(companyId, String(it.operator_ext)) : null);
+    if (id) todayByManager[id] = (todayByManager[id] || 0) + num(it.calls);
+  }
+
+  return { days, hours, today_by_manager: todayByManager };
 }
 
 // ----------------------------------------------------------------------------

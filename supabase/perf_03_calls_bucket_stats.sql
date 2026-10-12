@@ -8,6 +8,7 @@
 --   /api/management/relationship-dynamics (kunlik javobsiz/sifatsiz lid)
 --   /api/management/conversion-history    (kunlik qo'ng'iroqlar soni)
 --   /analytics/daily-minutes          (kunlik jami qo'ng'iroq soni)
+--   /api/management/daily-panel       ("Boshqaruv paneli": 14 kun + soatlar)
 --
 -- NEGA: bu endpointlar oyna ichidagi HAMMA qatorni fetchAllRows bilan
 -- 1000 tadan ketma-ket tortib Node'da sanardi (30 kun = 40 000 qator,
@@ -32,6 +33,10 @@
 --   with_transcript= transcript bo'sh emas (daily-summary "analyzed")
 --   analyzed_any   = transcript bo'sh emas YOKI kpi_score > 0 (hourly "analyzed")
 --   scored / score_sum / low_score = kpi_score > 0 / yig'indi / 0 < kpi < 50
+--   kpi_sum        = BARCHA qatorlar kpi yig'indisi (0 lar ham — Boshqaruv
+--                    paneli o'rtachani hamma qo'ng'iroqqa bo'ladi)
+--   low_any        = kpi_score < 50 (0 — baholanmaganlar ham; panel ta'rifi)
+--   penalized      = penalty_amount > 0 bo'lgan qo'ng'iroqlar soni
 --   lead_phones    = new_leads_count > 0 bo'lgan qatorlardagi TAKRORLANMAS
 --                    mijoz raqamlari (bo'shliqlari kesilgan)
 --   leads_no_phone = new_leads_count > 0, lekin raqami yo'q qatorlar soni
@@ -73,6 +78,9 @@ returns table (
   scored          bigint,
   score_sum       bigint,
   low_score       bigint,
+  kpi_sum         bigint,
+  low_any         bigint,
+  penalized       bigint,
   incoming        bigint,
   outgoing        bigint,
   invited         bigint,
@@ -122,6 +130,9 @@ as $$
     count(*) filter (where kpi > 0)                               as scored,
     coalesce(sum(kpi) filter (where kpi > 0), 0)::bigint          as score_sum,
     count(*) filter (where kpi > 0 and kpi < 50)                  as low_score,
+    coalesce(sum(kpi), 0)::bigint                                 as kpi_sum,
+    count(*) filter (where kpi < 50)                              as low_any,
+    count(*) filter (where penalty > 0)                           as penalized,
     count(*) filter (where direction = 'incoming')                as incoming,
     count(*) filter (where direction = 'outgoing')                as outgoing,
     coalesce(sum(invited), 0)::bigint                             as invited,
