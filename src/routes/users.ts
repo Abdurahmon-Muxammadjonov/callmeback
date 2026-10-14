@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import { supabase } from '../lib/supabase';
 import { markOnline, markOffline, onlineIds } from '../lib/presence';
 import { signSessionToken } from '../lib/authToken';
+import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
 
 const router = Router();
 
@@ -66,7 +67,62 @@ router.post('/login', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/', async (req: Request, res: Response) => {
+// ============================================================================
+// XAVFSIZLIK (2026-10-15)
+//
+// NIMA EDI: /users ostidagi HAMMA endpoint (login'dan tashqari) tokensiz
+// ochiq edi va kompaniya bo'yicha filtrlanmasdi: istalgan odam barcha
+// kompaniyalar xodimlarini ko'rishi, yangi foydalanuvchi yaratishi va —
+// eng xavflisi — PUT /users/:id/credentials bilan ISTALGAN hisobning
+// parolini almashtirib, uni egallab olishi mumkin edi. "Xodimlarni
+// boshqarish" sahifasida boshqa kompaniyalarning xodimlari ko'rinardi.
+//
+// ENDI: login'dan keyingi hamma narsa requireAuth (sessiya JWT) talab
+// qiladi; kompaniya va rol TOKENDAN olinadi, mijoz yuborgan company_id'ga
+// ishonilmaydi. Boshqa kompaniyaning foydalanuvchisi 404 bilan javob oladi
+// (mavjudligi ham oshkor qilinmaydi).
+//   - direktor/admin: o'z kompaniyasidagi foydalanuvchilarni boshqaradi;
+//   - xodim (user): faqat O'ZINI o'qiydi (profil, smena, skriptlar) va
+//     o'z onlayn holatini yuboradi (operator kabineti — EmployeeDashboard).
+// ============================================================================
+router.use(requireAuth);
+
+const ADMIN_ROLES = ['director', 'admin'];
+// Kim qaysi rolni bera oladi: direktor — hammasini, admin — direktordan tashqari.
+const ASSIGNABLE_ROLES: Record<string, string[]> = {
+  director: ['user', 'admin', 'director'],
+  admin: ['user', 'admin'],
+};
+
+function isAdmin(req: CompanyAuthedRequest): boolean {
+  return ADMIN_ROLES.includes(req.auth!.role);
+}
+
+type Access = 'self-or-admin' | 'admin';
+
+/** Maqsad foydalanuvchi so'rovchining kompaniyasida ekanini va ruxsatni
+ *  tekshiradi. Ruxsat bo'lmasa javobni o'zi yuboradi va false qaytaradi. */
+async function canAccessUser(req: CompanyAuthedRequest, res: Response, id: string, access: Access): Promise<boolean> {
+  const self = req.auth!.userId === id;
+  if (access === 'self-or-admin' && self) return true;
+  if (!isAdmin(req)) {
+    res.status(403).json({ success: false, error: "Bu amal uchun ruxsat yo'q." });
+    return false;
+  }
+  const { data, error } = await supabase.from('users').select('company_id').eq('id', id).maybeSingle();
+  if (error) {
+    res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
+    return false;
+  }
+  if (!data || data.company_id !== req.auth!.companyId) {
+    res.status(404).json({ success: false, error: 'User topilmadi.' });
+    return false;
+  }
+  return true;
+}
+
+router.get('/', async (req: CompanyAuthedRequest, res: Response) => {
+  if (!isAdmin(req)) return res.status(403).json({ success: false, error: "Bu amal uchun ruxsat yo'q." });
   try {
     // Ixtiyoriy filtrlar:
     //   ?role=user   → faqat xodimlar (direktor/admin ko'rinmaydi)
@@ -78,6 +134,7 @@ router.get('/', async (req: Request, res: Response) => {
     let q = supabase
       .from('users')
       .select(PUBLIC_COLS)
+      .eq('company_id', req.auth!.companyId) // FAQAT o'z kompaniyasi (tokendan)
       .order('created_at', { ascending: false });
     if (role) q = q.eq('role', role);
     if (excludeRole) q = q.neq('role', excludeRole);
@@ -108,23 +165,32 @@ router.get('/', async (req: Request, res: Response) => {
 
 // Onlayn foydalanuvchilar ro'yxati. MUHIM: '/:id' dan OLDIN turishi kerak,
 // aks holda Express buni id='presence' deb qabul qiladi.
-router.get('/presence', (_req: Request, res: Response) => {
-  return res.status(200).json({ success: true, data: onlineIds() });
+router.get('/presence', async (req: CompanyAuthedRequest, res: Response) => {
+  if (!isAdmin(req)) return res.status(403).json({ success: false, error: "Bu amal uchun ruxsat yo'q." });
+  const ids = onlineIds();
+  if (!ids.length) return res.status(200).json({ success: true, data: [] });
+  // Faqat o'z kompaniyasidagi onlayn foydalanuvchilar.
+  const { data, error } = await supabase.from('users').select('id').in('id', ids).eq('company_id', req.auth!.companyId);
+  if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
+  return res.status(200).json({ success: true, data: (data || []).map((u: any) => u.id) });
 });
 
 // Heartbeat — xodim sahifasi davriy yuboradi (onlayn ekanini bildiradi).
-router.post('/:id/ping', (req: Request, res: Response) => {
+router.post('/:id/ping', async (req: CompanyAuthedRequest, res: Response) => {
+  if (!(await canAccessUser(req, res, String(req.params.id), 'self-or-admin'))) return;
   markOnline(String(req.params.id));
   return res.status(200).json({ success: true });
 });
 
 // Logout / chiqish — darhol offline qilamiz.
-router.post('/:id/offline', (req: Request, res: Response) => {
+router.post('/:id/offline', async (req: CompanyAuthedRequest, res: Response) => {
+  if (!(await canAccessUser(req, res, String(req.params.id), 'self-or-admin'))) return;
   markOffline(String(req.params.id));
   return res.status(200).json({ success: true });
 });
 
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', async (req: CompanyAuthedRequest, res: Response) => {
+  if (!isAdmin(req)) return res.status(403).json({ success: false, error: "Bu amal uchun ruxsat yo'q." });
   try {
     const contentType = req.headers['content-type'] || '';
     if (!contentType.includes('application/json')) {
@@ -143,12 +209,18 @@ router.post('/', async (req: Request, res: Response) => {
       });
     }
 
+    const newRole = String(role || 'user');
+    if (!(ASSIGNABLE_ROLES[req.auth!.role] || []).includes(newRole)) {
+      return res.status(403).json({ success: false, error: `"${newRole}" rolini berishga ruxsat yo'q.` });
+    }
     const insertData: Record<string, unknown> = {
       name,
       email: String(email).trim().toLowerCase(),
       age: age !== undefined && age !== null ? parseInt(age as string, 10) : null,
       phone: phone || null,
-      role: role || 'user',
+      role: newRole,
+      // Kompaniya FAQAT tokendan — mijoz yuborgan company_id e'tiborga olinmaydi.
+      company_id: req.auth!.companyId,
     };
     // password_hash ustuniga faqat parol berilganda tegamiz — shunda migration
     // ishga tushmagan bo'lsa ham parolsiz qo'shish ishlayveradi.
@@ -192,9 +264,10 @@ router.post('/', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/:id', async (req: Request, res: Response) => {
+router.get('/:id', async (req: CompanyAuthedRequest, res: Response) => {
   try {
     const { id } = req.params;
+    if (!(await canAccessUser(req, res, String(id), 'self-or-admin'))) return;
 
     // '*' — yangi ustunlar (first_name, last_name, credentials_changed_at) ham
     // qaytadi; migration ishlamagan bo'lsa mavjudlari keladi. password_hash kodda olib tashlanadi.
@@ -236,9 +309,10 @@ router.get('/:id', async (req: Request, res: Response) => {
   }
 });
 
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', async (req: CompanyAuthedRequest, res: Response) => {
   try {
     const { id } = req.params;
+    if (!(await canAccessUser(req, res, String(id), 'admin'))) return;
 
     const contentType = req.headers['content-type'] || '';
     if (!contentType.includes('application/json')) {
@@ -275,7 +349,12 @@ router.put('/:id', async (req: Request, res: Response) => {
     if (email !== undefined) updateData.email = email;
     if (age !== undefined) updateData.age = age !== null ? parseInt(age as string, 10) : null;
     if (phone !== undefined) updateData.phone = phone || null;
-    if (role !== undefined) updateData.role = role;
+    if (role !== undefined) {
+      if (!(ASSIGNABLE_ROLES[req.auth!.role] || []).includes(String(role))) {
+        return res.status(403).json({ success: false, error: `"${role}" rolini berishga ruxsat yo'q.` });
+      }
+      updateData.role = role;
+    }
     if (first_name !== undefined) updateData.first_name = first_name;
     if (last_name !== undefined) updateData.last_name = last_name;
     if (password) {
@@ -328,9 +407,13 @@ router.put('/:id', async (req: Request, res: Response) => {
   }
 });
 
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', async (req: CompanyAuthedRequest, res: Response) => {
   try {
     const { id } = req.params;
+    if (req.auth!.userId === id) {
+      return res.status(400).json({ success: false, error: "O'z hisobingizni o'chira olmaysiz." });
+    }
+    if (!(await canAccessUser(req, res, String(id), 'admin'))) return;
 
     const { data: existingUser, error: checkError } = await supabase
       .from('users')
@@ -385,8 +468,9 @@ router.delete('/:id', async (req: Request, res: Response) => {
 
 // GET /users/:id/credentials — XAVFSIZ: parol bcrypt-hash, ochiq saqlanmaydi va
 // qaytarilmaydi (password: null). Admin/direktor faqat YANGI parol o'rnatadi.
-router.get('/:id/credentials', async (req: Request, res: Response) => {
+router.get('/:id/credentials', async (req: CompanyAuthedRequest, res: Response) => {
   const { id } = req.params;
+  if (!(await canAccessUser(req, res, String(id), 'admin'))) return;
   const { data, error } = await supabase.from('users').select('id, email').eq('id', id).maybeSingle();
   if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
   if (!data) return res.status(404).json({ success: false, error: 'User topilmadi.' });
@@ -394,9 +478,10 @@ router.get('/:id/credentials', async (req: Request, res: Response) => {
 });
 
 // PUT /users/:id/credentials — parol (va ixtiyoriy email) → credentials_changed_at = now()
-router.put('/:id/credentials', async (req: Request, res: Response) => {
+router.put('/:id/credentials', async (req: CompanyAuthedRequest, res: Response) => {
   try {
     const { id } = req.params;
+    if (!(await canAccessUser(req, res, String(id), 'admin'))) return;
     const { password, email } = req.body ?? {};
     if (password === undefined && email === undefined) {
       return res.status(400).json({ success: false, error: 'password yoki email berilishi kerak.' });
@@ -425,8 +510,9 @@ router.put('/:id/credentials', async (req: Request, res: Response) => {
 });
 
 // GET /users/:id/shift
-router.get('/:id/shift', async (req: Request, res: Response) => {
+router.get('/:id/shift', async (req: CompanyAuthedRequest, res: Response) => {
   const { id } = req.params;
+  if (!(await canAccessUser(req, res, String(id), 'self-or-admin'))) return;
   const { data, error } = await supabase.from('users').select('shift_start, shift_end').eq('id', id).maybeSingle();
   if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
   if (!data) return res.status(404).json({ success: false, error: 'User topilmadi.' });
@@ -434,8 +520,9 @@ router.get('/:id/shift', async (req: Request, res: Response) => {
 });
 
 // PUT /users/:id/shift  { start, end }
-router.put('/:id/shift', async (req: Request, res: Response) => {
+router.put('/:id/shift', async (req: CompanyAuthedRequest, res: Response) => {
   const { id } = req.params;
+  if (!(await canAccessUser(req, res, String(id), 'admin'))) return;
   const { start, end } = req.body ?? {};
   const { data, error } = await supabase
     .from('users').update({ shift_start: start ?? null, shift_end: end ?? null }).eq('id', id)
@@ -446,8 +533,9 @@ router.put('/:id/shift', async (req: Request, res: Response) => {
 });
 
 // GET /users/:id/scripts
-router.get('/:id/scripts', async (req: Request, res: Response) => {
+router.get('/:id/scripts', async (req: CompanyAuthedRequest, res: Response) => {
   const { id } = req.params;
+  if (!(await canAccessUser(req, res, String(id), 'self-or-admin'))) return;
   const { data, error } = await supabase
     .from('user_scripts').select('id, title, enabled').eq('user_id', id).order('created_at', { ascending: true });
   if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
@@ -455,9 +543,10 @@ router.get('/:id/scripts', async (req: Request, res: Response) => {
 });
 
 // PUT /users/:id/scripts  { scripts: [{ id?, title, enabled }] } — to'liq almashtirish (replace)
-router.put('/:id/scripts', async (req: Request, res: Response) => {
+router.put('/:id/scripts', async (req: CompanyAuthedRequest, res: Response) => {
   try {
     const { id } = req.params;
+    if (!(await canAccessUser(req, res, String(id), 'admin'))) return;
     const list = Array.isArray(req.body?.scripts) ? req.body.scripts : null;
     if (!list) return res.status(400).json({ success: false, error: 'scripts massiv bo\'lishi kerak.' });
 
