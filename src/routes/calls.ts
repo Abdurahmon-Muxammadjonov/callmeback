@@ -60,18 +60,23 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
       return res.status(400).json({ success: false, error: "manager_id yaroqli UUID bo'lishi kerak." });
     }
 
+    // ?total=1 (2026-10-14) — javobga filtrga mos JAMI son ("1–12 / 1 306"
+    // sahifalash uchun). Faqat so'ralganda: eski sahifalovchi chaqiruvlar
+    // har sahifada qo'shimcha sanamasin.
+    const wantTotal = req.query.total === '1';
     let query = supabase
       .from('calls')
-      .select('id, manager_id, operator_ext, direction, is_problem, problem_severity, problem_reason, platform_id, audio_url, duration, kpi_score, penalty_amount, bonus_amount, rop_comment, dropped_reason, status, created_at, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count')
-      .eq('company_id', companyId)
-      .order('created_at', { ascending: false })
-      // BARQAROR TARTIB (2026-10-12): created_at teng qatorlar sahifalar
-      // orasida har safar boshqa tartibda kelardi — offset bilan
-      // sahifalaydigan frontend bir qatorni ikki marta oladi yoki
-      // tashlab ketardi va undan hisoblangan son "o'zidan o'zgarardi".
-      .order('id', { ascending: false })
-      .range(offset, offset + limit - 1);
+      .select(
+        'id, manager_id, operator_ext, direction, is_problem, problem_severity, problem_reason, platform_id, audio_url, duration, kpi_score, penalty_amount, bonus_amount, rop_comment, dropped_reason, status, created_at, incoming_count, outgoing_count, unanswered_count, bad_leads_count, new_leads_count, sent_to_dealer_count, closed_deals_count',
+        wantTotal ? { count: 'exact' } : undefined,
+      )
+      .eq('company_id', companyId);
     if (managerId) query = query.eq('manager_id', managerId);
+
+    // ?operator=<ichki raqam> (2026-10-14) — operator bo'yicha (xodimga
+    // biriktirilmagan qo'ng'iroqlar ham, chunki ular faqat ichki raqamda).
+    const operator = typeof req.query.operator === 'string' ? req.query.operator.trim() : '';
+    if (operator) query = query.eq('operator_ext', operator);
     if (platformId) query = query.eq('platform_id', platformId);
 
     // TAHLIL HOLATI bo'yicha filtr (2026-09-25): "Tahlil holati" bo'limida
@@ -82,6 +87,9 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
     //   ?date=YYYY-MM-DD — Toshkent kuni bo'yicha
     const analyzed = typeof req.query.analyzed === 'string' ? req.query.analyzed : undefined;
     if (analyzed === 'true') query = query.gt('kpi_score', 0);
+    // ?analyzed=low — baholangan, lekin 10 ballikda 5 dan past (daily-summary
+    // low_score bilan bir xil ta'rif).
+    else if (analyzed === 'low') query = query.gt('kpi_score', 0).lt('kpi_score', 50);
     else if (analyzed === 'false') query = query.or('kpi_score.is.null,kpi_score.eq.0');
 
     // ?problem=true — AI muammoli deb belgilagan qo'ng'iroqlar.
@@ -101,7 +109,18 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
         .lt('created_at', tashkentDayStart(addDays(date, 1)).toISOString());
     }
 
-    const { data, error } = await query;
+    // TARTIB (2026-10-14): ?sort=score.asc|score.desc|duration.desc; standart
+    // — yangisi birinchi. Har doim oxirida created_at, id — BARQAROR tartib
+    // (teng qatorlar sahifalar orasida aralashmasin; avval offset bilan
+    // sahifalaydigan frontend bir qatorni ikki marta olardi va undan
+    // hisoblangan son "o'zidan o'zgarardi").
+    const sort = typeof req.query.sort === 'string' ? req.query.sort : '';
+    if (sort === 'score.asc') query = query.order('kpi_score', { ascending: true });
+    else if (sort === 'score.desc') query = query.order('kpi_score', { ascending: false });
+    else if (sort === 'duration.desc') query = query.order('duration', { ascending: false });
+    query = query.order('created_at', { ascending: false }).order('id', { ascending: false }).range(offset, offset + limit - 1);
+
+    const { data, error, count } = await query;
     if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
     // Xodimga biriktirilmagan qo'ng'iroqda manager_id sifatida "virtual
     // operator" id'si beriladi (ichki raqamdan hosil qilingan barqaror id) —
@@ -115,7 +134,7 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
       }
       return withAudio;
     });
-    return res.status(200).json({ success: true, count: rows.length, data: rows });
+    return res.status(200).json({ success: true, count: rows.length, ...(wantTotal ? { total: count ?? 0 } : {}), data: rows });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to list calls.' });
   }
