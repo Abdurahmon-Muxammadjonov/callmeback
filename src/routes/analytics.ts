@@ -8,7 +8,8 @@ import { addDays, dayBounds, isHhMm, tashkentDay, tashkentDayStart } from '../li
 import { reportRpc } from '../lib/reportRpc';
 import {
   buildAnalyticsRoot, buildDailySummary, buildHourly, buildDailyMinutes, buildStaffStats,
-  buildAnalysisStatus,
+  buildAnalysisStatus, buildOperatorDay,
+  type OperatorDayItem,
   type AnalyticsRootRaw, type BucketRow, type OperatorDailyItem, type StaffOpItem,
   type AnalysisStatusRaw, type OperatorInsight,
 } from '../lib/reportBuilders';
@@ -332,6 +333,44 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
     return res.status(200).json({ success: true, date, data: result, cached: false });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Xodimlar statistikasida xatolik.' });
+  }
+});
+
+// ============================================================================
+// GET /analytics/operators?date=YYYY-MM-DD
+// Bir kunning OPERATOR KESIMI (2026-10-14): Analitika "Jamoa samaradorligi",
+// norma banneri, Solishtirish "kim o'sdi", Boshqaruv "Intizom". Avval
+// frontend kunning barcha qo'ng'iroqlarini /api/calls'dan sahifalab tortib
+// o'zi sanardi (sekin, son sakrardi). Hisob: supabase/perf_13.
+// Javob shakli frontenddagi OperatorDay bilan bir xil.
+// ============================================================================
+router.get('/operators', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
+  try {
+    const companyId = req.auth!.companyId as string;
+    const today = tashkentDay(new Date());
+    const asked = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date) ? req.query.date : today;
+    const date = asked > today ? today : asked;
+    const settings = await getCompanySettings(supabase, companyId);
+    const longSec = Math.max(1, Number(settings.qualified_call_seconds) || 60);
+    const [items, managers] = await Promise.all([
+      reportRpc<OperatorDayItem[]>('calls_operator_day_stats', {
+        p_company_id: companyId,
+        p_from: dayBounds(date).from,
+        p_to: dayBounds(addDays(date, 1)).from,
+        p_long_sec: longSec,
+      }),
+      supabase.from('managers').select('id, name').eq('company_id', companyId),
+    ]);
+    const nameById = new Map<string, string>();
+    for (const m of managers.data || []) nameById.set(m.id, m.name);
+    return res.status(200).json({
+      success: true,
+      date,
+      long_call_seconds: longSec,
+      data: buildOperatorDay(items || [], nameById),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Operator kesimida xatolik.' });
   }
 });
 

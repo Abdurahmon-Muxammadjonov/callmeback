@@ -274,27 +274,39 @@ const round2Money = (n: number) => Math.round(n * 100) / 100;
  *   today_by_manager — bugungi qo'ng'iroqlar xodim (yoki virtual operator) id bo'yicha
  */
 export function buildDailyPanel(
+  dayRows: BucketRow[],
   hourRows: BucketRow[],
-  todayItems: OperatorDailyItem[],
+  dayItems: OperatorDailyItem[],
   companyId: string,
-  today: string,
+  anchor: string,
   windowDays: number,
 ) {
   const blankDay = (date: string) => ({
     date, calls: 0, operator_calls: 0, kpi_sum: 0, seconds: 0, low: 0, penalized: 0, short: 0,
     bonus_sum: 0, penalty_sum: 0,
+    // 2026-10-14: Pulse Boshqaruv paneli uchun qo'shimcha maydonlar.
+    long_calls: 0, scored: 0, score_sum: 0, low_scored: 0, unanswered: 0, bad_leads: 0,
+    leads: 0, invited: 0, closed: 0, incoming: 0, outgoing: 0,
   });
   const index = new Map<string, number>();
   const days = Array.from({ length: windowDays }, (_, i) => {
-    const date = addDays(today, -i);
+    const date = addDays(anchor, -i);
     index.set(date, i);
     return blankDay(date);
   });
-  const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, calls: 0 }));
+  const monthFrom = `${anchor.slice(0, 7)}-01`;
+  const month = { from: monthFrom, to: anchor, calls: 0, long_calls: 0, leads: 0, invited: 0, closed: 0 };
 
-  for (const r of hourRows) {
+  for (const r of dayRows) {
+    if (r.day >= monthFrom && r.day <= anchor) {
+      month.calls += num(r.calls);
+      month.long_calls += num(r.long_calls);
+      month.leads += num(r.lead_phones) + num(r.leads_no_phone);
+      month.invited += num(r.invited);
+      month.closed += num(r.closed);
+    }
     const i = index.get(r.day);
-    if (i === undefined) continue; // oynadan tashqari (masalan soati noto'g'ri, kelajak sanali qator)
+    if (i === undefined) continue; // oynadan tashqari (oy boshi uchun olingan kunlar yoki kelajak sanali qator)
     const d = days[i];
     const calls = num(r.calls);
     d.calls += calls;
@@ -306,19 +318,68 @@ export function buildDailyPanel(
     d.short += calls - num(r.long_calls);
     d.bonus_sum = round2Money(d.bonus_sum + num(r.bonus_sum));
     d.penalty_sum = round2Money(d.penalty_sum + num(r.penalty_sum));
-    const h = hours[num(r.hour)];
-    if (h) h.calls += calls;
+    d.long_calls += num(r.long_calls);
+    d.scored += num(r.scored);
+    d.score_sum += num(r.score_sum);
+    // low — eski panel ta'rifi (kpi < 50, baholanmaganlar ham); low_scored —
+    // faqat BAHOLANGAN va 50 dan past (daily-summary low_score bilan bir xil).
+    d.low_scored += num(r.low_score);
+    d.unanswered += num(r.unanswered);
+    d.bad_leads += num(r.bad_leads);
+    d.leads += num(r.lead_phones) + num(r.leads_no_phone);
+    d.invited += num(r.invited);
+    d.closed += num(r.closed);
+    d.incoming += num(r.incoming);
+    d.outgoing += num(r.outgoing);
   }
 
-  const todayByManager: Record<string, number> = {};
-  for (const it of todayItems) {
-    if (it.day !== today) continue;
+  // Tanlangan kunning 24 soati (Toshkent).
+  const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, calls: 0 }));
+  for (const r of hourRows) {
+    if (r.day !== anchor) continue;
+    const h = hours[num(r.hour)];
+    if (h) h.calls += num(r.calls);
+  }
+
+  const byManager: Record<string, number> = {};
+  for (const it of dayItems) {
+    if (it.day !== anchor) continue;
     // /api/calls bilan bir xil kalit: xodim yoki ichki raqamdan virtual id.
     const id = it.manager_id || (it.operator_ext ? virtualManagerId(companyId, String(it.operator_ext)) : null);
-    if (id) todayByManager[id] = (todayByManager[id] || 0) + num(it.calls);
+    if (id) byManager[id] = (byManager[id] || 0) + num(it.calls);
   }
 
-  return { days, hours, today_by_manager: todayByManager };
+  return { date: anchor, days, hours, month, today_by_manager: byManager };
+}
+
+// ----------------------------------------------------------------------------
+// /analytics/operators — calls_operator_day_stats (perf_13)
+// ----------------------------------------------------------------------------
+
+export interface OperatorDayItem {
+  key: string; ext: string | null; manager_id: string | null;
+  calls: number; long_calls: number; incoming: number; outgoing: number;
+  leads: number; scored: number; score10_sum: number; talk_sec: number;
+}
+
+/** Frontend dayCalls.operatorsOf bilan bir xil shakl (OperatorDay). */
+export function buildOperatorDay(items: OperatorDayItem[], nameById: Map<string, string>) {
+  return [...items].map((o) => {
+    const scored = num(o.scored);
+    return {
+      key: o.key,
+      ext: o.ext ?? null,
+      name: (o.manager_id && nameById.get(o.manager_id)) || null,
+      calls: num(o.calls),
+      longCalls: num(o.long_calls),
+      incoming: num(o.incoming),
+      outgoing: num(o.outgoing),
+      leads: num(o.leads),
+      score10: scored ? Math.round((num(o.score10_sum) / scored) * 10) / 10 : null,
+      scored,
+      talkSec: num(o.talk_sec),
+    };
+  });
 }
 
 // ----------------------------------------------------------------------------

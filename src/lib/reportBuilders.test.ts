@@ -98,26 +98,32 @@ test('daily-minutes: calls = barcha, operator_calls/operator_minutes = faqat ope
   assert.deepEqual(r.summary, { days: 1, calls: 5, operator_calls: 3, minutes: 5, operator_minutes: 3 });
 });
 
-test('daily-panel: bugun birinchi, soatlar Toshkent, qisqa = calls - long_calls', () => {
+test('daily-panel: tanlangan kun birinchi, soatlar shu kun, oy boshidan voronka', () => {
   const p = buildDailyPanel(
     [
-      bucket({ day: '2026-10-12', hour: 9, calls: 4, operator_calls: 3, long_calls: 1, kpi_sum: 120, low_any: 3, penalized: 1, seconds: 200, bonus_sum: 10.1, penalty_sum: 0.2 }),
-      bucket({ day: '2026-10-12', hour: 15, calls: 1, long_calls: 1, kpi_sum: 80, seconds: 90, bonus_sum: 0.2 }),
-      bucket({ day: '2026-10-10', hour: 9, calls: 2 }),
-      bucket({ day: '2026-09-01', hour: 9, calls: 99 }), // oynadan tashqari — hisobga kirmaydi
+      bucket({ day: '2026-10-12', calls: 5, operator_calls: 3, long_calls: 2, kpi_sum: 200, low_any: 3, penalized: 1, seconds: 290, bonus_sum: 10.3, penalty_sum: 0.2, lead_phones: 2, leads_no_phone: 1, invited: 1, closed: 1, unanswered: 4 }),
+      bucket({ day: '2026-10-10', calls: 2, long_calls: 2 }),
+      bucket({ day: '2026-10-01', calls: 9, long_calls: 1, lead_phones: 5 }), // oynadan tashqari, lekin oy boshidan
+      bucket({ day: '2026-09-30', calls: 99 }), // boshqa oy — hech qayerga kirmaydi
+    ],
+    [
+      bucket({ day: '2026-10-12', hour: 9, calls: 4 }),
+      bucket({ day: '2026-10-12', hour: 15, calls: 1 }),
     ],
     [{ day: '2026-10-12', manager_id: 'm-1', operator_ext: null, calls: 2, seconds: 1 }],
     'company', '2026-10-12', 3,
   );
+  assert.equal(p.date, '2026-10-12');
   assert.deepEqual(p.days.map((d) => d.date), ['2026-10-12', '2026-10-11', '2026-10-10']);
-  assert.deepEqual(p.days[0], {
-    date: '2026-10-12', calls: 5, operator_calls: 3, kpi_sum: 200, seconds: 290, low: 3, penalized: 1, short: 3,
-    bonus_sum: 10.3, penalty_sum: 0.2,
-  });
+  assert.equal(p.days[0].calls, 5);
+  assert.equal(p.days[0].short, 3);
+  assert.equal(p.days[0].leads, 3);
+  assert.equal(p.days[0].unanswered, 4);
+  assert.equal(p.days[0].bonus_sum, 10.3);
   assert.equal(p.days[2].calls, 2);
-  assert.equal(p.hours[9].calls, 6);
-  assert.equal(p.hours[15].calls, 1);
-  assert.equal(p.hours.reduce((s, h) => s + h.calls, 0), 7);
+  assert.deepEqual(p.month, { from: '2026-10-01', to: '2026-10-12', calls: 16, long_calls: 5, leads: 8, invited: 1, closed: 1 });
+  assert.equal(p.hours[9].calls, 4);
+  assert.equal(p.hours.reduce((s, h) => s + h.calls, 0), 5);
   assert.deepEqual(p.today_by_manager, { 'm-1': 2 });
 });
 

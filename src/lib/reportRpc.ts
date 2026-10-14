@@ -25,6 +25,7 @@ const SQL_FILE = {
   company_virtual_operators: 'perf_08_virtual_operators.sql',
   manager_call_stats: 'perf_09_manager_call_stats.sql',
   company_conversions_daily: 'perf_10_conversions_daily.sql',
+  calls_operator_day_stats: 'perf_13_calls_operator_day_stats.sql',
 } as const;
 
 export type ReportFn = keyof typeof SQL_FILE;
