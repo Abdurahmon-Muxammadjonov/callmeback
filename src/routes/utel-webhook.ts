@@ -4,7 +4,11 @@ import path from 'node:path';
 import os from 'node:os';
 import { supabase } from '../lib/supabase';
 import { processTranscriptToCall } from './analyze-call';
-import { submitAudioForAnalysis, waitForAnalysis, waitBudgetMs, isSalesAiConfigured } from '../lib/salesAiClient';
+import {
+  prepareAudio, submitPreparedAudio, waitForAnalysis, waitBudgetMs, isSalesAiConfigured,
+  type PreparedAudio, type SalesAiResult,
+} from '../lib/salesAiClient';
+import { transcribeWithGemini, isGeminiSttConfigured } from '../lib/geminiStt';
 import {
   recordOutcome, isPaused as isSttPaused, shouldProbe, markProbed,
   maybeAlertAdmin, countsTowardHealth, SUSPECT_STATUS, logHealthConfig,
@@ -237,6 +241,144 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
     .finally(() => inFlight.delete(call.id));
 }
 
+// ============================================================================
+// STT YO'NALTIRGICH (2026-10-15)
+//
+// STT_PROVIDER (Railway o'zgaruvchisi):
+//   auto     (standart) — sales-ai asosiy; u nosoz bo'lsa (pauzada, natija
+//            bermadi, bo'sh matn, xato) shu qo'ng'iroq Gemini STT'ga o'tadi
+//   sales-ai — faqat sales-ai (eski xatti-harakat, zaxirasiz)
+//   gemini   — faqat Gemini (sales-ai umuman chaqirilmaydi)
+//
+// NEGA: 2026-10-04 dan sales-ai har audioni 'transcribing'da qoldirdi va
+// 11 kun ichida 5619 qo'ng'iroq tahlilsiz qoldi (lib/geminiStt.ts).
+// Circuit breaker (lib/sttHealth.ts) FAQAT sales-ai natijalarini o'lchaydi —
+// Gemini natijasi uning hisobiga kirmaydi. Pauza vaqtida qo'ng'iroqlar
+// to'g'ridan-to'g'ri Gemini'ga ketadi, sales-ai esa tiklanish sinovi
+// (probeOnce) bilan tekshirilib turadi; tuzalsa o'zi asosiyga qaytadi.
+// ============================================================================
+type SttMode = 'auto' | 'sales-ai' | 'gemini';
+function sttMode(): SttMode {
+  const v = String(process.env.STT_PROVIDER || 'auto').trim().toLowerCase();
+  return v === 'sales-ai' || v === 'gemini' ? v : 'auto';
+}
+function geminiAllowed(): boolean {
+  return sttMode() !== 'sales-ai' && isGeminiSttConfigured();
+}
+function isAnySttConfigured(): boolean {
+  const mode = sttMode();
+  if (mode === 'gemini') return isGeminiSttConfigured();
+  if (mode === 'sales-ai') return isSalesAiConfigured();
+  return isSalesAiConfigured() || isGeminiSttConfigured();
+}
+/** Pauza vaqtida ham navbat ishlay oladimi (zaxira STT bor). */
+function canRunWhilePaused(): boolean {
+  return geminiAllowed();
+}
+
+// Gemini inline so'rovi ~20 MB gacha (base64 bilan): 14 MB xavfsiz chegara.
+const GEMINI_MAX_BYTES = 14 * 1024 * 1024;
+
+async function viaGemini(rowId: string, audio: PreparedAudio, durSec: number, why: string) {
+  if (audio.buf.length > GEMINI_MAX_BYTES) {
+    throw new Error(`AUDIO_TOO_LARGE: Gemini uchun ham katta (${(audio.buf.length / 1024 / 1024).toFixed(1)} MB).`);
+  }
+  console.log(`UTel STT -> Gemini (row=${rowId}, ${durSec}s): ${why}`);
+  const res = await transcribeWithGemini(audio.buf, audio.ext, durSec);
+  // Sales-ai uchun qo'llangan "uzun audiodan bo'sh matn = nosozlik" qoidasi
+  // Gemini'ga ham: bunday qo'ng'iroq "Javobsiz" deb yopilmaydi, xato
+  // tashlanadi va navbat keyinroq qayta uradi.
+  if (durSec >= 60 && (res.fullText || '').trim().length < 50) {
+    throw new Error(`Gemini STT ${durSec}s audiodan bo'sh matn qaytardi — qayta urinamiz.`);
+  }
+  return { res, provider: 'gemini' as const };
+}
+
+async function transcribeCall(
+  rowId: string,
+  audio: PreparedAudio,
+  durSec: number,
+  clientName: string | undefined,
+  opts: { requeued?: boolean; probe?: boolean },
+): Promise<{ res: SalesAiResult; provider: 'sales-ai' | 'gemini' } | 'suspect'> {
+  const mode = sttMode();
+  const fallback = geminiAllowed();
+  if (mode === 'gemini') return viaGemini(rowId, audio, durSec, 'STT_PROVIDER=gemini');
+  // Pauzada sales-ai'ga oddiy qo'ng'iroq yuborilmaydi (faqat tiklanish sinovi).
+  if (fallback && isSttPaused() && !opts.probe) return viaGemini(rowId, audio, durSec, 'sales-ai pauzada');
+  if (!isSalesAiConfigured()) {
+    if (fallback) return viaGemini(rowId, audio, durSec, 'SALES_AI_API_KEY yo\'q');
+    throw new Error('SALES_AI_API_KEY sozlanmagan.');
+  }
+
+  let res: SalesAiResult;
+  try {
+    const jobId = await submitPreparedAudio(audio, clientName);
+    res = await waitForAnalysis(jobId, { timeoutMs: waitBudgetMs(durSec) });
+  } catch (e: any) {
+    if (fallback) return viaGemini(rowId, audio, durSec, `sales-ai xatosi: ${String(e?.message || e).slice(0, 120)}`);
+    throw e;
+  }
+
+  const trimmed = (res.fullText || '').trim();
+
+  // ============================================================
+  // CIRCUIT BREAKER (2026-09-27)
+  //
+  // Bo'sh matnni bitta qo'ng'iroq darajasida haqiqiy javobsizdan
+  // ajratib bo'lmaydi. Shuning uchun GLOBAL o'lchov: oxirgi N ta
+  // yetarlicha uzun qo'ng'iroqning ko'pchiligi bo'sh chiqsa —
+  // xizmat nosoz, navbat pauza qilinadi.
+  //
+  // Pauza paytida qo'ng'iroq "Javobsiz" deb YOZILMAYDI: zaxira STT
+  // bo'lsa shu qo'ng'iroq Gemini'ga o'tadi, bo'lmasa 'stt_suspect'
+  // holatida qoladi. Bu holat 'done' emas, demak xizmat tiklangach
+  // navbat uni o'zi qayta oladi.
+  // ============================================================
+  const isEmpty = trimmed.length < 50;
+  const justTripped = recordOutcome(isEmpty, durSec);
+  if (isEmpty && (justTripped || isSttPaused())) {
+    if (fallback) return viaGemini(rowId, audio, durSec, 'sales-ai bo\'sh matn (xizmat nosoz)');
+    await supabase.from('calls').update({
+      // Qayta navbatdagi qatorda 'requeued' belgisi saqlanadi (past
+      // ustuvorlik yo'qolmasin). Ikkala holat ham 'done' EMAS, demak
+      // xizmat tiklangach navbat qatorni o'zi qayta oladi.
+      status: opts.requeued ? REQUEUED_STATUS : SUSPECT_STATUS,
+      error: 'STT bo\'sh matn qaytardi — xizmat nosoz deb belgilandi, keyin qayta urinamiz.',
+    }).eq('id', rowId);
+    console.warn(`UTel: row=${rowId} 'stt_suspect' holatida qoldirildi (xizmat pauzada).`);
+    return 'suspect';
+  }
+
+  // ============================================================
+  // STT TUGAMAGAN BO'LSA — BU "SUHBAT BO'LMAGAN" DEGANI EMAS.
+  //
+  // XATO (2026-09-24 19:01 — 2026-09-27, 2842 qo'ng'iroq yo'qoldi):
+  // shart `res.status !== 'done' || qisqa` edi. Ya'ni STT timeout
+  // bo'lsa ham (bo'sh matn), qo'ng'iroq darhol "Javobsiz" /
+  // "Aloqa sifati yomon" deb belgilanar va status='done' yozilar edi.
+  // Navbat esa `.neq('status','done')` bilan tanlaydi — demak bunday
+  // qator BOSHQA HECH QACHON qayta urinilmasdi. Natijada 906 soniyalik
+  // (15 daqiqalik) haqiqiy sotuv suhbati "Aloqa sifati yomon" bo'lib
+  // qolgan.
+  //
+  // Endi: STT tugamagan bo'lsa — zaxira STT (bo'lsa), aks holda XATO
+  // tashlanadi -> catch status='failed' qiladi (dropped_reason
+  // YOZILMAYDI) -> navbat qayta uradi.
+  //
+  // Ikkinchi himoya: uzun audiodan bo'm-bo'sh matn kelishi ham STT
+  // nosozligi, "javobsiz" emas — 60 soniyadan uzun qo'ng'iroqda
+  // amalda gap bo'lmasligi mumkin emas.
+  // ============================================================
+  const emptyFromLongAudio = durSec >= 60 && isEmpty;
+  if (res.status !== 'done' || emptyFromLongAudio) {
+    const why = `sales-ai natija bermadi (status=${res.status}, audio ${durSec}s, matn ${trimmed.length} belgi)`;
+    if (fallback) return viaGemini(rowId, audio, durSec, why);
+    throw new Error(`STT natija bermadi (status=${res.status}, audio ${durSec}s, matn ${trimmed.length} belgi) — qayta urinamiz.`);
+  }
+  return { res, provider: 'sales-ai' };
+}
+
 // Bitta UTel qo'ng'irog'ini tahlil qiladi: audio -> sales-ai (matn) ->
 // Gemini (tahlil) -> calls yangilanadi. Webhook (yangi qo'ng'iroq) va
 // recoverUtelCalls (qotib qolgan/eski) ikkalasi ham shu funksiyani ishlatadi.
@@ -245,10 +387,10 @@ export async function analyzeUtelCall(
   audioUrl: string,
   companyId: string | null,
   clientName?: string,
-  opts: { requeued?: boolean } = {},
+  opts: { requeued?: boolean; probe?: boolean } = {},
 ): Promise<void> {
-  if (!isSalesAiConfigured()) {
-    console.warn('SALES_AI_API_KEY sozlanmagan — tahlil o\'tkazilmadi.');
+  if (!isAnySttConfigured()) {
+    console.warn('STT sozlanmagan (SALES_AI_API_KEY ham, GEMINI_API_KEY ham yo\'q) — tahlil o\'tkazilmadi.');
     return;
   }
   try {
@@ -257,8 +399,10 @@ export async function analyzeUtelCall(
     const { data: durRow } = await supabase.from('calls').select('duration').eq('id', rowId).maybeSingle();
     const durSec = Math.max(0, Number(durRow?.duration) || 0);
 
-    const jobId = await submitAudioForAnalysis(audioUrl, clientName);
-    const res = await waitForAnalysis(jobId, { timeoutMs: waitBudgetMs(durSec) });
+    const audio = await prepareAudio(audioUrl);
+    const stt = await transcribeCall(rowId, audio, durSec, clientName, opts);
+    if (stt === 'suspect') return; // sales-ai nosoz, zaxira yo'q — qator keyin qayta olinadi
+    const res = stt.res;
 
     // HAR BIR QO'NG'IROQDA YO BALL, YO SABAB BO'LSIN (foydalanuvchi talabi
     // 2026-09-24). Suhbat bo'lmagan yoki juda qisqa qo'ng'iroqda sotuv
@@ -269,58 +413,6 @@ export async function analyzeUtelCall(
     const text = res.fullText || '';
     const trimmed = text.trim();
     const SHORT_LIMIT = 250; // belgidan qisqa = to'liq suhbat emas
-
-    // ============================================================
-    // CIRCUIT BREAKER (2026-09-27)
-    //
-    // Bo'sh matnni bitta qo'ng'iroq darajasida haqiqiy javobsizdan
-    // ajratib bo'lmaydi. Shuning uchun GLOBAL o'lchov: oxirgi N ta
-    // yetarlicha uzun qo'ng'iroqning ko'pchiligi bo'sh chiqsa —
-    // xizmat nosoz, navbat pauza qilinadi.
-    //
-    // Pauza paytida qo'ng'iroq "Javobsiz" deb YOZILMAYDI: u
-    // 'stt_suspect' holatida qoladi. Bu holat 'done' emas, demak
-    // xizmat tiklangach navbat uni o'zi qayta oladi.
-    // ============================================================
-    const isEmpty = trimmed.length < 50;
-    const justTripped = recordOutcome(isEmpty, durSec);
-    if (isEmpty && (justTripped || isSttPaused())) {
-      await supabase.from('calls').update({
-        // Qayta navbatdagi qatorda 'requeued' belgisi saqlanadi (past
-        // ustuvorlik yo'qolmasin). Ikkala holat ham 'done' EMAS, demak
-        // xizmat tiklangach navbat qatorni o'zi qayta oladi.
-        status: opts.requeued ? REQUEUED_STATUS : SUSPECT_STATUS,
-        error: 'STT bo\'sh matn qaytardi — xizmat nosoz deb belgilandi, keyin qayta urinamiz.',
-      }).eq('id', rowId);
-      console.warn(`UTel: row=${rowId} 'stt_suspect' holatida qoldirildi (xizmat pauzada).`);
-      return;
-    }
-
-    // ============================================================
-    // STT TUGAMAGAN BO'LSA — BU "SUHBAT BO'LMAGAN" DEGANI EMAS.
-    //
-    // XATO (2026-09-24 19:01 — 2026-09-27, 2842 qo'ng'iroq yo'qoldi):
-    // shart `res.status !== 'done' || qisqa` edi. Ya'ni STT timeout
-    // bo'lsa ham (bo'sh matn), qo'ng'iroq darhol "Javobsiz" /
-    // "Aloqa sifati yomon" deb belgilanar va status='done' yozilar edi.
-    // Navbat esa `.neq('status','done')` bilan tanlaydi — demak bunday
-    // qator BOSHQA HECH QACHON qayta urinilmasdi. Natijada 906 soniyalik
-    // (15 daqiqalik) haqiqiy sotuv suhbati "Aloqa sifati yomon" bo'lib
-    // qolgan.
-    //
-    // Endi: STT tugamagan bo'lsa XATO tashlanadi -> catch status='failed'
-    // qiladi (dropped_reason YOZILMAYDI) -> navbat qayta uradi.
-    //
-    // Ikkinchi himoya: uzun audiodan bo'm-bo'sh matn kelishi ham STT
-    // nosozligi, "javobsiz" emas — 60 soniyadan uzun qo'ng'iroqda
-    // amalda gap bo'lmasligi mumkin emas.
-    // ============================================================
-    const emptyFromLongAudio = durSec >= 60 && isEmpty;
-    if (res.status !== 'done' || emptyFromLongAudio) {
-      throw new Error(
-        `STT natija bermadi (status=${res.status}, audio ${durSec}s, matn ${trimmed.length} belgi) — qayta urinamiz.`,
-      );
-    }
 
     if (trimmed.length < SHORT_LIMIT) {
       const dur = durSec;
@@ -720,13 +812,15 @@ async function probeOnce(): Promise<void> {
     // ham sog'liq o'lchoviga kiradi (qisqasi faqat birinchisini qiladi).
     .gte('duration', 60)
     .order('created_at', { ascending: false })
-    .limit(1);
-  const row = (data || [])[0] as any;
+    .limit(10);
+  // Navbat bilan parallel ishlaydi (2026-10-15) — ayni paytda ishlanayotgan
+  // qator ikkinchi marta olinmasin.
+  const row = ((data || []) as any[]).find((r) => !inFlight.has(r.id));
   if (!row) return;
   console.log(`STT tiklanish sinovi: row=${row.id}`);
   inFlight.add(row.id);
   try {
-    await analyzeUtelCall(row.id, row.audio_url, row.company_id ?? null, row.client_phone ?? undefined);
+    await analyzeUtelCall(row.id, row.audio_url, row.company_id ?? null, row.client_phone ?? undefined, { probe: true });
   } catch { /* sinov — xato normal, holat recordOutcome orqali yangilanadi */ } finally {
     inFlight.delete(row.id);
   }
@@ -746,7 +840,7 @@ export function startUtelWorker(): void {
   void (async function loop() {
     for (;;) {
       try {
-        if (!isSalesAiConfigured()) {
+        if (!isAnySttConfigured()) {
           await new Promise((r) => setTimeout(r, 30_000));
           continue;
         }
@@ -763,7 +857,20 @@ export function startUtelWorker(): void {
         // vaqt bo'yicha o'lchanadi.
         await maybeAlertAdmin(await countWaitingThrottled(), true);
 
-        // XIZMAT NOSOZ DEB BELGILANGAN: odatdagi to'plam olinmaydi.
+        // SALES-AI PAUZADA, LEKIN ZAXIRA STT BOR (2026-10-15): navbat
+        // TO'XTAMAYDI — qo'ng'iroqlar Gemini'ga ketadi (transcribeCall).
+        // Sales-ai esa tiklanish sinovi bilan fonda tekshirib turiladi;
+        // sinov kutishni to'xtatmasligi uchun await qilinmaydi.
+        if (isSttPaused() && canRunWhilePaused()) {
+          if (sttMode() === 'auto' && isSalesAiConfigured() && shouldProbe()) {
+            markProbed();
+            void probeOnce().catch(() => {});
+          }
+          const processed = await runQueueOnce();
+          if (processed === 0) await new Promise((r) => setTimeout(r, 8_000));
+          continue;
+        }
+        // XIZMAT NOSOZ DEB BELGILANGAN, ZAXIRA YO'Q: odatdagi to'plam olinmaydi.
         if (isSttPaused()) {
           if (shouldProbe()) {
             markProbed();

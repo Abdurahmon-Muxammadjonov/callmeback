@@ -335,9 +335,12 @@ export function withTimeCodes(transcript: string, segments: unknown[]): string {
   for (const raw of segments as any[]) {
     const text = String(raw?.text || '').trim();
     if (!text) continue;
+    // Gemini STT rolni o'zi beradi (role) — bor bo'lsa shu ishlatiladi.
+    // Aks holda (sales-ai) eski taxmin: birinchi gapirgan — sotuvchi.
+    const role = raw?.role === 'seller' ? 'Sotuvchi' : raw?.role === 'client' ? 'Mijoz' : null;
     const key = String(raw?.speaker || '');
-    if (key && !speakers.has(key)) speakers.set(key, speakers.size === 0 ? 'Sotuvchi' : 'Mijoz');
-    const who = speakers.get(key) || 'Suhbat';
+    if (!role && key && !speakers.has(key)) speakers.set(key, speakers.size === 0 ? 'Sotuvchi' : 'Mijoz');
+    const who = role || speakers.get(key) || 'Suhbat';
     lines.push(`[${clock(Number(raw?.start) || 0)}] ${who}: ${text}`);
   }
   return lines.length ? lines.join('\n') : transcript;

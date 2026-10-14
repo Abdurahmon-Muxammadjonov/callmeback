@@ -84,8 +84,15 @@ function authHeader(): Record<string, string> {
   return { Authorization: `Bearer ${API_KEY}` };
 }
 
-// Audioni URL'dan yuklab, sales-ai-front'ga multipart yuboradi. Qaytaradi: tahlil id.
-export async function submitAudioForAnalysis(audioUrl: string, clientName?: string): Promise<string> {
+export interface PreparedAudio {
+  buf: Buffer;
+  ext: 'mp3' | 'wav';
+}
+
+// Audioni URL'dan yuklab, iloji bo'lsa MP3'ga siqadi. Sales-ai ham, zaxira
+// Gemini STT ham (lib/geminiStt.ts) shu tayyor audioni oladi — audio ikki
+// marta yuklanmaydi.
+export async function prepareAudio(audioUrl: string): Promise<PreparedAudio> {
   // 1) UTel'dan audioni yuklab olamiz (auth'siz ochiladi — tekshirilgan).
   // TIMEOUT majburiy: Node'ning fetch'ida standart timeout YO'Q. Timeoutsiz
   // bitta osilib qolgan yuklash butun navbatni abadiy to'xtatib qo'yadi
@@ -100,7 +107,7 @@ export async function submitAudioForAnalysis(audioUrl: string, clientName?: stri
 
   // 2) Siqamiz (MP3). Siqib bo'lmasa — asl faylni yuboramiz.
   let buf: Buffer = raw;
-  let ext = audioUrl.toLowerCase().includes('.mp3') ? 'mp3' : 'wav';
+  let ext: 'mp3' | 'wav' = audioUrl.toLowerCase().includes('.mp3') ? 'mp3' : 'wav';
   if (ext !== 'mp3') {
     const mp3 = await compressToMp3(raw);
     if (mp3 && mp3.length && mp3.length < raw.length) {
@@ -109,6 +116,17 @@ export async function submitAudioForAnalysis(audioUrl: string, clientName?: stri
       console.log(`Audio siqildi: ${(raw.length / 1024 / 1024).toFixed(1)} MB -> ${(buf.length / 1024 / 1024).toFixed(1)} MB`);
     }
   }
+  return { buf, ext };
+}
+
+// Audioni URL'dan yuklab, sales-ai-front'ga multipart yuboradi. Qaytaradi: tahlil id.
+export async function submitAudioForAnalysis(audioUrl: string, clientName?: string): Promise<string> {
+  return submitPreparedAudio(await prepareAudio(audioUrl), clientName);
+}
+
+// Tayyor (yuklangan, siqilgan) audioni sales-ai-front'ga yuboradi.
+export async function submitPreparedAudio(audio: PreparedAudio, clientName?: string): Promise<string> {
+  const { buf, ext } = audio;
   if (buf.length > MAX_UPLOAD_BYTES) {
     throw new Error(`AUDIO_TOO_LARGE: siqilgandan keyin ham katta (${(buf.length / 1024 / 1024).toFixed(1)} MB).`);
   }

@@ -39,6 +39,9 @@ interface TranscriptSegment {
   speaker: string; // 'Manager' yoki 'Mijoz'
   text: string;
   start: number;   // segment boshlanishi (sekund)
+  // Gemini STT bergan rol (2026-10-15) — dashboard sotuvchi/mijozni shu
+  // bo'yicha ajratadi. sales-ai segmentlarida yo'q.
+  role?: 'seller' | 'client';
 }
 
 interface AuditResult {
@@ -352,6 +355,7 @@ function normalizeAuditResult(r: Partial<AuditResult>): AuditResult {
             speaker: typeof x.speaker === 'string' && x.speaker.trim() ? x.speaker.trim() : 'Noma\'lum',
             text: x.text,
             start: Math.max(0, Number(x.start) || 0),
+            ...((x as any).role === 'seller' || (x as any).role === 'client' ? { role: (x as any).role } : {}),
           }))
       : [],
     summary: typeof r.summary === 'string' ? r.summary : '',
