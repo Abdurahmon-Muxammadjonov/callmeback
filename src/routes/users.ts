@@ -11,7 +11,16 @@ const router = Router();
 // Faqat ochiq (xavfsiz) ustunlar — password_hash hech qachon qaytarilmaydi.
 // Eslatma: bu ro'yxat uchun — migration ishlamagan bo'lsa ham buzilmasin (faqat
 // doim mavjud ustunlar). GET /:id esa '*' ni oladi (yangi ustunlarni ham beradi).
-const PUBLIC_COLS = 'id, name, email, age, phone, role, created_at';
+// operator_ext (2026-10-15) — akkaunt bog'langan telefoniya operatori (ichki
+// raqam). supabase/staff_01_user_operator_ext.sql ishga tushirilgan bo'lishi shart.
+const PUBLIC_COLS = 'id, name, email, age, phone, role, operator_ext, created_at';
+
+// Ichki raqam: faqat raqamlar (UTel "105", "5200"); bo'sh/null — bog'lanishni uzish.
+function parseOperatorExt(v: unknown): { ok: true; value: string | null } | { ok: false } {
+  if (v === null || v === '') return { ok: true, value: null };
+  const s = String(v).trim();
+  return /^\d{1,8}$/.test(s) ? { ok: true, value: s } : { ok: false };
+}
 
 // Yangi parollar bcrypt bilan hash qilinadi ($2... format).
 function hashPassword(plain: string): string {
@@ -200,7 +209,7 @@ router.post('/', async (req: CompanyAuthedRequest, res: Response) => {
       });
     }
 
-    const { name, email, age, phone, role, password } = req.body;
+    const { name, email, age, phone, role, password, operator_ext } = req.body;
 
     if (!name || !email) {
       return res.status(400).json({
@@ -222,6 +231,11 @@ router.post('/', async (req: CompanyAuthedRequest, res: Response) => {
       // Kompaniya FAQAT tokendan — mijoz yuborgan company_id e'tiborga olinmaydi.
       company_id: req.auth!.companyId,
     };
+    if (operator_ext !== undefined) {
+      const ext = parseOperatorExt(operator_ext);
+      if (!ext.ok) return res.status(400).json({ success: false, error: "Ichki raqam faqat raqamlardan iborat bo'lsin (masalan 105)." });
+      insertData.operator_ext = ext.value;
+    }
     // password_hash ustuniga faqat parol berilganda tegamiz — shunda migration
     // ishga tushmagan bo'lsa ham parolsiz qo'shish ishlayveradi.
     if (password) {
@@ -238,9 +252,10 @@ router.post('/', async (req: CompanyAuthedRequest, res: Response) => {
       console.error('Error creating user in Supabase:', error.message);
 
       if (error.code === '23505') {
+        const byExt = /operator_ext/.test(`${error.message} ${(error as any).details ?? ''}`);
         return res.status(409).json({
           success: false,
-          error: 'A user with this email address already exists.',
+          error: byExt ? 'Bu ichki raqamga boshqa akkaunt bog\'langan.' : 'A user with this email address already exists.',
         });
       }
 
@@ -322,7 +337,7 @@ router.put('/:id', async (req: CompanyAuthedRequest, res: Response) => {
       });
     }
 
-    const { name, email, age, phone, role, password, first_name, last_name } = req.body;
+    const { name, email, age, phone, role, password, first_name, last_name, operator_ext } = req.body;
 
     const { data: existingUser, error: checkError } = await supabase
       .from('users')
@@ -356,6 +371,11 @@ router.put('/:id', async (req: CompanyAuthedRequest, res: Response) => {
       updateData.role = role;
     }
     if (first_name !== undefined) updateData.first_name = first_name;
+    if (operator_ext !== undefined) {
+      const ext = parseOperatorExt(operator_ext);
+      if (!ext.ok) return res.status(400).json({ success: false, error: "Ichki raqam faqat raqamlardan iborat bo'lsin (masalan 105)." });
+      updateData.operator_ext = ext.value;
+    }
     if (last_name !== undefined) updateData.last_name = last_name;
     if (password) {
       updateData.password_hash = hashPassword(String(password)); // bcrypt — ochiq saqlanmaydi
@@ -381,9 +401,10 @@ router.put('/:id', async (req: CompanyAuthedRequest, res: Response) => {
       console.error(`Error updating user ${id}:`, updateError.message);
 
       if (updateError.code === '23505') {
+        const byExt = /operator_ext/.test(`${updateError.message} ${(updateError as any).details ?? ''}`);
         return res.status(409).json({
           success: false,
-          error: 'A user with this email address already exists.',
+          error: byExt ? 'Bu ichki raqamga boshqa akkaunt bog\'langan.' : 'A user with this email address already exists.',
         });
       }
 

@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { Readable } from 'node:stream';
 import { supabase } from '../lib/supabase';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
+import { callsScope } from '../lib/operatorScope';
 import { virtualManagerId } from '../lib/virtualOperators';
 import { addDays, tashkentDayStart } from '../lib/tashkentTime';
 import { signAudioToken, verifyAudioToken, pbxAuthHeaders, isSupabaseStorageUrl } from '../lib/audioAccess';
@@ -73,9 +74,17 @@ router.get('/', requireAuth, async (req: CompanyAuthedRequest, res: Response) =>
       .eq('company_id', companyId);
     if (managerId) query = query.eq('manager_id', managerId);
 
+    // XODIM (operator) TOKENI (2026-10-15): faqat o'z ichki raqamidagi
+    // qo'ng'iroqlar — mijoz yuborgan ?operator= e'tiborga olinmaydi.
+    // Operatorga bog'lanmagan xodim hech narsa ko'rmaydi (lib/operatorScope.ts).
+    const scope = await callsScope(req);
+    if (scope && !scope.ext) {
+      return res.status(200).json({ success: true, count: 0, ...(wantTotal ? { total: 0 } : {}), data: [] });
+    }
+
     // ?operator=<ichki raqam> (2026-10-14) — operator bo'yicha (xodimga
     // biriktirilmagan qo'ng'iroqlar ham, chunki ular faqat ichki raqamda).
-    const operator = typeof req.query.operator === 'string' ? req.query.operator.trim() : '';
+    const operator = scope ? scope.ext! : typeof req.query.operator === 'string' ? req.query.operator.trim() : '';
     if (operator) query = query.eq('operator_ext', operator);
     if (platformId) query = query.eq('platform_id', platformId);
 
@@ -152,6 +161,11 @@ router.get('/:id', requireAuth, async (req: CompanyAuthedRequest, res: Response)
     const { data: call, error: cErr } = await supabase.from('calls').select('*').eq('id', id).eq('company_id', companyId).maybeSingle();
     if (cErr) return res.status(500).json({ success: false, error: `Database Error: ${cErr.message}` });
     if (!call) return res.status(404).json({ success: false, error: "Qo'ng'iroq topilmadi." });
+    // Xodim faqat o'z qo'ng'iroqini ochadi (boshqasi — "topilmadi").
+    const scope = await callsScope(req);
+    if (scope && (!scope.ext || String((call as any).operator_ext ?? '').trim() !== scope.ext)) {
+      return res.status(404).json({ success: false, error: "Qo'ng'iroq topilmadi." });
+    }
 
     const [{ data: conversions }, { data: lostReasons }, { data: criteriaScores }] = await Promise.all([
       supabase.from('conversions').select('*').eq('call_id', id).maybeSingle(),

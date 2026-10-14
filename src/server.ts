@@ -6,6 +6,8 @@ import { timing } from './middleware/timing';
 import { execSync } from 'node:child_process';
 
 import usersRouter from './routes/users';
+import meRouter from './routes/me';
+import { blockOperators } from './lib/operatorScope';
 import companyAuthRouter from './routes/company-auth';
 import companyRouter from './routes/company';
 import companySectionsRouter from './routes/company-sections';
@@ -96,6 +98,21 @@ app.use('/company', companyRouter);
 app.use('/company', companySectionsRouter);
 app.use('/company', companyWebhooksRouter);
 app.use('/webhooks', webhooksIncomingRouter);
+// XODIM (operator) TOKENI — 2026-10-15: kompaniya miqyosidagi bo'limlar
+// faqat direktor/admin uchun; xodim o'z kabinetini /api/me orqali ko'radi
+// (lib/operatorScope.ts). Kalendar kunlari (/analytics/days) va mezonlarni
+// O'QISH xodimga ochiq.
+const onlyCalendar = (m: string, p: string) => m === 'GET' && p === '/days';
+const readOnly = (m: string) => m === 'GET';
+app.use('/dashboard', blockOperators());
+app.use('/managers', blockOperators());
+app.use('/criteria', blockOperators(readOnly));
+app.use('/crm', blockOperators());
+app.use('/analytics', blockOperators(onlyCalendar));
+app.use('/api/analytics', blockOperators(onlyCalendar));
+app.use('/api/management', blockOperators());
+app.use('/api/analyze-call', blockOperators());
+app.use('/api/me', meRouter);
 app.use('/dashboard', dashboardRouter);
 app.use('/internal/telegram', telegramWebhooksRouter);
 app.use('/webhook', utelWebhookRouter); // POST /webhook/utel — UTel (utel.uz) virtual PBX webhook qabul qiluvchi
