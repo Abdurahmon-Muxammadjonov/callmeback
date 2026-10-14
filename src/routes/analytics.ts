@@ -336,6 +336,37 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
 });
 
 // ============================================================================
+// GET /analytics/days
+// "📅 Sana" kalendari uchun (2026-10-14): kompaniyaning BIRINCHI qo'ng'iroq
+// kunidan bugungacha qo'ng'iroq bo'lgan har bir Toshkent kuni va soni.
+// Kalendar shu kundan oldingi va kelajakdagi kunlarni o'chiradi, qo'ng'iroq
+// bo'lgan kunlarni belgilaydi. Hisob calls_bucket_stats (perf_03) orqali —
+// kunlik son boshqa hisobotlar bilan bir xil ta'rifda.
+// DIQQAT: PostgREST javobi 1000 qatorgacha — ~2.7 yillik tarix (yangi kunlar
+// birinchi keladi, eng eskilari kesiladi).
+// ============================================================================
+router.get('/days', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
+  try {
+    const companyId = req.auth!.companyId as string;
+    const rows = await reportRpc<BucketRow[]>('calls_bucket_stats', {
+      p_company_id: companyId,
+      p_from: '2000-01-01T00:00:00Z',
+    });
+    const today = tashkentDay(new Date());
+    const days = (rows || [])
+      .filter((r) => r.day <= today)
+      .map((r) => ({ date: r.day, calls: Number(r.calls) || 0 }))
+      .sort((x, y) => x.date.localeCompare(y.date));
+    return res.status(200).json({
+      success: true,
+      data: { first_day: days[0]?.date ?? null, today, days },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Kunlar ro\'yxatida xatolik.' });
+  }
+});
+
+// ============================================================================
 // GET /analytics/daily-summary?days=30
 // KUNLIK YAKUNIY KO'RSATKICHLAR — dashboardning asosiy raqamlari shu yerdan.
 //
