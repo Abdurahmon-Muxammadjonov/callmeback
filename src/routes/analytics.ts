@@ -7,6 +7,7 @@ import { getCompanySettings } from '../lib/companySettings';
 import { addDays, dayBounds, isHhMm, tashkentDay, tashkentDayStart } from '../lib/tashkentTime';
 import { reportRpc } from '../lib/reportRpc';
 import { operatorNamesByExt } from '../lib/operatorNames';
+import { leadReasonCategory } from '../lib/leadReasons';
 import {
   buildAnalyticsRoot, buildDailySummary, buildHourly, buildDailyMinutes, buildStaffStats,
   buildAnalysisStatus, buildOperatorDay,
@@ -531,6 +532,108 @@ router.get('/analysis-status', requireAuth, async (req: CompanyAuthedRequest, re
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Tahlil holatini hisoblashda xatolik.' });
+  }
+});
+
+// ============================================================================
+// GET /analytics/lead-quality?from=YYYY-MM-DD&to=YYYY-MM-DD — LID SIFATI
+// (2026-10-16, foydalanuvchi talabi: "lidni sifatli/sifatsizga ajratish
+// dashboard ichida va nega — sababi").
+//
+// Manba — AI tahlili (yangi ma'lumot yozilmaydi):
+//   sifatsiz lid — bad_leads_count > 0; sababi lost_reasons jadvalida
+//                  (prompt: bad_leads_count > 0 bo'lsa sabab lost_reasons'ga);
+//   sifatli lid  — new_leads_count > 0 va bad_leads_count = 0.
+// Faqat tahlil qilingan qo'ng'iroqlar (1 daqiqadan uzunlari — qisqalari
+// saqlanmaydi, lib/callPolicy.ts). Oraliq ko'pi bilan 31 kun.
+// ============================================================================
+router.get('/lead-quality', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
+  try {
+    const companyId = req.auth!.companyId as string;
+    const re = /^\d{4}-\d{2}-\d{2}$/;
+    const today = tashkentDay(new Date());
+    const to = typeof req.query.to === 'string' && re.test(req.query.to) ? req.query.to : today;
+    let from = typeof req.query.from === 'string' && re.test(req.query.from) ? req.query.from : to;
+    if (from > to) from = to;
+    if (addDays(from, 31) < to) from = addDays(to, -30);
+    const start = dayBounds(from).from;
+    const end = dayBounds(addDays(to, 1)).from;
+
+    type Row = { id: string; operator_ext: string | null; created_at: string; new_leads_count: number | null; bad_leads_count: number | null; summary: string | null };
+    const rows: Row[] = [];
+    for (let off = 0; off < 10_000; off += 1000) {
+      const { data, error } = await supabase
+        .from('calls')
+        .select('id, operator_ext, created_at, new_leads_count, bad_leads_count, summary')
+        .eq('company_id', companyId)
+        .gte('created_at', start)
+        .lt('created_at', end)
+        .or('new_leads_count.gt.0,bad_leads_count.gt.0')
+        .order('created_at', { ascending: false })
+        .range(off, off + 999);
+      if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
+      rows.push(...((data || []) as Row[]));
+      if (!data || data.length < 1000) break;
+    }
+
+    const bad = rows.filter((r) => Number(r.bad_leads_count) > 0);
+    const good = rows.filter((r) => Number(r.bad_leads_count) <= 0 && Number(r.new_leads_count) > 0);
+
+    // Sifatsiz lidlarning sabablari (lost_reasons, 200 talab).
+    const reasonByCall = new Map<string, string[]>();
+    for (let i = 0; i < bad.length; i += 200) {
+      const ids = bad.slice(i, i + 200).map((r) => r.id);
+      const { data } = await supabase.from('lost_reasons').select('call_id, reason_text').in('call_id', ids);
+      for (const lr of (data || []) as Array<{ call_id: string; reason_text: string | null }>) {
+        const txt = String(lr.reason_text ?? '').trim();
+        if (!txt) continue;
+        reasonByCall.set(lr.call_id, [...(reasonByCall.get(lr.call_id) || []), txt]);
+      }
+    }
+    const NO_REASON = 'Sabab yozilmagan';
+    const reasonCount = new Map<string, number>();
+    // Har qo'ng'iroq toifa bo'yicha bir marta sanaladi (lib/leadReasons.ts).
+    for (const r of bad) {
+      const list = reasonByCall.get(r.id);
+      const cats = new Set((list?.length ? list : [NO_REASON]).map(leadReasonCategory));
+      for (const c of cats) reasonCount.set(c, (reasonCount.get(c) || 0) + 1);
+    }
+
+    const names = await operatorNamesByExt(companyId);
+    const byOp = new Map<string, { ext: string | null; name: string; qualified: number; unqualified: number }>();
+    for (const r of rows) {
+      const ext = String(r.operator_ext ?? '').trim() || null;
+      const k = ext ?? '—';
+      const o = byOp.get(k) || { ext, name: ext ? names.get(ext) || `Operator ${ext}` : 'Aniqlanmagan', qualified: 0, unqualified: 0 };
+      if (Number(r.bad_leads_count) > 0) o.unqualified += 1;
+      else if (Number(r.new_leads_count) > 0) o.qualified += 1;
+      byOp.set(k, o);
+    }
+
+    return res.status(200).json({
+      success: true,
+      from,
+      to,
+      data: {
+        qualified: good.length,
+        unqualified: bad.length,
+        reasons: [...reasonCount.entries()]
+          .map(([reason, count]) => ({ reason, count }))
+          .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
+          .slice(0, 12),
+        operators: [...byOp.values()].sort((a, b) => b.unqualified + b.qualified - (a.unqualified + a.qualified)),
+        recent_unqualified: bad.slice(0, 20).map((r) => ({
+          id: r.id,
+          ext: r.operator_ext,
+          name: r.operator_ext ? names.get(String(r.operator_ext).trim()) || `Operator ${r.operator_ext}` : null,
+          created_at: r.created_at,
+          reasons: reasonByCall.get(r.id)?.length ? [...new Set(reasonByCall.get(r.id)!.map(leadReasonCategory))] : [NO_REASON],
+          summary: r.summary,
+        })),
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Lid sifati hisobotida xatolik.' });
   }
 });
 
