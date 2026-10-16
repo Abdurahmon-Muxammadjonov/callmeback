@@ -19,6 +19,7 @@ import { classifyShortCall } from '../lib/openaiAnalyzer';
 import { parseTashkentLocal } from '../lib/tashkentTime';
 import { runsBackgroundJobs } from '../lib/processRole';
 import { isTooShort, minCallSec, SKIP_REASON } from '../lib/callPolicy';
+import { pushAnalyzedCall } from '../lib/crmPush';
 
 // ============================================================================
 // UTel (utc381.utel.uz) — O'zbek virtual PBX / bulutli telefoniya webhook.
@@ -471,6 +472,8 @@ export async function analyzeUtelCall(
     await supabase.from('calls').update(upd).eq('id', rowId);
 
     await processTranscriptToCall(supabase, rowId, text, res.dialog, companyId);
+    // Natija CRM'ga avtomatik (amoCRM izohi / webhook — lib/crmPush.ts).
+    void pushAnalyzedCall(rowId);
     console.log(`UTel analiz done (row=${rowId}, so'z: ${res.wordsCount})`);
   } catch (e: any) {
     console.error(`UTel analiz xatosi (row=${rowId}):`, e?.message || e);
@@ -511,6 +514,7 @@ async function reanalyzeTranscriptOnly(row: {
       Array.isArray(full?.transcript_segments) ? full.transcript_segments : [],
       row.company_id,
     );
+    void pushAnalyzedCall(row.id); // CRM'ga avtomatik (lib/crmPush.ts)
   } catch (e: any) {
     console.error(`UTel qayta tahlil xatosi (row=${row.id}):`, e?.message || e);
     // 'requeued' belgisi saqlanadi — past ustuvorlik bilan navbatda qolsin.

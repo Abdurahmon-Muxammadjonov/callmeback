@@ -18,7 +18,7 @@ export async function checkDeeplinkRateLimit(companyId: string): Promise<boolean
   return (count ?? 0) < RATE_LIMIT_MAX_PER_HOUR;
 }
 
-export async function createDeeplinkToken(companyId: string, purpose: 'get_code' | 'upgrade'): Promise<string> {
+export async function createDeeplinkToken(companyId: string, purpose: 'get_code' | 'upgrade' | 'report'): Promise<string> {
   const token = generateDeeplinkToken();
   const expiresAt = new Date(Date.now() + TOKEN_TTL_MS).toISOString();
   const { error } = await supabase.from('bot_deeplink_tokens').insert({ token, company_id: companyId, purpose, expires_at: expiresAt });
@@ -27,7 +27,7 @@ export async function createDeeplinkToken(companyId: string, purpose: 'get_code'
 }
 
 /** Token'ni bir martalik ishlatadi (topilsa/eskirmagan/ishlatilmagan bo'lsa) — aks holda null. */
-export async function resolveDeeplinkToken(token: string): Promise<{ companyId: string; purpose: 'get_code' | 'upgrade' } | null> {
+export async function resolveDeeplinkToken(token: string): Promise<{ companyId: string; purpose: 'get_code' | 'upgrade' | 'report' } | null> {
   const { data, error } = await supabase
     .from('bot_deeplink_tokens')
     .select('company_id, purpose, expires_at, used')
@@ -48,5 +48,5 @@ export async function resolveDeeplinkToken(token: string): Promise<{ companyId: 
     .maybeSingle();
 
   if (updateErr || !updated) return null;
-  return { companyId: data.company_id, purpose: data.purpose as 'get_code' | 'upgrade' };
+  return { companyId: data.company_id, purpose: data.purpose as 'get_code' | 'upgrade' | 'report' };
 }

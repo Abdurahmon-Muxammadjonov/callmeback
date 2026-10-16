@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 process.env.WEBHOOK_SECRET_ENC_KEY = 'a'.repeat(64);
 // Kalit har chaqiruvda env'dan o'qiladi; require — loyiha CommonJS (sttHealth.test.ts dagidek).
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { encryptPassword, decryptPassword } = require('./passwordVault') as typeof import('./passwordVault');
+const { encryptPassword, decryptPassword, encryptFor, decryptFor } = require('./passwordVault') as typeof import('./passwordVault');
 
 test('shifrlash -> ochish asl parolni qaytaradi, ochiq matn ko\'rinmaydi', () => {
   const enc = encryptPassword('parol777')!;
@@ -27,4 +27,10 @@ test("kalit yo'q — shifrlanmaydi, null", () => {
   delete process.env.WEBHOOK_SECRET_ENC_KEY;
   assert.equal(encryptPassword('x'), null);
   process.env.WEBHOOK_SECRET_ENC_KEY = saved;
+});
+
+test("maqsad bo'yicha alohida kalit: CRM siri parol kaliti bilan ochilmaydi", () => {
+  const enc = encryptFor('crm-secret', 'token-123')!;
+  assert.equal(decryptFor('crm-secret', enc), 'token-123');
+  assert.equal(decryptPassword(enc), null);
 });

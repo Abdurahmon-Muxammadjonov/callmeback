@@ -20,16 +20,29 @@ import { supabase } from './supabase';
 
 const ALGO = 'aes-256-gcm';
 
-function key(): Buffer | null {
+// Har maqsadga alohida kalit (HKDF info). 'user-password' qiymati O'ZGARMASIN —
+// bazadagi shifrlangan parollar shu kalit bilan yozilgan.
+function key(purpose = 'user-password'): Buffer | null {
   const raw = process.env.WEBHOOK_SECRET_ENC_KEY;
   if (!raw) return null;
   const master = Buffer.from(raw, 'hex');
   if (master.length !== 32) return null;
-  return Buffer.from(crypto.hkdfSync('sha256', master, Buffer.alloc(0), 'procell:user-password:v1', 32));
+  return Buffer.from(crypto.hkdfSync('sha256', master, Buffer.alloc(0), `procell:${purpose}:v1`, 32));
+}
+
+/** CRM tokeni va boshqa sirlar uchun (2026-10-16) — alohida kalit bilan. */
+export function encryptFor(purpose: string, plain: string): string | null {
+  return encryptWith(key(purpose), plain);
+}
+export function decryptFor(purpose: string, stored: string | null | undefined): string | null {
+  return decryptWith(key(purpose), stored);
 }
 
 export function encryptPassword(plain: string): string | null {
-  const k = key();
+  return encryptWith(key(), plain);
+}
+
+function encryptWith(k: Buffer | null, plain: string): string | null {
   if (!k) return null;
   const iv = crypto.randomBytes(12);
   const c = crypto.createCipheriv(ALGO, k, iv);
@@ -38,7 +51,10 @@ export function encryptPassword(plain: string): string | null {
 }
 
 export function decryptPassword(stored: string | null | undefined): string | null {
-  const k = key();
+  return decryptWith(key(), stored);
+}
+
+function decryptWith(k: Buffer | null, stored: string | null | undefined): string | null {
   if (!k || !stored) return null;
   try {
     const [iv, tag, data] = stored.split('.');

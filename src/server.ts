@@ -7,6 +7,9 @@ import { execSync } from 'node:child_process';
 
 import usersRouter from './routes/users';
 import meRouter from './routes/me';
+import companyTelegramRouter from './routes/company-telegram';
+import companyIntegrationsRouter from './routes/company-integrations';
+import { startTelegramReportScheduler } from './lib/telegramReport';
 import { blockOperators } from './lib/operatorScope';
 import companyAuthRouter from './routes/company-auth';
 import companyRouter from './routes/company';
@@ -113,6 +116,8 @@ app.use('/api/analytics', blockOperators(onlyCalendar));
 app.use('/api/management', blockOperators());
 app.use('/api/analyze-call', blockOperators());
 app.use('/api/me', meRouter);
+app.use('/company/telegram', companyTelegramRouter);
+app.use('/company/integrations', companyIntegrationsRouter);
 app.use('/dashboard', dashboardRouter);
 app.use('/internal/telegram', telegramWebhooksRouter);
 app.use('/webhook', utelWebhookRouter); // POST /webhook/utel — UTel (utel.uz) virtual PBX webhook qabul qiluvchi
@@ -182,6 +187,7 @@ function startBackgroundJobs(): void {
   // qo'ng'iroqni faqat bazaga yozadi — tahlil SHU YERDA, navbatdan.
   // Eski failed'lar ham shu navbatdan o'tadi.
   startUtelWorker();
+  startTelegramReportScheduler(); // kun hisoboti Telegramga (lib/telegramReport.ts)
 
   // OPERATOR TAVSIYALARI (API v2 §10) — staff-stats GET so'rovi GPT
   // chaqirmaydi, matn shu jobda tayyorlanib operator_insights jadvaliga

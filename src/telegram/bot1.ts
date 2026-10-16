@@ -1,4 +1,6 @@
 import { bot1 } from './bot1Client';
+import { supabase } from '../lib/supabase';
+import { buildDailyReport, sendReportToChat } from '../lib/telegramReport';
 import { dbSession, resetSession, type SessionContext } from './dbSession';
 import { resolveDeeplinkToken } from '../lib/deeplinkToken';
 import {
@@ -54,8 +56,43 @@ bot1.command('start', async (ctx) => {
     // orqali allaqachon ma'lum, shu sabab email so'ralmaydi — faqat telefon.
     if (resolved.purpose === 'get_code') return enterCodeByEmailFlow(ctx as SessionContext, resolved.companyId);
     if (resolved.purpose === 'upgrade') return enterUpgradeFlow(ctx as SessionContext, resolved.companyId);
+    // "report" (2026-10-16) — shu chat (shaxsiy yoki guruh) kompaniyaning kun
+    // hisobotlarini oladi (lib/telegramReport.ts).
+    if (resolved.purpose === 'report') return linkReportChat(ctx, resolved.companyId);
   }
   return handleStart(ctx as SessionContext);
+});
+
+async function linkReportChat(ctx: any, companyId: string): Promise<void> {
+  const chat = ctx.chat;
+  const title = chat?.title || [chat?.first_name, chat?.last_name].filter(Boolean).join(' ') || chat?.username || null;
+  const { error } = await supabase
+    .from('telegram_report_chats')
+    .upsert({ company_id: companyId, chat_id: chat.id, title, enabled: true }, { onConflict: 'company_id,chat_id' });
+  if (error) {
+    await ctx.reply("Ulab bo'lmadi. Iltimos, saytdan qayta urinib ko'ring.");
+    return;
+  }
+  await ctx.reply("✅ Ulandi! Har kuni ish yakunida bu yerga kun hisoboti keladi. Istalgan payt /hisobot deb yozsangiz — bugungi hisobot darhol keladi.");
+  try {
+    await sendReportToChat(chat.id, await buildDailyReport(companyId));
+  } catch { /* hisobot keyinroq ham keladi */ }
+}
+
+// /hisobot — shu chatga ulangan kompaniya(lar)ning bugungi hisoboti.
+bot1.command('hisobot', async (ctx) => {
+  const { data } = await supabase.from('telegram_report_chats').select('company_id').eq('chat_id', ctx.chat.id).eq('enabled', true);
+  if (!data?.length) {
+    await ctx.reply("Bu chat hali hisobotga ulanmagan. Saytda: CRM ulanishi → Telegram hisobot → «Telegramga ulash».");
+    return;
+  }
+  for (const row of data as Array<{ company_id: string }>) {
+    try {
+      await sendReportToChat(ctx.chat.id, await buildDailyReport(row.company_id));
+    } catch {
+      await ctx.reply("Hisobotni tayyorlab bo'lmadi, birozdan keyin qayta urinib ko'ring.");
+    }
+  }
 });
 bot1.command('cancel', (ctx) => cancelFlow(ctx as SessionContext));
 
