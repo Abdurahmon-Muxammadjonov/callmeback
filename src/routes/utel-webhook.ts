@@ -18,6 +18,7 @@ import { probeWavDurationSec } from '../lib/audioDuration';
 import { classifyShortCall } from '../lib/openaiAnalyzer';
 import { parseTashkentLocal } from '../lib/tashkentTime';
 import { runsBackgroundJobs } from '../lib/processRole';
+import { isTooShort, minCallSec, SKIP_REASON } from '../lib/callPolicy';
 
 // ============================================================================
 // UTel (utc381.utel.uz) — O'zbek virtual PBX / bulutli telefoniya webhook.
@@ -165,6 +166,14 @@ async function handleUtelCallSaved(payload: any): Promise<void> {
   const durationSec = Number.isFinite(rawDur) && rawDur > 0
     ? Math.round(rawDur)
     : (await probeWavDurationSec(audioUrl)) ?? 0;
+
+  // 1 daqiqadan qisqa qo'ng'iroq SAQLANMAYDI va AI'ga yuborilmaydi
+  // (foydalanuvchi talabi 2026-10-16, lib/callPolicy.ts). Davomiylik
+  // noma'lum (0) bo'lsa saqlanadi — uzun suhbat tasodifan yo'qolmasin.
+  if (isTooShort(durationSec)) {
+    console.log(`UTel call_saved: ${callId} — ${durationSec}s < ${minCallSec()}s, saqlanmadi.`);
+    return;
+  }
 
   const typeName = String(ch?.type?.name || '').toLowerCase();
   const direction = typeName.includes('out') ? 'outgoing' : typeName.includes('in') ? 'incoming' : 'unknown';
@@ -398,6 +407,14 @@ export async function analyzeUtelCall(
     // belgilanadi va pastdagi "ishonchlilik tekshiruvi" uchun ham kerak.
     const { data: durRow } = await supabase.from('calls').select('duration').eq('id', rowId).maybeSingle();
     const durSec = Math.max(0, Number(durRow?.duration) || 0);
+
+    // Qisqa qo'ng'iroq AI'ga yuborilmaydi (lib/callPolicy.ts) — qoida
+    // kiritilishidan oldin navbatga tushganlari tahlilsiz yopiladi.
+    if (isTooShort(durSec)) {
+      await supabase.from('calls').update({ status: 'done', dropped_reason: SKIP_REASON, error: null }).eq('id', rowId);
+      console.log(`UTel: row=${rowId} — ${durSec}s < ${minCallSec()}s, AI'ga yuborilmadi.`);
+      return;
+    }
 
     const audio = await prepareAudio(audioUrl);
     const stt = await transcribeCall(rowId, audio, durSec, clientName, opts);
@@ -710,7 +727,10 @@ async function runQueueOnce(): Promise<number> {
       .is('transcript', null)
       .neq('status', 'done')
       .gte('created_at', QUEUE_SINCE)
-      .lt('created_at', cutoff));
+      .lt('created_at', cutoff)
+      // Faqat 1 daqiqadan uzunlari (davomiylik noma'lumlari ham) — qisqalari
+      // AI'ga yuborilmaydi (lib/callPolicy.ts, 2026-10-16).
+      .or(`duration.gte.${minCallSec()},duration.lte.0,duration.is.null`));
     q = requeued ? q.eq('status', REQUEUED_STATUS) : q.neq('status', REQUEUED_STATUS);
     const { data, error } = await q.order('created_at', { ascending: true }).limit(limit * 5);
     if (error) { console.warn('UTel navbat so\'rovi xatosi:', error.message); return null; }

@@ -2,6 +2,7 @@ import '../env';
 
 import { Agent } from 'undici';
 import { supabase } from '../lib/supabase';
+import { isTooShort } from '../lib/callPolicy';
 
 type Direction = 'incoming' | 'outgoing' | 'unknown';
 
@@ -570,9 +571,11 @@ function isDuplicateInsertError(error: any): boolean {
 }
 
 async function insertCallRowsBatch(
-  rows: CallInsertRow[],
+  allRows: CallInsertRow[],
   batchSize: number,
 ): Promise<{ inserted: number; failed: number; duplicates: number }> {
+  // 1 daqiqadan qisqa qo'ng'iroqlar saqlanmaydi (lib/callPolicy.ts, 2026-10-16).
+  const rows = allRows.filter((r) => !isTooShort(Number((r as any).duration)));
   if (rows.length === 0) return { inserted: 0, failed: 0, duplicates: 0 };
 
   let inserted = 0;
