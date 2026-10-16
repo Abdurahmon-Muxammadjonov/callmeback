@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { operatorNamesByExt } from './operatorNames';
 import { reportRpc } from './reportRpc';
 
 // "Virtual operator" — bazada XODIM sifatida yozilmagan, lekin qo'ng'iroq
@@ -44,20 +45,30 @@ export function virtualManagerId(companyId: string, ext: string): string {
 // guruhlanardi — har safar xodimlar ro'yxati ochilganda o'nlab so'rov.
 // Endi guruhlash bazada (supabase/perf_08_virtual_operators.sql): ichki
 // raqam (bo'shliqlari kesilgan), qo'ng'iroqlar soni va birinchi qo'ng'iroq.
+//
+// NOM (2026-10-16): akkaunt bog'langan raqam uchun "Xodimlarni boshqarish"dagi
+// ism (lib/operatorNames.ts) — /managers orqali butun dashboard shu ismni oladi.
 export async function listVirtualOperators(companyId: string): Promise<VirtualOperator[]> {
-  const items = await reportRpc<VirtualOperatorRow[]>('company_virtual_operators', { p_company_id: companyId });
-  return virtualOperatorsFromRows(companyId, items || []);
+  const [items, names] = await Promise.all([
+    reportRpc<VirtualOperatorRow[]>('company_virtual_operators', { p_company_id: companyId }),
+    operatorNamesByExt(companyId),
+  ]);
+  return virtualOperatorsFromRows(companyId, items || [], names);
 }
 
 export interface VirtualOperatorRow { ext: string; count: number; first: string | null }
 
 // SOF funksiya — bazaga murojaat qilmaydi (test/solishtirish uchun alohida).
-export function virtualOperatorsFromRows(companyId: string, rows: VirtualOperatorRow[]): VirtualOperator[] {
+export function virtualOperatorsFromRows(
+  companyId: string,
+  rows: VirtualOperatorRow[],
+  nameByExt: Map<string, string> = new Map(),
+): VirtualOperator[] {
   return [...rows]
     .sort((a, b) => Number(b.count) - Number(a.count) || (a.ext < b.ext ? -1 : a.ext > b.ext ? 1 : 0))
     .map((v) => ({
       id: virtualManagerId(companyId, v.ext),
-      name: `Operator ${v.ext}`,
+      name: nameByExt.get(String(v.ext).trim()) || `Operator ${v.ext}`,
       pbx_id: v.ext,
       status: 'active',
       role: null,

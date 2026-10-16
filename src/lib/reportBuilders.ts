@@ -363,13 +363,17 @@ export interface OperatorDayItem {
 }
 
 /** Frontend dayCalls.operatorsOf bilan bir xil shakl (OperatorDay). */
-export function buildOperatorDay(items: OperatorDayItem[], nameById: Map<string, string>) {
+export function buildOperatorDay(
+  items: OperatorDayItem[],
+  nameById: Map<string, string>,
+  nameByExt: Map<string, string> = new Map(),
+) {
   return [...items].map((o) => {
     const scored = num(o.scored);
     return {
       key: o.key,
       ext: o.ext ?? null,
-      name: (o.manager_id && nameById.get(o.manager_id)) || null,
+      name: (o.ext && nameByExt.get(String(o.ext).trim())) || (o.manager_id && nameById.get(o.manager_id)) || null,
       calls: num(o.calls),
       longCalls: num(o.long_calls),
       incoming: num(o.incoming),
@@ -400,10 +404,13 @@ export interface OperatorDailyItem {
  * Avval kun darajasidagi calls/minutes FAQAT operator qo'ng'iroqlarini
  * sanardi — daily-summary'dagi "calls" bilan bir xil nomda boshqa son edi.
  */
+// nameByExt (2026-10-16): ichki raqam -> "Xodimlarni boshqarish"dagi ism
+// (lib/operatorNames.ts). Hamma builder'da ixtiyoriy — berilmasa eski nom.
 export function buildDailyMinutes(
   items: OperatorDailyItem[],
   nameById: Map<string, string>,
   dayRows: Array<Pick<BucketRow, 'day' | 'calls' | 'operator_calls' | 'seconds'>>,
+  nameByExt: Map<string, string> = new Map(),
 ) {
   type Ops = Map<string, { name: string; calls: number; seconds: number }>;
   const byDay = new Map<string, { calls: number; opCalls: number; seconds: number; opSeconds: number; ops: Ops }>();
@@ -425,11 +432,11 @@ export function buildDailyMinutes(
     entry.opSeconds += sec;
 
     const opKey = it.manager_id || (it.operator_ext ? `ext:${it.operator_ext}` : 'ext:—');
-    const opName = it.manager_id
+    const opName = (it.operator_ext && nameByExt.get(String(it.operator_ext).trim())) || (it.manager_id
       ? nameById.get(it.manager_id) || 'Xodim'
       : it.operator_ext
         ? `Operator ${it.operator_ext}`
-        : 'Noma\'lum';
+        : 'Noma\'lum');
     const op = entry.ops.get(opKey) || { name: opName, calls: 0, seconds: 0 };
     op.calls += calls;
     op.seconds += sec;
@@ -484,6 +491,7 @@ export function buildStaffStats(
   items: StaffOpItem[],
   nameById: Map<string, string>,
   insightByExt: Map<string, OperatorInsight>,
+  nameByExt: Map<string, string> = new Map(),
 ) {
   return [...items]
     .sort((x, y) => num(y.calls) - num(x.calls) || byText(x.key, y.key))
@@ -511,7 +519,8 @@ export function buildStaffStats(
       const faults = deriveFaults(stages);
       const ext = a.key.startsWith('ext:') ? a.key.slice(4) : null;
       const insight = ext ? insightByExt.get(ext) : undefined;
-      const name = a.manager_id ? nameById.get(a.manager_id) || 'Xodim' : `Operator ${a.operator_ext}`;
+      const extName = (ext || a.operator_ext) ? nameByExt.get(String(ext || a.operator_ext).trim()) : undefined;
+      const name = extName || (a.manager_id ? nameById.get(a.manager_id) || 'Xodim' : `Operator ${a.operator_ext}`);
       return {
         key: a.key,
         name,
@@ -550,7 +559,7 @@ export interface AnalysisStatusRaw {
   operators: Array<{ ext: string; analyzed: number; skipped: number; analyzed_seconds: number; limit_reached: boolean }>;
 }
 
-export function buildAnalysisStatus(raw: AnalysisStatusRaw) {
+export function buildAnalysisStatus(raw: AnalysisStatusRaw, nameByExt: Map<string, string> = new Map()) {
   return {
     total: num(raw.total),                   // BARCHA qo'ng'iroqlar (= daily-summary calls)
     operator_calls: num(raw.operator_calls), // ulardan operator qo'ng'iroqlari
@@ -564,7 +573,7 @@ export function buildAnalysisStatus(raw: AnalysisStatusRaw) {
     operators: [...(raw.operators || [])]
       .sort((a, b) => num(b.analyzed) - num(a.analyzed) || byText(a.ext, b.ext))
       .map((o) => ({
-        operator: o.ext === '—' ? 'Aniqlanmagan' : `Operator ${o.ext}`,
+        operator: o.ext === '—' ? 'Aniqlanmagan' : nameByExt.get(String(o.ext).trim()) || `Operator ${o.ext}`,
         analyzed: num(o.analyzed),
         skipped: num(o.skipped),
         analyzed_minutes: minutesOf(num(o.analyzed_seconds)),

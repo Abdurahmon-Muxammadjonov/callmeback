@@ -5,6 +5,8 @@ import { supabase } from '../lib/supabase';
 import { markOnline, markOffline, onlineIds } from '../lib/presence';
 import { signSessionToken } from '../lib/authToken';
 import { requireAuth, type CompanyAuthedRequest } from '../middleware/companyAuth';
+import { invalidateOperatorNames } from '../lib/operatorNames';
+import { rememberPassword, revealPassword } from '../lib/passwordVault';
 
 const router = Router();
 
@@ -265,6 +267,9 @@ router.post('/', async (req: CompanyAuthedRequest, res: Response) => {
       });
     }
 
+    invalidateOperatorNames(req.auth!.companyId); // yangi ism hamma panelda darhol
+    // Direktor sozlamalarda parolni ko'rishi uchun shifrlangan nusxa (lib/passwordVault.ts).
+    if (password && (newUser as any)?.id) await rememberPassword((newUser as any).id, String(password));
     return res.status(201).json({
       success: true,
       data: newUser,
@@ -414,6 +419,8 @@ router.put('/:id', async (req: CompanyAuthedRequest, res: Response) => {
       });
     }
 
+    invalidateOperatorNames(req.auth!.companyId); // ism/raqam o'zgardi — hamma panelda darhol
+    if (password) await rememberPassword(String(id), String(password));
     return res.status(200).json({
       success: true,
       data: updatedUser,
@@ -469,6 +476,7 @@ router.delete('/:id', async (req: CompanyAuthedRequest, res: Response) => {
       });
     }
 
+    invalidateOperatorNames(req.auth!.companyId);
     return res.status(200).json({
       success: true,
       message: `User with ID ${id} was deleted successfully.`,
@@ -487,15 +495,16 @@ router.delete('/:id', async (req: CompanyAuthedRequest, res: Response) => {
 // Staff Manager — credentials / shift / scripts
 // ============================================================
 
-// GET /users/:id/credentials — XAVFSIZ: parol bcrypt-hash, ochiq saqlanmaydi va
-// qaytarilmaydi (password: null). Admin/direktor faqat YANGI parol o'rnatadi.
+// GET /users/:id/credentials — login bcrypt-hash bilan; parol esa faqat o'z
+// kompaniyasi direktori/adminiga, shifrlangan nusxadan (lib/passwordVault.ts).
 router.get('/:id/credentials', async (req: CompanyAuthedRequest, res: Response) => {
   const { id } = req.params;
   if (!(await canAccessUser(req, res, String(id), 'admin'))) return;
   const { data, error } = await supabase.from('users').select('id, email').eq('id', id).maybeSingle();
   if (error) return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
   if (!data) return res.status(404).json({ success: false, error: 'User topilmadi.' });
-  return res.status(200).json({ success: true, data: { email: data.email, password: null } });
+  // Parol (2026-10-16): direktor/admin uchun shifrlangan nusxadan; yo'q bo'lsa null.
+  return res.status(200).json({ success: true, data: { email: data.email, password: await revealPassword(String(id)) } });
 });
 
 // PUT /users/:id/credentials — parol (va ixtiyoriy email) → credentials_changed_at = now()
@@ -523,6 +532,7 @@ router.put('/:id/credentials', async (req: CompanyAuthedRequest, res: Response) 
       return res.status(500).json({ success: false, error: `Database Error: ${error.message}` });
     }
     if (!data) return res.status(404).json({ success: false, error: 'User topilmadi.' });
+    if (typeof password === 'string') await rememberPassword(String(id), password);
     return res.status(200).json({ success: true, data, sessions_revoked: true });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Credentials yangilashda xatolik.';

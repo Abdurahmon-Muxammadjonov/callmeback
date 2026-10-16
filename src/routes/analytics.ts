@@ -6,6 +6,7 @@ import { popStats, overviewStats } from '../lib/analyticsAggregates';
 import { getCompanySettings } from '../lib/companySettings';
 import { addDays, dayBounds, isHhMm, tashkentDay, tashkentDayStart } from '../lib/tashkentTime';
 import { reportRpc } from '../lib/reportRpc';
+import { operatorNamesByExt } from '../lib/operatorNames';
 import {
   buildAnalyticsRoot, buildDailySummary, buildHourly, buildDailyMinutes, buildStaffStats,
   buildAnalysisStatus, buildOperatorDay,
@@ -247,7 +248,8 @@ router.get('/daily-minutes', requireAuth, async (req: CompanyAuthedRequest, res:
     const nameById = new Map<string, string>();
     for (const m of managers.data || []) nameById.set(m.id, m.name);
 
-    const { data, summary } = buildDailyMinutes(items || [], nameById, dayRows || []);
+    // Ism — "Xodimlarni boshqarish"dagi (lib/operatorNames.ts).
+    const { data, summary } = buildDailyMinutes(items || [], nameById, dayRows || [], await operatorNamesByExt(companyId));
     return res.status(200).json({ success: true, data, summary });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Kunlik daqiqalarni hisoblashda xatolik.' });
@@ -328,7 +330,7 @@ router.get('/staff-stats', requireAuth, async (req: CompanyAuthedRequest, res: R
 
     // Ayblar (deriveFaults) determinisik, tavsiya operator_insights'dan;
     // javobda advice_generated_at — UI "qachon tayyorlangan"ni ko'rsatadi.
-    const result = buildStaffStats(items || [], nameById, insightByExt);
+    const result = buildStaffStats(items || [], nameById, insightByExt, await operatorNamesByExt(companyId));
 
     return res.status(200).json({ success: true, date, data: result, cached: false });
   } catch (err: any) {
@@ -367,7 +369,7 @@ router.get('/operators', requireAuth, async (req: CompanyAuthedRequest, res: Res
       success: true,
       date,
       long_call_seconds: longSec,
-      data: buildOperatorDay(items || [], nameById),
+      data: buildOperatorDay(items || [], nameById, await operatorNamesByExt(companyId)),
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Operator kesimida xatolik.' });
@@ -525,7 +527,7 @@ router.get('/analysis-status', requireAuth, async (req: CompanyAuthedRequest, re
     return res.status(200).json({
       success: true,
       date,
-      data: buildAnalysisStatus(raw),
+      data: buildAnalysisStatus(raw, await operatorNamesByExt(companyId)),
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Tahlil holatini hisoblashda xatolik.' });
