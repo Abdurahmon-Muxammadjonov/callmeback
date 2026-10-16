@@ -79,6 +79,24 @@ async function linkReportChat(ctx: any, companyId: string): Promise<void> {
   } catch { /* hisobot keyinroq ham keladi */ }
 }
 
+// /ulash <kod> — hisobotga ulash, havola ishlamagan holat uchun (2026-10-16).
+// Bot bilan chat avvaldan ochiq bo'lsa, Telegram ilovasi t.me/...?start=KOD
+// havolasida kodni ko'pincha yubormaydi — /start kodsiz keladi va bot oddiy
+// salomlashadi. Saytdagi kodni shu buyruq bilan yuborish har doim ishlaydi.
+bot1.command('ulash', async (ctx) => {
+  const code = String((ctx.message as any)?.text ?? '').trim().split(/\s+/)[1] ?? '';
+  if (!code) {
+    await ctx.reply("Kodni ham yozing: /ulash KOD. Kodni saytdan oling: CRM ulanishi → Telegram hisobot → «Telegramga ulash».");
+    return;
+  }
+  const resolved = await resolveDeeplinkToken(code);
+  if (!resolved || resolved.purpose !== 'report') {
+    await ctx.reply("Kod noto'g'ri yoki muddati tugagan. Saytda «Telegramga ulash»ni qayta bosing va yangi kodni yuboring.");
+    return;
+  }
+  return linkReportChat(ctx, resolved.companyId);
+});
+
 // /hisobot — shu chatga ulangan kompaniya(lar)ning bugungi hisoboti.
 bot1.command('hisobot', async (ctx) => {
   const { data } = await supabase.from('telegram_report_chats').select('company_id').eq('chat_id', ctx.chat.id).eq('enabled', true);

@@ -36,7 +36,8 @@ router.post('/link', async (req: CompanyAuthedRequest, res: Response) => {
     const token = await createDeeplinkToken(req.auth!.companyId as string, 'report');
     return res.status(200).json({
       success: true,
-      data: { link: `https://t.me/${bot}?start=${token}`, group_link: `https://t.me/${bot}?startgroup=${token}` },
+      // code — havola ishlamasa botga "/ulash <code>" deb yuboriladi (bot1.ts).
+      data: { link: `https://t.me/${bot}?start=${token}`, group_link: `https://t.me/${bot}?startgroup=${token}`, code: token, bot },
     });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e?.message || 'Havola yaratilmadi.' });
