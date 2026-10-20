@@ -296,14 +296,30 @@ export async function syncCompanyDeals(companyId: string, opts: { maxPages?: num
       return f;
     });
 
-    // 1) O'zgargan bitimlar. Birinchi marta (kengaytirilgan) — hammasi.
-    let cursor = Number(integ.pull_cursor) || (extended ? 0 : backfillFrom);
+    // 1) Bitimlar. Birinchi marta (kengaytirilgan) — HAMMASI, ID tartibida
+    // sahifama-sahifa (pull_cursor ≤ 0: −N = N-sahifadan davom). updated_at
+    // bo'yicha chuqur sahifalash amoCRM'da sakrab ketdi (2026-10-20: 26 500
+    // dan 3 700 tasi saqlangan) — to'liq yuklash shuning uchun ID bo'yicha.
+    // Keyin — faqat o'zgarganlar (filter[updated_at], kichik to'plam).
+    const stored = Number(integ.pull_cursor) || 0;
+    const full = extended && stored <= 0;
+    let cursor = full ? 0 : stored || backfillFrom;
+    const startPage = full && stored < 0 ? Math.max(1, -stored - 1) : 1; // bitta sahifa ustma-ust
     const maxPages = opts.maxPages ?? MAX_LEAD_PAGES;
     const cols = extended ? EXT_COLS : ROW_COLS;
-    for (let page = 1; page <= maxPages; page++) {
-      const j = await get(`/api/v4/leads?with=contacts,loss_reason&limit=250&page=${page}&filter[updated_at][from]=${cursor}&order[updated_at]=asc`);
+    let lastPage = startPage - 1;
+    let finished = false;
+    for (let page = startPage; page < startPage + maxPages; page++) {
+      const path = full
+        ? `/api/v4/leads?with=contacts,loss_reason&limit=250&page=${page}&order[id]=asc`
+        : `/api/v4/leads?with=contacts,loss_reason&limit=250&page=${page}&filter[updated_at][from]=${cursor}&order[updated_at]=asc`;
+      let j = await get(path);
+      // amoCRM ba'zan o'rtadagi sahifani bo'sh (204) qaytaradi — bir marta qayta so'raymiz,
+      // aks holda 26 000 bitimdan 3 500 tasida to'xtab qolgan edi (2026-10-20).
+      if (page > 1 && !j?._embedded?.leads?.length) { await sleep(2000); j = await get(path); }
       const leads: any[] = j?._embedded?.leads ?? [];
-      if (!leads.length) break;
+      if (!leads.length) { finished = true; break; }
+      lastPage = page;
       result.leads += leads.length;
       const prev = await existingRows(companyId, leads.map((l) => Number(l.id)), cols);
       const rows: LeadRow[] = [];
@@ -360,9 +376,12 @@ export async function syncCompanyDeals(companyId: string, opts: { maxPages?: num
       }
       await upsertRows(rows);
       result.stored += rows.length;
-      cursor = Math.max(cursor, ...leads.map((l) => Number(l.updated_at) || 0));
-      if (leads.length < 250) break;
+      if (!full) cursor = Math.max(cursor, ...leads.map((l) => Number(l.updated_at) || 0));
+      if (leads.length < 250) { finished = true; break; }
     }
+    // To'liq yuklash tugadi — endi o'zgarganlar shu paytdan (10 daqiqa zaxira bilan);
+    // tugamadi — keyingi urinish shu sahifadan.
+    const nextCursor = full ? (finished ? runStart - 600 : -(lastPage + 1)) : cursor;
 
     // 2) Bosqichga o'tgan aniq vaqt — hodisalardan (to'lov bosqichlari va rad etish)
     const eventsFrom = Number(integ.pull_events_cursor) || runStart - Math.max(BACKFILL_DAYS, 365) * 86400;
@@ -374,7 +393,8 @@ export async function syncCompanyDeals(companyId: string, opts: { maxPages?: num
       })
       .map(([k]) => k.split(':').map(Number) as [number, number]);
     const evByLead = new Map<number, Array<{ at: string; pipeline: number; status: number; before: number | null }>>();
-    for (let i = 0; i < watch.length; i += 10) {
+    // To'liq yuklash davomida o'tkaziladi — hodisalar u tugagach bir marta (aks holda har urinishda 26 000 hodisa).
+    for (let i = 0; full && !finished ? false : i < watch.length; i += 10) {
       const chunk = watch.slice(i, i + 10);
       const filt = chunk.map(([p, s], k) =>
         `&filter[value_after][leads_statuses][${k}][pipeline_id]=${p}&filter[value_after][leads_statuses][${k}][status_id]=${s}`).join('');
@@ -469,7 +489,7 @@ export async function syncCompanyDeals(companyId: string, opts: { maxPages?: num
     await upsertRows(touched);
 
     await supabase.from('company_integrations')
-      .update({ pull_cursor: cursor, pull_events_cursor: runStart - 120, pull_at: new Date().toISOString(), pull_error: null })
+      .update({ pull_cursor: nextCursor, pull_events_cursor: full && !finished ? integ.pull_events_cursor ?? null : runStart - 120, pull_at: new Date().toISOString(), pull_error: null })
       .eq('id', integ.id);
     return result;
   } catch (e: any) {
