@@ -26,6 +26,7 @@ import managersRouter from './routes/managers';
 import criteriaRouter from './routes/criteria';
 import callsRouter from './routes/calls';
 import analyticsRouter from './routes/analytics';
+import salesRouter from './routes/sales';
 import managementRouter from './routes/management';
 import notificationsRouter from './routes/notifications';
 import shiftsRouter from './routes/shifts';
@@ -126,6 +127,7 @@ app.use('/managers', managersRouter);
 app.use('/criteria', criteriaRouter);
 app.use('/api/analyze-call', analyzeCallRouter);
 app.use('/api/calls', callsRouter);
+app.use('/analytics/sales', salesRouter); // sotuv dashboardi (amoCRM) — lib/salesDashboard.ts
 app.use('/analytics', analyticsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/management', managementRouter);

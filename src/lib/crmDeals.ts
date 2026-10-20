@@ -115,31 +115,93 @@ function makeClient(subdomain: string, token: string) {
   };
 }
 
-interface StageInfo { pipelineName: string; statusName: string; hasChek: boolean; hasPay: boolean }
+interface StageInfo { pipelineName: string; statusName: string; sort: number; hasChek: boolean; hasPay: boolean }
 
-async function loadStages(get: (p: string) => Promise<any>): Promise<Map<string, StageInfo>> {
-  const out = new Map<string, StageInfo>();
+/** Dashboard uchun voronka/foydalanuvchi/maydon ro'yxati (company_integrations.pull_meta). */
+export interface CrmMeta {
+  pipelines: Array<{ id: number; name: string; sort: number; statuses: Array<{ id: number; name: string; sort: number; kind: PayKind }> }>;
+  users: Array<{ id: number; name: string; group_id: number | null; active: boolean }>;
+  groups: Array<{ id: number; name: string }>;
+  fields: Array<{ id: number; name: string; type: string }>;
+  updated_at: string;
+}
+
+async function loadStages(get: (p: string) => Promise<any>): Promise<{ map: Map<string, StageInfo>; pipelines: CrmMeta['pipelines'] }> {
+  const map = new Map<string, StageInfo>();
+  const pipelines: CrmMeta['pipelines'] = [];
   const j = await get('/api/v4/leads/pipelines');
   for (const p of j?._embedded?.pipelines ?? []) {
     const statuses: any[] = p._embedded?.statuses ?? [];
     const flags = pipelineFlags(statuses.map((s) => s.name));
-    for (const s of statuses) out.set(`${p.id}:${s.id}`, { pipelineName: p.name, statusName: s.name, ...flags });
+    const list: CrmMeta['pipelines'][number]['statuses'] = [];
+    for (const s of statuses) {
+      map.set(`${p.id}:${s.id}`, { pipelineName: p.name, statusName: s.name, sort: Number(s.sort) || 0, ...flags });
+      list.push({ id: Number(s.id), name: s.name, sort: Number(s.sort) || 0, kind: classifyStage({ statusId: Number(s.id), statusName: s.name, ...flags, price: 0 }) });
+    }
+    pipelines.push({ id: Number(p.id), name: p.name, sort: Number(p.sort) || 0, statuses: list.sort((a, b) => a.sort - b.sort) });
   }
-  return out;
+  return { map, pipelines: pipelines.sort((a, b) => a.sort - b.sort) };
 }
 
-async function loadUsers(get: (p: string) => Promise<any>): Promise<Map<number, string>> {
-  const out = new Map<number, string>();
+async function loadUsers(get: (p: string) => Promise<any>): Promise<CrmMeta['users']> {
+  const out: CrmMeta['users'] = [];
   for (let page = 1; page <= 10; page++) {
-    const j = await get(`/api/v4/users?limit=250&page=${page}`);
+    const j = await get(`/api/v4/users?limit=250&page=${page}&with=group`);
     const arr: any[] = j?._embedded?.users ?? [];
-    for (const u of arr) out.set(Number(u.id), String(u.name ?? ''));
+    for (const u of arr) {
+      const gid = u.rights?.group_id ?? u._embedded?.groups?.[0]?.id ?? null;
+      out.push({ id: Number(u.id), name: String(u.name ?? ''), group_id: gid != null ? Number(gid) : null, active: u.rights?.is_active !== false });
+    }
     if (arr.length < 250) break;
   }
   return out;
 }
 
+async function loadFields(get: (p: string) => Promise<any>) {
+  const fields: Array<{ id: number; name: string; type: string; code: string | null }> = [];
+  for (let page = 1; page <= 10; page++) {
+    const j = await get(`/api/v4/leads/custom_fields?limit=250&page=${page}`);
+    const arr: any[] = j?._embedded?.custom_fields ?? [];
+    for (const f of arr) fields.push({ id: Number(f.id), name: String(f.name ?? ''), type: String(f.type ?? ''), code: f.code ? String(f.code) : null });
+    if (arr.length < 250) break;
+  }
+  const lr = await get('/api/v4/leads/loss_reasons').catch(() => null);
+  const lossReasons = new Map<number, string>();
+  for (const r of lr?._embedded?.loss_reasons ?? []) lossReasons.set(Number(r.id), String(r.name));
+  const acc = await get('/api/v4/account?with=users_groups').catch(() => null);
+  const groups = ((acc?._embedded?.users_groups ?? []) as any[]).map((g) => ({ id: Number(g.id), name: String(g.name) }));
+  return { fields, lossReasons, groups };
+}
+
 const iso = (unix: unknown) => (Number(unix) > 0 ? new Date(Number(unix) * 1000).toISOString() : null);
+
+/** Bitimning tanlov maydonlari (select/multiselect) → {field_id: "javob"}. */
+export function selectValues(cfs: any[] | null | undefined, selectIds: Set<number>): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  for (const f of cfs ?? []) {
+    if (!selectIds.has(Number(f.field_id))) continue;
+    const v = (f.values ?? []).map((x: any) => String(x.value ?? '').trim()).filter(Boolean).join(', ');
+    if (v) out[String(f.field_id)] = v.slice(0, 120);
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** Manba: «Lid manbasi» maydoni, bo'lmasa utm_source. */
+export function leadSource(cfs: any[] | null | undefined): { source: string | null; utmSource: string | null; utmContent: string | null } {
+  let source: string | null = null;
+  let utmSource: string | null = null;
+  let utmContent: string | null = null;
+  for (const f of cfs ?? []) {
+    const n = normName(f.field_name);
+    const code = String(f.field_code ?? '').toUpperCase();
+    const v = String(f.values?.[0]?.value ?? '').trim() || null;
+    if (!v) continue;
+    if (/^lid manbasi|^источник/.test(n)) source = v;
+    else if (code === 'UTM_SOURCE' || n === 'utm_source') utmSource = v;
+    else if (code === 'UTM_CONTENT' || n === 'utm_content') utmContent = v;
+  }
+  return { source: (source ?? utmSource)?.slice(0, 80) ?? null, utmSource, utmContent: utmContent?.slice(0, 120) ?? null };
+}
 
 // ---------------------------------------------------------------------------
 // Sinxron
@@ -152,8 +214,12 @@ type LeadRow = {
   client_phone9: string | null; operator_ext: string | null; call_id: string | null;
   stage_at: string | null; first_paid_at: string | null; crm_created_at: string | null; crm_updated_at: string | null;
   synced_at: string;
+  // crm_03_sales_dashboard.sql (bo'lmasa yozilmaydi)
+  source?: string | null; utm_source?: string | null; utm_content?: string | null; loss_reason?: string | null;
+  lost_from_status_id?: number | null; group_id?: number | null; closed_at?: string | null; cf?: Record<string, string> | null;
 };
 const ROW_COLS = 'company_id, provider, lead_id, name, pipeline_id, pipeline_name, status_id, status_name, pay_kind, price, deal_sum, debt, payment_type, responsible_id, responsible_name, contact_id, client_phone9, operator_ext, call_id, stage_at, first_paid_at, crm_created_at, crm_updated_at, synced_at';
+const EXT_COLS = `${ROW_COLS}, source, utm_source, utm_content, loss_reason, lost_from_status_id, group_id, closed_at, cf`;
 
 async function upsertRows(rows: LeadRow[]): Promise<void> {
   for (let i = 0; i < rows.length; i += 200) {
@@ -162,14 +228,14 @@ async function upsertRows(rows: LeadRow[]): Promise<void> {
   }
 }
 
-async function existingRows(companyId: string, ids: number[]): Promise<Map<number, LeadRow>> {
+async function existingRows(companyId: string, ids: number[], cols = ROW_COLS): Promise<Map<number, LeadRow>> {
   const out = new Map<number, LeadRow>();
   for (let i = 0; i < ids.length; i += 200) {
     const { data, error } = await supabase
-      .from('crm_leads').select(ROW_COLS)
+      .from('crm_leads').select(cols)
       .eq('company_id', companyId).eq('provider', 'amocrm').in('lead_id', ids.slice(i, i + 200));
     if (error) throw new Error(`crm_leads o'qilmadi: ${error.message}`);
-    for (const r of (data || []) as LeadRow[]) out.set(Number(r.lead_id), r);
+    for (const r of (data || []) as unknown as LeadRow[]) out.set(Number(r.lead_id), r);
   }
   return out;
 }
@@ -178,36 +244,71 @@ const running = new Set<string>();
 
 export interface SyncResult { leads: number; stored: number; events: number; phones: number; operators: number }
 
-/** Bitta kompaniyaning amoCRM bitimlarini yangilaydi (o'zgarganlarini). */
-export async function syncCompanyDeals(companyId: string): Promise<SyncResult | null> {
+/** Bitta kompaniyaning amoCRM bitimlarini yangilaydi (o'zgarganlarini).
+ *  maxPages — bir urinishda o'qiladigan sahifalar (250 tadan). */
+export async function syncCompanyDeals(companyId: string, opts: { maxPages?: number } = {}): Promise<SyncResult | null> {
   if (running.has(companyId)) return null;
   running.add(companyId);
-  const { data: integ, error: iErr } = await supabase
+  // Kengaytirilgan rejim (crm_03 SQL ishlatilgan): hamma bitim + manba/sabab/maydonlar.
+  let extended = true;
+  let q = await supabase
     .from('company_integrations')
-    .select('id, provider, config, enabled, pull_cursor, pull_events_cursor')
+    .select('id, provider, config, enabled, pull_cursor, pull_events_cursor, pull_meta, sales_settings')
     .eq('company_id', companyId).eq('provider', 'amocrm').maybeSingle();
+  if (q.error) {
+    extended = false;
+    q = await supabase
+      .from('company_integrations')
+      .select('id, provider, config, enabled, pull_cursor, pull_events_cursor')
+      .eq('company_id', companyId).eq('provider', 'amocrm').maybeSingle() as any;
+  }
+  const integ = q.data as any;
   try {
-    if (iErr || !integ || !(integ as any).enabled) return null; // SQL hali yo'q yoki ulanmagan
-    const cfg = openConfig(integ as any) as { subdomain: string; token: string } | null;
+    if (q.error || !integ || !integ.enabled) return null; // SQL hali yo'q yoki ulanmagan
+    const cfg = openConfig(integ) as { subdomain: string; token: string } | null;
     if (!cfg) throw new Error('amoCRM tokeni o\'qilmadi — sozlamada qayta saqlang.');
     const get = makeClient(cfg.subdomain, cfg.token);
     const runStart = Math.floor(Date.now() / 1000);
     const backfillFrom = runStart - BACKFILL_DAYS * 86400;
     const result: SyncResult = { leads: 0, stored: 0, events: 0, phones: 0, operators: 0 };
+    const settings = (integ.sales_settings || {}) as { deal_field_id?: number; debt_field_id?: number };
 
-    const [stages, users] = await Promise.all([loadStages(get), loadUsers(get)]);
+    const [{ map: stages, pipelines }, userList, extra] = await Promise.all([
+      loadStages(get), loadUsers(get), extended ? loadFields(get) : Promise.resolve(null),
+    ]);
+    const users = new Map(userList.map((u) => [u.id, u]));
+    const selectIds = new Set((extra?.fields ?? []).filter((f) => f.type === 'select' || f.type === 'multiselect').map((f) => f.id));
+    const nameOf = new Map((extra?.fields ?? []).map((f) => [f.id, f.name]));
     const nowIso = new Date().toISOString();
+    if (extended && extra) {
+      const meta: CrmMeta = {
+        pipelines, users: userList, groups: extra.groups,
+        fields: extra.fields.filter((f) => selectIds.has(f.id) || f.type === 'monetary' || f.type === 'numeric').map(({ id, name, type }) => ({ id, name, type })),
+        updated_at: nowIso,
+      };
+      await supabase.from('company_integrations').update({ pull_meta: meta }).eq('id', integ.id);
+    }
+    // Sozlamada boshqa pul maydoni tanlangan bo'lsa — nomini standart nomga almashtiramiz.
+    const remapMoney = (cfs: any[] | null | undefined) => (cfs ?? []).map((f: any) => {
+      if (settings.deal_field_id && Number(f.field_id) === Number(settings.deal_field_id)) return { ...f, field_name: 'Kelishuv Summasi' };
+      if (settings.debt_field_id && Number(f.field_id) === Number(settings.debt_field_id)) return { ...f, field_name: 'Qarzdorlik' };
+      if ((settings.deal_field_id || settings.debt_field_id) && /kelishuv summa|^qarzdorlik/i.test(normName(f.field_name ?? nameOf.get(Number(f.field_id))))) return { ...f, field_name: '—' };
+      return f;
+    });
 
-    // 1) O'zgargan bitimlar
-    let cursor = Number((integ as any).pull_cursor) || backfillFrom;
-    for (let page = 1; page <= MAX_LEAD_PAGES; page++) {
-      const j = await get(`/api/v4/leads?with=contacts&limit=250&page=${page}&filter[updated_at][from]=${cursor}&order[updated_at]=asc`);
+    // 1) O'zgargan bitimlar. Birinchi marta (kengaytirilgan) — hammasi.
+    let cursor = Number(integ.pull_cursor) || (extended ? 0 : backfillFrom);
+    const maxPages = opts.maxPages ?? MAX_LEAD_PAGES;
+    const cols = extended ? EXT_COLS : ROW_COLS;
+    for (let page = 1; page <= maxPages; page++) {
+      const j = await get(`/api/v4/leads?with=contacts,loss_reason&limit=250&page=${page}&filter[updated_at][from]=${cursor}&order[updated_at]=asc`);
       const leads: any[] = j?._embedded?.leads ?? [];
       if (!leads.length) break;
       result.leads += leads.length;
-      const prev = await existingRows(companyId, leads.map((l) => Number(l.id)));
+      const prev = await existingRows(companyId, leads.map((l) => Number(l.id)), cols);
       const rows: LeadRow[] = [];
       for (const l of leads) {
+        if (l.is_deleted) continue;
         const id = Number(l.id);
         const st = stages.get(`${l.pipeline_id}:${l.status_id}`);
         const price = Number(l.price) || 0;
@@ -215,8 +316,9 @@ export async function syncCompanyDeals(companyId: string): Promise<SyncResult | 
           statusId: Number(l.status_id), statusName: st?.statusName ?? '', hasChek: !!st?.hasChek, hasPay: !!st?.hasPay, price,
         });
         const old = prev.get(id);
-        if (!old && !PAY_KINDS.includes(kind)) continue; // pulga aloqasi yo'q — saqlanmaydi
-        const { dealSum, debt, payType } = leadMoney(price, l.custom_fields_values);
+        if (!extended && !old && !PAY_KINDS.includes(kind)) continue; // eski rejim: faqat pulga aloqadorlar
+        const cfs = remapMoney(l.custom_fields_values);
+        const { dealSum, debt, payType } = leadMoney(price, cfs);
         const moved = !old || Number(old.status_id) !== Number(l.status_id) || Number(old.pipeline_id) !== Number(l.pipeline_id);
         const fallbackAt = iso(Number(l.status_id) === 142 || Number(l.status_id) === 143 ? l.closed_at || l.updated_at : l.updated_at);
         const stageAt = moved ? fallbackAt : old!.stage_at;
@@ -224,12 +326,12 @@ export async function syncCompanyDeals(companyId: string): Promise<SyncResult | 
         const contactId = contact ? Number(contact.id) : null;
         const sameContact = !!old && Number(old.contact_id) === Number(contactId);
         const rid = Number(l.responsible_user_id) || null;
-        rows.push({
+        const row: LeadRow = {
           company_id: companyId, provider: 'amocrm', lead_id: id, name: l.name ? String(l.name).slice(0, 200) : null,
           pipeline_id: Number(l.pipeline_id), pipeline_name: st?.pipelineName ?? null,
           status_id: Number(l.status_id), status_name: st?.statusName ?? null,
           pay_kind: kind, price, deal_sum: dealSum, debt, payment_type: payType,
-          responsible_id: rid, responsible_name: rid ? users.get(rid) ?? null : null,
+          responsible_id: rid, responsible_name: rid ? users.get(rid)?.name ?? null : null,
           contact_id: contactId,
           client_phone9: sameContact ? old!.client_phone9 : null,
           // Bosqich o'zgarsa operator qayta aniqlanadi (to'lovdan oldingi oxirgi qo'ng'iroq).
@@ -237,10 +339,24 @@ export async function syncCompanyDeals(companyId: string): Promise<SyncResult | 
           call_id: sameContact && !moved ? old!.call_id : null,
           stage_at: stageAt,
           first_paid_at: PAY_KINDS.includes(kind)
-            ? [old?.first_paid_at, stageAt].filter(Boolean).sort()[0] ?? null
+            ? [old?.first_paid_at, stageAt].filter((x): x is string => !!x).sort()[0] ?? null
             : old?.first_paid_at ?? null,
           crm_created_at: iso(l.created_at), crm_updated_at: iso(l.updated_at), synced_at: nowIso,
-        });
+        };
+        if (extended) {
+          const src = leadSource(l.custom_fields_values);
+          const lossName = l._embedded?.loss_reason?.[0]?.name ?? (l.loss_reason_id ? extra?.lossReasons.get(Number(l.loss_reason_id)) : null);
+          const lostField = (l.custom_fields_values ?? []).find((f: any) => /^lost sababi|причина отказа/.test(normName(f.field_name)));
+          Object.assign(row, {
+            source: src.source, utm_source: src.utmSource, utm_content: src.utmContent,
+            loss_reason: Number(l.status_id) === 143 ? (lossName ?? (lostField?.values?.[0]?.value ? String(lostField.values[0].value) : null)) : null,
+            lost_from_status_id: Number(l.status_id) === 143 ? old?.lost_from_status_id ?? null : null,
+            group_id: rid ? users.get(rid)?.group_id ?? null : null,
+            closed_at: iso(l.closed_at),
+            cf: selectValues(l.custom_fields_values, selectIds),
+          });
+        }
+        rows.push(row);
       }
       await upsertRows(rows);
       result.stored += rows.length;
@@ -248,53 +364,65 @@ export async function syncCompanyDeals(companyId: string): Promise<SyncResult | 
       if (leads.length < 250) break;
     }
 
-    // 2) Bosqichga o'tgan aniq vaqt — hodisalardan (faqat to'lov bosqichlari)
-    const eventsFrom = Number((integ as any).pull_events_cursor) || runStart - Math.max(BACKFILL_DAYS, 365) * 86400;
-    const payStages = [...stages.entries()]
+    // 2) Bosqichga o'tgan aniq vaqt — hodisalardan (to'lov bosqichlari va rad etish)
+    const eventsFrom = Number(integ.pull_events_cursor) || runStart - Math.max(BACKFILL_DAYS, 365) * 86400;
+    const watch = [...stages.entries()]
       .filter(([k, s]) => {
         const sid = Number(k.split(':')[1]);
-        return PAY_KINDS.includes(classifyStage({ statusId: sid, statusName: s.statusName, hasChek: s.hasChek, hasPay: s.hasPay, price: 0 }));
+        const kind = classifyStage({ statusId: sid, statusName: s.statusName, hasChek: s.hasChek, hasPay: s.hasPay, price: 0 });
+        return PAY_KINDS.includes(kind) || (extended && kind === 'lost');
       })
       .map(([k]) => k.split(':').map(Number) as [number, number]);
-    const evByLead = new Map<number, Array<{ at: string; pipeline: number; status: number }>>();
-    for (let i = 0; i < payStages.length; i += 10) {
-      const chunk = payStages.slice(i, i + 10);
+    const evByLead = new Map<number, Array<{ at: string; pipeline: number; status: number; before: number | null }>>();
+    for (let i = 0; i < watch.length; i += 10) {
+      const chunk = watch.slice(i, i + 10);
       const filt = chunk.map(([p, s], k) =>
         `&filter[value_after][leads_statuses][${k}][pipeline_id]=${p}&filter[value_after][leads_statuses][${k}][status_id]=${s}`).join('');
-      for (let page = 1; page <= 50; page++) {
+      for (let page = 1; page <= 100; page++) {
         const j = await get(`/api/v4/events?limit=100&page=${page}&filter[type]=lead_status_changed&filter[created_at][from]=${eventsFrom}${filt}`);
         const evs: any[] = j?._embedded?.events ?? [];
         for (const e of evs) {
           const after = e.value_after?.[0]?.lead_status;
           if (!after) continue;
           const lid = Number(e.entity_id);
-          evByLead.set(lid, [...(evByLead.get(lid) || []), { at: iso(e.created_at)!, pipeline: Number(after.pipeline_id), status: Number(after.id) }]);
+          const before = e.value_before?.[0]?.lead_status?.id;
+          evByLead.set(lid, [...(evByLead.get(lid) || []), { at: iso(e.created_at)!, pipeline: Number(after.pipeline_id), status: Number(after.id), before: before != null ? Number(before) : null }]);
         }
         result.events += evs.length;
         if (evs.length < 100) break;
       }
     }
     if (evByLead.size) {
-      const rows = await existingRows(companyId, [...evByLead.keys()]);
+      const rows = await existingRows(companyId, [...evByLead.keys()], cols);
       const changed: LeadRow[] = [];
       for (const [lid, evs] of evByLead) {
         const r = rows.get(lid);
         if (!r) continue;
-        const cur = evs.filter((e) => e.pipeline === Number(r.pipeline_id) && e.status === Number(r.status_id)).map((e) => e.at).sort();
-        const first = [r.first_paid_at, ...evs.map((e) => e.at)].filter(Boolean).sort()[0] ?? null;
-        const stageAt = cur.length ? cur[cur.length - 1] : r.stage_at;
-        if (stageAt !== r.stage_at || first !== r.first_paid_at) changed.push({ ...r, stage_at: stageAt, first_paid_at: first });
+        const cur = evs.filter((e) => e.pipeline === Number(r.pipeline_id) && e.status === Number(r.status_id)).sort((a, b) => a.at.localeCompare(b.at));
+        const payEvs = evs.filter((e) => {
+          const s = stages.get(`${e.pipeline}:${e.status}`);
+          return s && PAY_KINDS.includes(classifyStage({ statusId: e.status, statusName: s.statusName, hasChek: s.hasChek, hasPay: s.hasPay, price: Number(r.price) || 0 }));
+        });
+        const first = PAY_KINDS.includes(r.pay_kind)
+          ? [r.first_paid_at, ...payEvs.map((e) => e.at)].filter((x): x is string => !!x).sort()[0] ?? null
+          : r.first_paid_at;
+        const last = cur[cur.length - 1];
+        const stageAt = last ? last.at : r.stage_at;
+        const lostFrom = extended && Number(r.status_id) === 143 && last?.before ? last.before : r.lost_from_status_id ?? null;
+        if (stageAt !== r.stage_at || first !== r.first_paid_at || (extended && lostFrom !== (r.lost_from_status_id ?? null))) {
+          changed.push({ ...r, stage_at: stageAt, first_paid_at: first, ...(extended ? { lost_from_status_id: lostFrom } : {}) });
+        }
       }
       await upsertRows(changed);
     }
 
     // 3) Mijoz raqami (kontaktdan) va 4) operator (UTel qo'ng'iroqlaridan)
     const { data: need } = await supabase
-      .from('crm_leads').select(ROW_COLS)
+      .from('crm_leads').select(cols)
       .eq('company_id', companyId).eq('provider', 'amocrm').in('pay_kind', PAY_KINDS)
       .or('client_phone9.is.null,operator_ext.is.null')
       .order('stage_at', { ascending: false }).limit(1000);
-    const pending = (need || []) as LeadRow[];
+    const pending = (need || []) as unknown as LeadRow[];
     const contactIds = [...new Set(pending.filter((r) => !r.client_phone9 && r.contact_id).map((r) => Number(r.contact_id)))];
     const phoneByContact = new Map<number, string>();
     for (let i = 0; i < contactIds.length; i += 50) {
@@ -342,11 +470,11 @@ export async function syncCompanyDeals(companyId: string): Promise<SyncResult | 
 
     await supabase.from('company_integrations')
       .update({ pull_cursor: cursor, pull_events_cursor: runStart - 120, pull_at: new Date().toISOString(), pull_error: null })
-      .eq('id', (integ as any).id);
+      .eq('id', integ.id);
     return result;
   } catch (e: any) {
     const msg = String(e?.message || e).slice(0, 300);
-    if (integ) await supabase.from('company_integrations').update({ pull_error: msg }).eq('id', (integ as any).id);
+    if (integ) await supabase.from('company_integrations').update({ pull_error: msg }).eq('id', integ.id);
     console.warn(`amoCRM bitimlar sinxroni xatosi (company=${companyId}):`, msg);
     throw e;
   } finally {
