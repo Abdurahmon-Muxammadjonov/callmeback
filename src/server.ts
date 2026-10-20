@@ -27,6 +27,7 @@ import criteriaRouter from './routes/criteria';
 import callsRouter from './routes/calls';
 import analyticsRouter from './routes/analytics';
 import salesRouter from './routes/sales';
+import { prewarmSalesCache } from './lib/salesDashboard';
 import assistantRouter from './routes/assistant';
 import amoWebhookRouter from './routes/amocrm-webhook';
 import managementRouter from './routes/management';
@@ -248,6 +249,8 @@ function startServer(port: number, isRetry = false): void {
   const role = processRole();
   const server = (servesApi() ? app : workerApp).listen(port, () => {
     console.log(`⚡ server is running in ${port} port (ROLE=${role})`);
+    // Sotuv dashboardi keshi — API'da (so'rovlar shu yerga keladi), 10 s dan keyin.
+    if (servesApi()) setTimeout(() => { void prewarmSalesCache().catch(() => {}); }, 10_000).unref();
     if (runsBackgroundJobs()) {
       startBackgroundJobs();
     } else {

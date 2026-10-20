@@ -115,10 +115,22 @@ async function loadLeads(companyId: string): Promise<Lead[]> {
   return out;
 }
 
-const cache = new Map<string, { pullAt: string | null; loadedAt: number; leads: Promise<Lead[]> }>();
+// stale — oxirgi tayyor ro'yxat: yangisi fonda yuklanayotganda shu beriladi
+// (26 000 qatorni o'qish ~15 s — foydalanuvchi kutmasin).
+const cache = new Map<string, { pullAt: string | null; loadedAt: number; leads: Promise<Lead[]>; stale: Lead[] | null }>();
 
 export function invalidateSalesCache(companyId: string): void {
-  cache.delete(companyId);
+  const c = cache.get(companyId);
+  if (c) c.loadedAt = 0; // keyingi so'rovda fonda qayta o'qiladi
+}
+
+/** API ishga tushganda keshni oldindan to'ldiradi (birinchi ochilish kutmasin). */
+export async function prewarmSalesCache(): Promise<void> {
+  const { data, error } = await supabase.from('company_integrations').select('company_id').eq('provider', 'amocrm').eq('enabled', true);
+  if (error) return;
+  for (const r of (data || []) as Array<{ company_id: string }>) {
+    try { await loadContext(r.company_id); } catch { /* keyingi so'rovda */ }
+  }
 }
 
 /** Integratsiya + bitimlar (xotiradan). null — amoCRM ulanmagan; 'not_ready' — SQL yo'q. */
@@ -136,12 +148,15 @@ export async function loadContext(companyId: string): Promise<Ctx | null | 'not_
   const fullScan = !(Number((integ as any).pull_cursor) > 0);
   let c = cache.get(companyId);
   if (!c || c.pullAt !== key || Date.now() - c.loadedAt > (fullScan ? 60_000 : 30 * 60_000)) {
+    const prev = c;
     const p = loadLeads(companyId);
-    c = { pullAt: key, loadedAt: Date.now(), leads: p };
-    cache.set(companyId, c);
-    p.catch(() => cache.delete(companyId));
+    const entry = { pullAt: key, loadedAt: Date.now(), leads: p, stale: prev?.stale ?? null };
+    cache.set(companyId, entry);
+    p.then((ls) => { entry.stale = ls; }, () => { if (cache.get(companyId) === entry) cache.set(companyId, prev ?? entry); });
+    c = entry;
   }
-  const leads = await c.leads;
+  // Tayyor ro'yxat bo'lsa — darhol (yangisi fonda); birinchi marta — kutamiz.
+  const leads = c.stale ?? (await c.leads);
   return {
     companyId,
     subdomain: String((integ as any).config?.subdomain ?? ''),
