@@ -74,7 +74,23 @@ router.put('/:provider', async (req: CompanyAuthedRequest, res: Response) => {
     const token = typeof body.token === 'string' ? body.token.trim() : '';
     const tokenEnc = token ? encryptFor(CRM_SECRET_PURPOSE, token) : old.token_enc;
     if (!tokenEnc) return res.status(400).json({ success: false, error: 'amoCRM uzoq muddatli tokenini kiriting.' });
-    config = { subdomain, token_enc: tokenEnc };
+    // Haqiqiy subdomen — tokenning o'zidan (2026-10-20). Direktor brauzerdagi
+    // nomni (masalan "jamals") yozgan, token esa "marifatjamal" akkauntiniki
+    // edi — amoCRM 401 qaytardi. amoCRM bu manzilda token egasining
+    // subdomenini beradi; olinmasa kiritilgani qoladi.
+    let realSub = subdomain;
+    if (token) {
+      try {
+        const r = await fetch('https://www.amocrm.ru/oauth2/account/subdomain', {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (r.status === 401) return res.status(400).json({ success: false, error: 'amoCRM tokenni qabul qilmadi — «Долгосрочный токен»ni qayta nusxalang.' });
+        const j: any = r.ok ? await r.json() : null;
+        if (j?.domain) realSub = String(j.domain);
+      } catch { /* tarmoq xatosi — kiritilgan subdomen bilan davom etamiz */ }
+    }
+    config = { subdomain: realSub, token_enc: tokenEnc };
   } else {
     const url = String(body.url ?? '').trim();
     if (!isSafeWebhookUrl(url)) return res.status(400).json({ success: false, error: 'Webhook manzili https:// bilan boshlanadigan tashqi manzil bo\'lsin.' });
