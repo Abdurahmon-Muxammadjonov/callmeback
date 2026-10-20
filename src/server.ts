@@ -27,6 +27,8 @@ import criteriaRouter from './routes/criteria';
 import callsRouter from './routes/calls';
 import analyticsRouter from './routes/analytics';
 import salesRouter from './routes/sales';
+import assistantRouter from './routes/assistant';
+import amoWebhookRouter from './routes/amocrm-webhook';
 import managementRouter from './routes/management';
 import notificationsRouter from './routes/notifications';
 import shiftsRouter from './routes/shifts';
@@ -102,6 +104,7 @@ app.use('/auth', companyAuthRouter);
 app.use('/company', companyRouter);
 app.use('/company', companySectionsRouter);
 app.use('/company', companyWebhooksRouter);
+app.use('/webhooks/amocrm', amoWebhookRouter); // amoCRM o'zgarish signali → darhol sinxron
 app.use('/webhooks', webhooksIncomingRouter);
 // XODIM (operator) TOKENI — 2026-10-15: kompaniya miqyosidagi bo'limlar
 // faqat direktor/admin uchun; xodim o'z kabinetini /api/me orqali ko'radi
@@ -118,6 +121,7 @@ app.use('/api/analytics', blockOperators(onlyCalendar));
 app.use('/api/management', blockOperators());
 app.use('/api/analyze-call', blockOperators());
 app.use('/api/me', meRouter);
+app.use('/api/assistant', assistantRouter); // AI yordamchi (GPT) — lib/assistant.ts
 app.use('/company/telegram', companyTelegramRouter);
 app.use('/company/integrations', companyIntegrationsRouter);
 app.use('/dashboard', dashboardRouter);

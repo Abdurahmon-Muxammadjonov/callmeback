@@ -4,6 +4,7 @@ import { requireAuth, requireCompanyRole, type CompanyAuthedRequest } from '../m
 import { addDays, monthStartOf, tashkentDay } from '../lib/tashkentTime';
 import { buildSalesDashboard, invalidateSalesCache, searchLeads, type Query, type SalesSettings } from '../lib/salesDashboard';
 import { sendReportToChat } from '../lib/telegramReport';
+import { amoWebhookUrl } from './amocrm-webhook';
 
 // ============================================================================
 // /analytics/sales — SOTUV DASHBOARDI (2026-10-20, lib/salesDashboard.ts).
@@ -14,7 +15,6 @@ import { sendReportToChat } from '../lib/telegramReport';
 //   GET    /settings | PUT /settings   — pul maydonlari, potensial bosqichlar,
 //                                        menejer ↔ operator
 //   POST   /telegram                   — qisqa hisobot Telegram chatlarga
-//   POST   /ask                        — AI yordamchi (dashboard raqamlari bo'yicha)
 // Kompaniya — faqat tokendan; xodim (operator) /analytics'ga kira olmaydi.
 // ============================================================================
 
@@ -117,6 +117,7 @@ router.get('/settings', async (req: CompanyAuthedRequest, res: Response) => {
       fields: (meta?.fields ?? []).filter((f: any) => f.type === 'monetary' || f.type === 'numeric'),
       pipelines: meta?.pipelines ?? [],
       users: (meta?.users ?? []).filter((u: any) => u.active),
+      webhook_url: data ? amoWebhookUrl(req.auth!.companyId as string) : null,
     },
   });
 });
@@ -187,49 +188,6 @@ router.post('/telegram', adminOnly, async (req: CompanyAuthedRequest, res: Respo
     try { await sendReportToChat(c.chat_id, text); sent += 1; } catch { /* bloklangan chat */ }
   }
   return res.status(200).json({ success: true, data: { sent } });
-});
-
-// ----------------------------------------------------------- AI yordamchi
-router.post('/ask', async (req: CompanyAuthedRequest, res: Response) => {
-  const question = typeof req.body?.question === 'string' ? req.body.question.trim().slice(0, 600) : '';
-  if (!question) return res.status(400).json({ success: false, error: 'Savol yozing.' });
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) return res.status(503).json({ success: false, error: 'AI yordamchi sozlanmagan (OPENAI_API_KEY).' });
-  const q = parseQuery({ ...(req.query as Record<string, unknown>), ...(req.body ?? {}) });
-  const d = await buildSalesDashboard(req.auth!.companyId as string, q);
-  if (!d.ready || !('widgets' in d) || !d.meta) return res.status(400).json({ success: false, error: 'amoCRM ma\'lumoti hali yo\'q.' });
-  // Modelga faqat yig'ma raqamlar (mijoz ismlari va telefonlar yuborilmaydi).
-  const w: any = d.widgets;
-  const compact = {
-    range: d.meta.range, prev: d.meta.prev,
-    kpis: w.kpis, debt: w.debt?.error ? null : { total: w.debt.total, count: w.debt.count, managers: w.debt.managers.slice(0, 15) },
-    funnel: w.funnel, sources: w.sources?.error ? null : { total: w.sources.total, leads: w.sources.leads.slice(0, 12), channels: w.sources.channels.slice(0, 12) },
-    lost: w.lost, comparison: w.comparison,
-    managers: w.managers?.error ? null : w.managers.rows.map((r: any) => ({ name: r.name, leads: r.leads, inWork: r.inWork, sales: r.sales, sum: r.sum, conv: r.conv, avg: r.avg, calls: r.calls, talkSec: r.talkSec, oldestDays: r.oldestDays })),
-    ai: w.ai?.error ? null : { total: w.ai.total, analyzed: w.ai.analyzed, avg: w.ai.avg, results: w.ai.results, operators: w.ai.operators },
-    launch: w.launch?.error ? null : w.launch.plan ? { plan: w.launch.plan.amount, fact: w.launch.fact, paid: w.launch.paid, expected: w.launch.expected, potential: w.launch.potential, daysLeft: w.launch.daysLeft } : null,
-  };
-  const lang = String(req.headers['accept-language'] ?? 'uz').slice(0, 2);
-  try {
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: process.env.OPENAI_ANALYZE_MODEL || 'gpt-4o-mini',
-        temperature: 0.2,
-        messages: [
-          { role: 'system', content: `Sen sotuv bo'limi tahlilchisisan. Faqat berilgan JSON raqamlariga tayan, raqam o'ylab topma. Summalar — so'm. Qisqa va aniq javob ber (5–8 gap yoki ro'yxat). Javob tili: ${lang === 'ru' ? 'rus' : lang === 'en' ? 'ingliz' : "o'zbek (lotin)"}. Ta'riflar: sotuv — davrda to'lov bosqichiga o'tgan bitim; sum — kelishuv summasi; paid — to'langan; debt — qarz.` },
-          { role: 'user', content: `Dashboard ma'lumoti:\n${JSON.stringify(compact).slice(0, 60_000)}\n\nSavol: ${question}` },
-        ],
-      }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (!resp.ok) throw new Error(`AI HTTP ${resp.status}`);
-    const j: any = await resp.json();
-    return res.status(200).json({ success: true, data: { answer: String(j?.choices?.[0]?.message?.content ?? '').trim() } });
-  } catch (e: any) {
-    return res.status(502).json({ success: false, error: e?.message || 'AI javob bermadi.' });
-  }
 });
 
 export default router;

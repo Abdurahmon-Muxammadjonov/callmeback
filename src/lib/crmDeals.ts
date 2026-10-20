@@ -502,10 +502,11 @@ export async function syncCompanyDeals(companyId: string, opts: { maxPages?: num
   }
 }
 
-/** Worker: hamma ulangan kompaniyalar, har CRM_PULL_MINUTES (standart 10). */
+/** Worker: hamma ulangan kompaniyalar, har CRM_PULL_MINUTES (standart 2). */
 let pullStarted = false;
 export function startCrmDealsSync(): void {
-  const minutes = Number(process.env.CRM_PULL_MINUTES ?? 10);
+  // Standart 2 daqiqa: o'zgarganlarni o'qish arzon (bir necha so'rov), CRM'dagi o'zgarish tez ko'rinadi.
+  const minutes = Number(process.env.CRM_PULL_MINUTES ?? 2);
   if (pullStarted || !(minutes > 0)) return;
   pullStarted = true;
   const tick = async () => {

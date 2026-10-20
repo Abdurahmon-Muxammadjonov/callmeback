@@ -124,15 +124,20 @@ export function invalidateSalesCache(companyId: string): void {
 /** Integratsiya + bitimlar (xotiradan). null — amoCRM ulanmagan; 'not_ready' — SQL yo'q. */
 export async function loadContext(companyId: string): Promise<Ctx | null | 'not_ready'> {
   const { data: integ, error } = await supabase
-    .from('company_integrations').select('config, pull_at, pull_error, pull_meta, sales_settings')
+    .from('company_integrations').select('config, pull_at, pull_error, pull_meta, sales_settings, pull_cursor')
     .eq('company_id', companyId).eq('provider', 'amocrm').maybeSingle();
   if (error) return 'not_ready';
   if (!integ) return null;
   const pullAt = (integ as any).pull_at ?? null;
+  // Kesh kaliti — pull_cursor: u faqat amoCRM'da bitim o'zgarganda siljiydi
+  // (sinxron har 2 daqiqada pull_at'ni yangilaydi — har safar 26 000 qatorni
+  // qayta o'qimaslik uchun). To'liq yuklash davomida (≤ 0) — har daqiqada.
+  const key = String((integ as any).pull_cursor ?? 'null');
+  const fullScan = !(Number((integ as any).pull_cursor) > 0);
   let c = cache.get(companyId);
-  if (!c || c.pullAt !== pullAt || Date.now() - c.loadedAt > 30 * 60_000) {
+  if (!c || c.pullAt !== key || Date.now() - c.loadedAt > (fullScan ? 60_000 : 30 * 60_000)) {
     const p = loadLeads(companyId);
-    c = { pullAt, loadedAt: Date.now(), leads: p };
+    c = { pullAt: key, loadedAt: Date.now(), leads: p };
     cache.set(companyId, c);
     p.catch(() => cache.delete(companyId));
   }
