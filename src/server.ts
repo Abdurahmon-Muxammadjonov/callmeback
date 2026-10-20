@@ -10,6 +10,7 @@ import meRouter from './routes/me';
 import companyTelegramRouter from './routes/company-telegram';
 import companyIntegrationsRouter from './routes/company-integrations';
 import { startTelegramReportScheduler } from './lib/telegramReport';
+import { startCrmDealsSync } from './lib/crmDeals';
 import { blockOperators } from './lib/operatorScope';
 import companyAuthRouter from './routes/company-auth';
 import companyRouter from './routes/company';
@@ -188,6 +189,7 @@ function startBackgroundJobs(): void {
   // Eski failed'lar ham shu navbatdan o'tadi.
   startUtelWorker();
   startTelegramReportScheduler(); // kun hisoboti Telegramga (lib/telegramReport.ts)
+  startCrmDealsSync(); // amoCRM'dan to'lov/qarz ma'lumotlari (lib/crmDeals.ts)
 
   // OPERATOR TAVSIYALARI (API v2 §10) — staff-stats GET so'rovi GPT
   // chaqirmaydi, matn shu jobda tayyorlanib operator_insights jadvaliga

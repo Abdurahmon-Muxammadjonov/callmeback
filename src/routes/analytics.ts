@@ -7,6 +7,7 @@ import { getCompanySettings } from '../lib/companySettings';
 import { addDays, dayBounds, isHhMm, tashkentDay, tashkentDayStart } from '../lib/tashkentTime';
 import { reportRpc } from '../lib/reportRpc';
 import { operatorNamesByExt } from '../lib/operatorNames';
+import { computeCrmMoney } from '../lib/crmDeals';
 import { computeLeadQuality } from '../lib/leadQuality';
 import {
   buildAnalyticsRoot, buildDailySummary, buildHourly, buildDailyMinutes, buildStaffStats,
@@ -560,6 +561,30 @@ router.get('/lead-quality', requireAuth, async (req: CompanyAuthedRequest, res: 
     return res.status(200).json({ success: true, from, to, data });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Lid sifati hisobotida xatolik.' });
+  }
+});
+
+// ============================================================================
+// GET /analytics/crm-money?from=YYYY-MM-DD&to=YYYY-MM-DD — CRM'DAGI PUL
+// (2026-10-20, foydalanuvchi talabi: "CRM'ni ulab, ichidagi pul
+// ma'lumotlarini olish"). Manba — amoCRM bitimlari (lib/crmDeals.ts):
+// tanlangan davrda to'lov bosqichiga o'tganlar — to'langan summa (Бюджет),
+// to'liq / chek kutilmoqda / qisman, qarz (Qarzdorlik), operator va menejer
+// kesimi. Oraliq ko'pi bilan 92 kun.
+// ============================================================================
+router.get('/crm-money', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
+  try {
+    const companyId = req.auth!.companyId as string;
+    const re = /^\d{4}-\d{2}-\d{2}$/;
+    const today = tashkentDay(new Date());
+    const to = typeof req.query.to === 'string' && re.test(req.query.to) ? req.query.to : today;
+    let from = typeof req.query.from === 'string' && re.test(req.query.from) ? req.query.from : to;
+    if (from > to) from = to;
+    if (addDays(from, 92) < to) from = addDays(to, -91);
+    const data = await computeCrmMoney(companyId, from, to);
+    return res.status(200).json({ success: true, from, to, data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'CRM pul hisobotida xatolik.' });
   }
 });
 

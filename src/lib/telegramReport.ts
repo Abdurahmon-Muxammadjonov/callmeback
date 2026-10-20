@@ -19,6 +19,7 @@ import { addDays, dayBounds, tashkentDay } from './tashkentTime';
 import { getCompanySettings } from './companySettings';
 import { operatorNamesByExt } from './operatorNames';
 import { computeLeadQuality } from './leadQuality';
+import { computeCrmMoney } from './crmDeals';
 import { bot1 } from '../telegram/bot1Client';
 
 interface OpItem { key: string; ext: string | null; calls: number; long_calls: number; scored: number; score10_sum: number; talk_sec: number }
@@ -30,6 +31,7 @@ function esc(s: string): string {
 }
 const n = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const dayLabel = (day: string) => `${Number(day.slice(8, 10))}-${MONTHS_UZ[Number(day.slice(5, 7)) - 1]}`;
+const sum = (v: number) => Math.round(v).toLocaleString('ru-RU').replace(/\u00a0/g, ' ');
 const hm = (sec: number) => `${Math.floor(sec / 3600)}:${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}`;
 
 /** Kun hisoboti matni (Telegram HTML). */
@@ -73,6 +75,13 @@ export async function buildDailyReport(companyId: string, day: string = tashkent
     lines.push(`🎯 Lidlar: <b>${lq.qualified}</b> sifatli · <b>${lq.unqualified}</b> sifatsiz`);
     const top = lq.reasons.slice(0, 3).map((r) => `${esc(r.reason)} — ${r.count}`);
     if (top.length) lines.push(`   Sifatsiz sabablari: ${top.join('; ')}`);
+  }
+  // CRM'dagi pul (amoCRM ulangan bo'lsa; lib/crmDeals.ts).
+  const money = await computeCrmMoney(companyId, day, day).catch(() => null);
+  if (money && 'totals' in money && money.totals && money.totals.deals > 0) {
+    const t = money.totals;
+    lines.push(`💰 To'lovlar: <b>${t.deals}</b> ta · <b>${sum(t.paid)}</b> so'm (to'liq ${t.full.count}, chek kutilmoqda ${t.pending.count}, qisman ${t.partial.count})`);
+    if (t.debt > 0) lines.push(`   Qarzdorlik: ${sum(t.debt)} so'm`);
   }
   if (ranked.length) {
     const best = ranked[0];

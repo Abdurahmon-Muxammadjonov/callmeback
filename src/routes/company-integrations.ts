@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { requireAuth, requireCompanyRole, type CompanyAuthedRequest } from '../middleware/companyAuth';
 import { encryptFor } from '../lib/passwordVault';
 import { buildCallPayload, CRM_SECRET_PURPOSE, pushOne } from '../lib/crmPush';
+import { syncCompanyDeals } from '../lib/crmDeals';
 
 // ============================================================================
 // /company/integrations — kompaniyaning CRM integratsiyalari (2026-10-16).
@@ -10,6 +11,7 @@ import { buildCallPayload, CRM_SECRET_PURPOSE, pushOne } from '../lib/crmPush';
 //   PUT    /:provider        — amocrm {subdomain, token?} | webhook {url, secret?}
 //   PATCH  /:provider        — {enabled}
 //   POST   /:provider/test   — oxirgi tahlil qilingan qo'ng'iroqni yuborib ko'rish
+//   POST   /amocrm/sync      — amoCRM'dan pul ma'lumotlarini hozir yangilash
 //   DELETE /:provider
 // Faqat direktor/admin; kompaniya tokendan. Sirlar AES-GCM bilan shifrlanadi.
 // ============================================================================
@@ -140,6 +142,14 @@ router.post('/:provider/test', async (req: CompanyAuthedRequest, res: Response) 
     await supabase.from('company_integrations').update({ last_error: msg }).eq('id', (row as any).id);
     return res.status(502).json({ success: false, error: msg });
   }
+});
+
+// POST /amocrm/sync — pul ma'lumotlarini hozir yangilash (fonda; natija
+// /analytics/crm-money'da). Worker baribir har 10 daqiqada yangilaydi.
+router.post('/amocrm/sync', async (req: CompanyAuthedRequest, res: Response) => {
+  const companyId = req.auth!.companyId as string;
+  void syncCompanyDeals(companyId).catch(() => { /* pull_error'ga yozilgan */ });
+  return res.status(202).json({ success: true, data: { started: true } });
 });
 
 router.delete('/:provider', async (req: CompanyAuthedRequest, res: Response) => {
