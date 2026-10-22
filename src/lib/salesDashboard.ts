@@ -231,7 +231,10 @@ function namesOf(meta: CrmMeta | null): Names {
     userRaw: users,
     user: (id) => (id == null ? '—' : cleanManagerName(users.get(id)?.name) ?? `#${id}`),
     pipeline: (id) => pipes.get(id)?.name ?? `#${id}`,
-    status: (p, s) => pipes.get(p)?.statuses.find((x) => x.id === s)?.name ?? (s === 142 ? 'Успешно' : s === 143 ? 'Закрыто' : `#${s}`),
+    // Bitim voronkadan voronkaga ko'chgan bo'lishi mumkin — bosqich boshqa voronkada ham qidiriladi.
+    status: (p, s) => pipes.get(p)?.statuses.find((x) => x.id === s)?.name
+      ?? [...pipes.values()].flatMap((x) => x.statuses).find((x) => x.id === s)?.name
+      ?? (s === 142 ? 'Успешно' : s === 143 ? 'Закрыто' : `#${s}`),
     statusSort: (p, s) => pipes.get(p)?.statuses.find((x) => x.id === s)?.sort ?? 0,
   };
 }
@@ -442,12 +445,21 @@ function comparison(ctx: Ctx, q: Query) {
   return { rows, current: rows[rows.length - 1] };
 }
 
+/** Manba nomi: katta-kichik harf va qisqartmalar birlashtiriladi ("instagram", "Instagram", "ig" → "Instagram"). */
+const SOURCE_ALIAS: Record<string, string> = { ig: 'Instagram', insta: 'Instagram', instagram: 'Instagram', tg: 'Telegram', telegram: 'Telegram', fb: 'Facebook', facebook: 'Facebook', yt: 'YouTube', youtube: 'YouTube' };
+export function sourceKey(raw: string | null): string {
+  const v = String(raw ?? '').trim();
+  if (!v) return '—';
+  const low = v.toLowerCase();
+  return SOURCE_ALIAS[low] ?? v.charAt(0).toUpperCase() + v.slice(1);
+}
+
 function sources(ctx: Ctx, q: Query) {
   const [a, b] = bounds(q);
   const leads = leadsIn(ctx.leads, a, b, q);
   const sales = salesIn(ctx.leads, a, b, q);
   const by = new Map<string, { leads: number; sales: number; sum: number }>();
-  const key = (l: Lead) => l.source || '—';
+  const key = (l: Lead) => sourceKey(l.source);
   for (const l of leads) { const r = by.get(key(l)) || { leads: 0, sales: 0, sum: 0 }; r.leads += 1; by.set(key(l), r); }
   for (const l of sales) { const r = by.get(key(l)) || { leads: 0, sales: 0, sum: 0 }; r.sales += 1; r.sum += amount(l); by.set(key(l), r); }
   const salesSum = sum(sales, amount);

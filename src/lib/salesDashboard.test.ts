@@ -1,7 +1,7 @@
 // Sotuv dashboardi (2026-10-20): oldingi davr, o'sish, maydonlar.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { growth, previousRange } from './salesDashboard';
+import { growth, previousRange, sourceKey } from './salesDashboard';
 import { leadSource, selectValues } from './crmDeals';
 
 test('joriy oy boshidan — o\'tgan oyning shu kunlari', () => {
@@ -34,4 +34,13 @@ test('tanlov maydonlari va manba', () => {
   assert.equal(selectValues([], new Set([1])), null);
   assert.deepEqual(leadSource(cfs), { source: 'facebook', utmSource: null, utmContent: 'ad_123' });
   assert.equal(leadSource([{ field_name: 'utm_source', field_code: 'UTM_SOURCE', values: [{ value: 'instagram' }] }]).source, 'instagram');
+});
+
+test('manba nomlari birlashtiriladi', () => {
+  assert.equal(sourceKey('instagram'), 'Instagram');
+  assert.equal(sourceKey('Instagram'), 'Instagram');
+  assert.equal(sourceKey('ig'), 'Instagram');
+  assert.equal(sourceKey(' Telegram '), 'Telegram');
+  assert.equal(sourceKey('amo_zapusk_1103'), 'Amo_zapusk_1103');
+  assert.equal(sourceKey(null), '—');
 });
