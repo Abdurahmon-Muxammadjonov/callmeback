@@ -187,10 +187,12 @@ export function selectValues(cfs: any[] | null | undefined, selectIds: Set<numbe
 }
 
 /** Manba: «Lid manbasi» maydoni, bo'lmasa utm_source. */
-export function leadSource(cfs: any[] | null | undefined): { source: string | null; utmSource: string | null; utmContent: string | null } {
+export function leadSource(cfs: any[] | null | undefined): { source: string | null; utmSource: string | null; utmContent: string | null; utmCampaign: string | null; utmMedium: string | null } {
   let source: string | null = null;
   let utmSource: string | null = null;
   let utmContent: string | null = null;
+  let utmCampaign: string | null = null;
+  let utmMedium: string | null = null;
   for (const f of cfs ?? []) {
     const n = normName(f.field_name);
     const code = String(f.field_code ?? '').toUpperCase();
@@ -199,8 +201,10 @@ export function leadSource(cfs: any[] | null | undefined): { source: string | nu
     if (/^lid manbasi|^источник/.test(n)) source = v;
     else if (code === 'UTM_SOURCE' || n === 'utm_source') utmSource = v;
     else if (code === 'UTM_CONTENT' || n === 'utm_content') utmContent = v;
+    else if (code === 'UTM_CAMPAIGN' || n === 'utm_campaign') utmCampaign = v;
+    else if (code === 'UTM_MEDIUM' || n === 'utm_medium') utmMedium = v;
   }
-  return { source: (source ?? utmSource)?.slice(0, 80) ?? null, utmSource, utmContent: utmContent?.slice(0, 120) ?? null };
+  return { source: (source ?? utmSource)?.slice(0, 80) ?? null, utmSource, utmContent: utmContent?.slice(0, 120) ?? null, utmCampaign: utmCampaign?.slice(0, 160) ?? null, utmMedium: utmMedium?.slice(0, 80) ?? null };
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +221,8 @@ type LeadRow = {
   // crm_03_sales_dashboard.sql (bo'lmasa yozilmaydi)
   source?: string | null; utm_source?: string | null; utm_content?: string | null; loss_reason?: string | null;
   lost_from_status_id?: number | null; group_id?: number | null; closed_at?: string | null; cf?: Record<string, string> | null;
+  // crm_04_target_meta.sql
+  utm_campaign?: string | null; utm_medium?: string | null;
 };
 const ROW_COLS = 'company_id, provider, lead_id, name, pipeline_id, pipeline_name, status_id, status_name, pay_kind, price, deal_sum, debt, payment_type, responsible_id, responsible_name, contact_id, client_phone9, operator_ext, call_id, stage_at, first_paid_at, crm_created_at, crm_updated_at, synced_at';
 const EXT_COLS = `${ROW_COLS}, source, utm_source, utm_content, loss_reason, lost_from_status_id, group_id, closed_at, cf`;
@@ -272,6 +278,8 @@ export async function syncCompanyDeals(companyId: string, opts: { maxPages?: num
     const backfillFrom = runStart - BACKFILL_DAYS * 86400;
     const result: SyncResult = { leads: 0, stored: 0, events: 0, phones: 0, operators: 0 };
     const settings = (integ.sales_settings || {}) as { deal_field_id?: number; debt_field_id?: number };
+    // crm_04_target_meta.sql ishlatilganmi (utm_campaign ustuni) — bo'lmasa yozilmaydi.
+    const hasUtmCampaign = extended && !(await supabase.from('crm_leads').select('utm_campaign').limit(1)).error;
 
     const [{ map: stages, pipelines }, userList, extra] = await Promise.all([
       loadStages(get), loadUsers(get), extended ? loadFields(get) : Promise.resolve(null),
@@ -365,6 +373,7 @@ export async function syncCompanyDeals(companyId: string, opts: { maxPages?: num
           const lostField = (l.custom_fields_values ?? []).find((f: any) => /^lost sababi|причина отказа/.test(normName(f.field_name)));
           Object.assign(row, {
             source: src.source, utm_source: src.utmSource, utm_content: src.utmContent,
+            ...(hasUtmCampaign ? { utm_campaign: src.utmCampaign, utm_medium: src.utmMedium } : {}),
             loss_reason: Number(l.status_id) === 143 ? (lossName ?? (lostField?.values?.[0]?.value ? String(lostField.values[0].value) : null)) : null,
             lost_from_status_id: Number(l.status_id) === 143 ? old?.lost_from_status_id ?? null : null,
             group_id: rid ? users.get(rid)?.group_id ?? null : null,
@@ -443,21 +452,40 @@ export async function syncCompanyDeals(companyId: string, opts: { maxPages?: num
       .or('client_phone9.is.null,operator_ext.is.null')
       .order('stage_at', { ascending: false }).limit(1000);
     const pending = (need || []) as unknown as LeadRow[];
-    const contactIds = [...new Set(pending.filter((r) => !r.client_phone9 && r.contact_id).map((r) => Number(r.contact_id)))];
+    // Target lidlar (kreativ yoki Instagram/Facebook manbasi, so'nggi 120 kun) —
+    // raqami AI qo'ng'iroq sifatiga bog'lash uchun kerak (lib/metaAds.ts).
+    if (extended) {
+      const { data: tl } = await supabase
+        .from('crm_leads').select(cols)
+        .eq('company_id', companyId).eq('provider', 'amocrm').is('client_phone9', null).not('contact_id', 'is', null)
+        .gte('crm_created_at', new Date(Date.now() - 120 * 86400_000).toISOString())
+        .or('utm_content.not.is.null,source.ilike.instagram,source.ilike.ig,source.ilike.facebook,source.ilike.target')
+        .order('crm_created_at', { ascending: false }).limit(1000);
+      const seen = new Set(pending.map((r) => Number(r.lead_id)));
+      for (const r of (tl || []) as unknown as LeadRow[]) if (!seen.has(Number(r.lead_id))) pending.push(r);
+    }
+    const contactIds = [...new Set(pending.filter((r) => r.client_phone9 == null && r.contact_id).map((r) => Number(r.contact_id)))].slice(0, 1500);
     const phoneByContact = new Map<number, string>();
+    const fetchedContacts = new Set<number>();
     for (let i = 0; i < contactIds.length; i += 50) {
       const ids = contactIds.slice(i, i + 50).map((id) => `filter[id][]=${id}`).join('&');
       const j = await get(`/api/v4/contacts?limit=50&${ids}`);
       for (const c of j?._embedded?.contacts ?? []) {
+        fetchedContacts.add(Number(c.id));
         const ph = (c.custom_fields_values ?? []).find((f: any) => f.field_code === 'PHONE');
         const p9 = phone9(ph?.values?.[0]?.value);
         if (p9) phoneByContact.set(Number(c.id), p9);
       }
     }
+    const noPhone = new Set<number>();
     for (const r of pending) {
       if (!r.client_phone9 && r.contact_id && phoneByContact.has(Number(r.contact_id))) {
         r.client_phone9 = phoneByContact.get(Number(r.contact_id))!;
         result.phones += 1;
+      } else if (r.client_phone9 == null && r.contact_id && fetchedContacts.has(Number(r.contact_id))) {
+        // Kontaktda raqam yo'q — '' (tekshirildi), har 2 daqiqada qayta so'ralmasin.
+        r.client_phone9 = '';
+        noPhone.add(Number(r.lead_id));
       }
     }
     const byPhone = new Map<string, Array<{ id: string; ext: string; at: string }>>();
@@ -477,7 +505,7 @@ export async function syncCompanyDeals(companyId: string, opts: { maxPages?: num
     }
     const touched: LeadRow[] = [];
     for (const r of pending) {
-      let dirty = r.client_phone9 != null && phoneByContact.get(Number(r.contact_id)) === r.client_phone9;
+      let dirty = noPhone.has(Number(r.lead_id)) || (r.client_phone9 != null && phoneByContact.get(Number(r.contact_id)) === r.client_phone9);
       if (r.client_phone9 && !r.operator_ext) {
         const calls = byPhone.get(r.client_phone9) ?? []; // yangisi birinchi
         const limit = r.stage_at ? new Date(new Date(r.stage_at).getTime() + 86400_000).toISOString() : null;

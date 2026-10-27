@@ -32,7 +32,7 @@ test('tanlov maydonlari va manba', () => {
   ];
   assert.deepEqual(selectValues(cfs, new Set([1, 2, 3])), { 1: 'facebook', 2: '$500-1000', 3: 'Ingliz, Rus' });
   assert.equal(selectValues([], new Set([1])), null);
-  assert.deepEqual(leadSource(cfs), { source: 'facebook', utmSource: null, utmContent: 'ad_123' });
+  assert.deepEqual(leadSource(cfs), { source: 'facebook', utmSource: null, utmContent: 'ad_123', utmCampaign: null, utmMedium: null });
   assert.equal(leadSource([{ field_name: 'utm_source', field_code: 'UTM_SOURCE', values: [{ value: 'instagram' }] }]).source, 'instagram');
 });
 

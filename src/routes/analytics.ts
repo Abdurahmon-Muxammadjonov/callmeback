@@ -8,6 +8,7 @@ import { addDays, dayBounds, isHhMm, tashkentDay, tashkentDayStart } from '../li
 import { reportRpc } from '../lib/reportRpc';
 import { operatorNamesByExt } from '../lib/operatorNames';
 import { computeCrmMoney } from '../lib/crmDeals';
+import { computeTarget } from '../lib/metaAds';
 import { computeLeadQuality } from '../lib/leadQuality';
 import {
   buildAnalyticsRoot, buildDailySummary, buildHourly, buildDailyMinutes, buildStaffStats,
@@ -585,6 +586,27 @@ router.get('/crm-money', requireAuth, async (req: CompanyAuthedRequest, res: Res
     return res.status(200).json({ success: true, from, to, data });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'CRM pul hisobotida xatolik.' });
+  }
+});
+
+// ============================================================================
+// GET /analytics/target?from&to — TARGET TAHLIL (2026-10-27, lib/metaAds.ts):
+// Meta Ads xarajati + amoCRM lidlari (kreativ = utm_content) + AI lid sifati:
+// CPL, sifatli lid narxi, sotuv narxi, ROAS/ROMI, kampaniya va kreativ kesimi.
+// Oraliq ko'pi bilan 92 kun.
+// ============================================================================
+router.get('/target', requireAuth, async (req: CompanyAuthedRequest, res: Response) => {
+  try {
+    const re = /^\d{4}-\d{2}-\d{2}$/;
+    const today = tashkentDay(new Date());
+    const to = typeof req.query.to === 'string' && re.test(req.query.to) ? req.query.to : today;
+    let from = typeof req.query.from === 'string' && re.test(req.query.from) ? req.query.from : addDays(to, -29);
+    if (from > to) from = to;
+    if (addDays(from, 92) < to) from = addDays(to, -91);
+    const data = await computeTarget(req.auth!.companyId as string, from, to);
+    return res.status(200).json({ success: true, from, to, data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Target tahlilida xatolik.' });
   }
 });
 

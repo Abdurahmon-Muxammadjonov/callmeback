@@ -177,6 +177,7 @@ export async function pushAnalyzedCall(callId: string): Promise<void> {
       .from('company_integrations')
       .select('id, provider, config, enabled, pushed_count')
       .eq('company_id', p.company_id)
+      .in('provider', ['amocrm', 'webhook']) // 'meta' — faqat o'qish (target), unga yozilmaydi
       .eq('enabled', true);
     if (error || !data?.length) return; // jadval hali yo'q yoki integratsiya yo'q
     for (const row of data as IntegrationRow[]) {

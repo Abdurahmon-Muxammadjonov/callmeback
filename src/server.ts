@@ -11,6 +11,7 @@ import companyTelegramRouter from './routes/company-telegram';
 import companyIntegrationsRouter from './routes/company-integrations';
 import { startTelegramReportScheduler } from './lib/telegramReport';
 import { startCrmDealsSync } from './lib/crmDeals';
+import { startMetaAdsSync } from './lib/metaAds';
 import { blockOperators } from './lib/operatorScope';
 import companyAuthRouter from './routes/company-auth';
 import companyRouter from './routes/company';
@@ -197,6 +198,7 @@ function startBackgroundJobs(): void {
   startUtelWorker();
   startTelegramReportScheduler(); // kun hisoboti Telegramga (lib/telegramReport.ts)
   startCrmDealsSync(); // amoCRM'dan to'lov/qarz ma'lumotlari (lib/crmDeals.ts)
+  startMetaAdsSync(); // Meta Ads xarajatlari — target tahlil (lib/metaAds.ts)
 
   // OPERATOR TAVSIYALARI (API v2 §10) — staff-stats GET so'rovi GPT
   // chaqirmaydi, matn shu jobda tayyorlanib operator_insights jadvaliga

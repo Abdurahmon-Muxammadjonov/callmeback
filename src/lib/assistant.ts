@@ -11,6 +11,7 @@
 //   get_call_summaries— qo'ng'iroqlar xulosasi (AI tahlil matni) — "audiodan xulosa"
 //   get_lead_quality  — sifatli/sifatsiz lid va sabablar
 //   get_sales         — amoCRM: sotuv, tushum, qarz, menejerlar (ulangan bo'lsa)
+//   get_target        — target reklama: xarajat, CPL, ROAS, kreativlar (Meta Ads)
 // Mijoz telefon raqami modelga yuborilmaydi.
 // ============================================================================
 
@@ -19,6 +20,7 @@ import { addDays, dayBounds, tashkentDay } from './tashkentTime';
 import { operatorNamesByExt } from './operatorNames';
 import { computeLeadQuality } from './leadQuality';
 import { buildSalesDashboard } from './salesDashboard';
+import { computeTarget } from './metaAds';
 
 const API_URL = 'https://api.openai.com/v1/chat/completions';
 const MODEL = process.env.OPENAI_ASSISTANT_MODEL || 'gpt-4o-mini';
@@ -100,6 +102,7 @@ const TOOLS = [
   { type: 'function', function: { name: 'get_call_summaries', description: "Tahlil qilingan qo'ng'iroqlar xulosasi (AI matni: nima bo'ldi, kelishuv, mijoz, ROP izohi). Audiolardan xulosa chiqarish, sabab va misollar uchun. filter: all | successful | unqualified | problem | low_score | high_score.", parameters: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' }, operator_ext: { type: 'string', description: 'ixtiyoriy: xodim ichki raqami' }, filter: { type: 'string', enum: ['all', 'successful', 'unqualified', 'problem', 'low_score', 'high_score'] }, limit: { type: 'integer', description: '1-40' } }, required: ['from', 'to'] } } },
   { type: 'function', function: { name: 'get_lead_quality', description: "Sifatli va sifatsiz lidlar, sifatsizlik sabablari, xodimlar bo'yicha.", parameters: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' } }, required: ['from', 'to'] } } },
   { type: 'function', function: { name: 'get_sales', description: "amoCRM sotuvlari: sotuv summasi va soni, tushgan pul, qarzdorlik, konversiya, o'rtacha chek, menejerlar, manbalar, yo'qotish sabablari.", parameters: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' } }, required: ['from', 'to'] } } },
+  { type: 'function', function: { name: 'get_target', description: "Target reklama (Meta: Instagram/Facebook): xarajat (so'mda), ko'rishlar, kliklar, CTR, lidlar, lid narxi (CPL), sifatli lid narxi, sotuvlar, sotuv narxi, ROAS/ROMI; kampaniya va kreativ (reels) kesimi, tavsiyalar.", parameters: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' } }, required: ['from', 'to'] } } },
 ] as const;
 
 async function runTool(companyId: string, name: string, args: any): Promise<unknown> {
@@ -163,6 +166,15 @@ async function runTool(companyId: string, name: string, args: any): Promise<unkn
       sources: ok(w.sources) && w.sources.leads.slice(0, 10).map((s: any) => ({ name: s.name, leads: s.leads, sales: s.sales, sum: s.sum })),
       lost: ok(w.lost) && { total: w.lost.total, top: w.lost.rows.slice(0, 8) },
       funnel: ok(w.funnel) && { total: w.funnel.total, sales: w.funnel.sales, conv: w.funnel.conv },
+    };
+  }
+  if (name === 'get_target') {
+    const d: any = await computeTarget(companyId, from, to);
+    if (!d.ready) return { note: 'target jadvali hali yo\'q' };
+    return {
+      from, to, meta_connected: d.connected, currency_rate: d.rate, totals: d.totals, recs: d.recs,
+      campaigns: d.campaigns.slice(0, 15),
+      creatives: d.creatives.slice(0, 25).map((c: any) => ({ ...c, thumb: undefined })),
     };
   }
   return { error: `noma'lum vosita: ${name}` };
