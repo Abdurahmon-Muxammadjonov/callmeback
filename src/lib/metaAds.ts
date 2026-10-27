@@ -21,6 +21,7 @@ import { addDays, dayBounds, tashkentDay } from './tashkentTime';
 import { decryptFor } from './passwordVault';
 import { CRM_SECRET_PURPOSE } from './crmPush';
 import { PAY_KINDS } from './crmDeals';
+import { sourceKey } from './salesDashboard';
 
 const GRAPH = `https://graph.facebook.com/${process.env.META_GRAPH_VERSION || 'v23.0'}`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -206,6 +207,7 @@ function metrics(a: Agg) {
     cps: paidAds && a.sales ? Math.round(a.spend / a.sales) : null,
     conv: a.leads ? r1((a.sales / a.leads) * 100) : null,
     qualifiedShare: a.qualified + a.unqualified ? r1((a.qualified / (a.qualified + a.unqualified)) * 100) : null,
+    avgCheck: a.sales ? Math.round(a.revenue / a.sales) : null,
     roas: a.spend > 0 ? Math.round((a.revenue / a.spend) * 100) / 100 : null,
     romi: a.spend > 0 ? r1(((a.revenue - a.spend) / a.spend) * 100) : null,
   };
@@ -294,8 +296,11 @@ export async function computeTarget(companyId: string, from: string, to: string)
     keyToAd.set(normKey(id), id); // utm_content ba'zan reklama ID'si (120245426592130623)
   }
 
-  // CRM lidlari: kreativga (utm_content), bo'lmasa faqat umumiyga.
+  // CRM lidlari: kreativga (utm_content), bo'lmasa faqat umumiyga. Meta
+  // ulanmagan bo'lsa hamma kreativ shu "CRM kreativlari" ro'yxatida
+  // ("Reels2" va "reels2" — bitta). Manba kesimi alohida.
   const unmatched = new Map<string, Agg & { name: string }>();
+  const bySource = new Map<string, Agg & { name: string }>();
   for (const l of tLeads) {
     const q = l.client_phone9 ? quality.get(l.client_phone9) : undefined;
     const s = sold(l);
@@ -308,6 +313,10 @@ export async function computeTarget(companyId: string, from: string, to: string)
       if (s) { x.sales += 1; x.revenue += rev; x.paid += paid; }
     };
     add(total);
+    const src = sourceKey(l.source ?? l.utm_source ?? null);
+    const sAgg = bySource.get(src) ?? { ...agg(), name: src };
+    add(sAgg);
+    bySource.set(src, sAgg);
     const day = tashkentDay(l.crm_created_at);
     const d = byDay.get(day) ?? agg();
     add(d);
@@ -319,8 +328,8 @@ export async function computeTarget(companyId: string, from: string, to: string)
       const c = [...byCampaign.values()].find((x) => x.name === a.campaign);
       if (c) add(c);
     } else if (l.utm_content) {
-      const k = String(l.utm_content);
-      const u = unmatched.get(k) ?? { ...agg(), name: k };
+      const k = normKey(l.utm_content) || String(l.utm_content);
+      const u = unmatched.get(k) ?? { ...agg(), name: String(l.utm_content) };
       add(u);
       unmatched.set(k, u);
     }
@@ -347,7 +356,20 @@ export async function computeTarget(companyId: string, from: string, to: string)
   if (topRoas) recs.push({ key: 'scale', v: { name: topRoas.name, roas: topRoas.roas! } });
   const noUtm = total.leads ? tLeads.filter((l) => !l.utm_content).length / total.leads : 0;
   if (noUtm >= 0.3) recs.push({ key: 'utm', v: { p: Math.round(noUtm * 100) } });
-  if (unmatched.size) recs.push({ key: 'unmatched', v: { names: [...unmatched.keys()].slice(0, 4).join(', ') } });
+  if (integ && unmatched.size) recs.push({ key: 'unmatched', v: { names: [...unmatched.values()].map((u) => u.name).slice(0, 4).join(', ') } });
+  // CRM bo'yicha (xarajatsiz) tavsiyalar — kreativlarning lid, sifat va sotuvi.
+  const crm = [...unmatched.values()].map((u) => ({ name: u.name, ...metrics(u) }));
+  const enough = crm.filter((c) => c.leads >= 20);
+  const bestConv = [...enough].filter((c) => c.sales > 0).sort((a, b) => (b.conv ?? 0) - (a.conv ?? 0))[0];
+  if (bestConv) recs.push({ key: 'crmBestConv', v: { name: bestConv.name, p: bestConv.conv ?? 0, n: bestConv.sales, leads: bestConv.leads } });
+  const topRev = [...crm].filter((c) => c.revenue > 0).sort((a, b) => b.revenue - a.revenue)[0];
+  if (topRev && topRev !== bestConv) recs.push({ key: 'crmTopRevenue', v: { name: topRev.name, sum: Math.round(topRev.revenue), n: topRev.sales } });
+  const dead = crm.filter((c) => c.leads >= 50 && c.sales === 0).sort((a, b) => b.leads - a.leads);
+  if (dead.length) recs.push({ key: 'crmNoSales', v: { names: dead.slice(0, 3).map((c) => `${c.name} (${c.leads})`).join(', '), n: dead.length } });
+  const crmJunk = crm.filter((c) => c.qualified + c.unqualified >= 5 && (c.qualifiedShare ?? 100) < 40);
+  if (crmJunk.length) recs.push({ key: 'crmLowQuality', v: { names: crmJunk.slice(0, 3).map((c) => c.name).join(', '), p: crmJunk[0].qualifiedShare ?? 0 } });
+  const rated = total.qualified + total.unqualified;
+  if (total.leads >= 50 && rated / total.leads < 0.2) recs.push({ key: 'crmFewRated', v: { p: Math.round((rated / total.leads) * 100) } });
 
   return {
     ready: true as const,
@@ -361,7 +383,8 @@ export async function computeTarget(companyId: string, from: string, to: string)
     daily: days.map((d) => ({ day: d, ...metrics(byDay.get(d) ?? agg()) })),
     campaigns: [...byCampaign.values()].map((c) => ({ id: c.id, name: c.name, ...metrics(c) })).sort((x, y) => y.spend - x.spend),
     creatives,
-    unmatched: [...unmatched.values()].map((u) => ({ name: u.name, ...metrics(u) })).sort((x, y) => y.leads - x.leads),
+    unmatched: crm.sort((x, y) => y.leads - x.leads),
+    sources: [...bySource.values()].map((x) => ({ name: x.name, ...metrics(x), share: total.leads ? r1((x.leads / total.leads) * 100) : 0 })).sort((x, y) => y.leads - x.leads),
     recs,
   };
 }
